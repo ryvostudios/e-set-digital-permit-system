@@ -1,0 +1,177 @@
+# Decisions
+
+This document records accepted decisions for the E-Set Digital Permit
+System, and separately tracks decisions that are explicitly **not yet
+resolved**. Open decisions must not be assumed or implemented until
+confirmed.
+
+## Accepted Decisions
+
+### Project Identity
+- This is a new, standalone application, separate from the E-Set Digital
+  Management System (different codebase, database, and deployment).
+- The V5.19 permit system is a business/workflow reference only; its
+  technical architecture is not carried over.
+
+### Technology
+- Frontend: React + Vite + TypeScript, as a PWA.
+- Backend: Node.js + Express + TypeScript, REST API.
+- Database: PostgreSQL via Supabase infrastructure; Supabase Auth may be
+  used for identity.
+- Validation: Zod. Forms: React Hook Form. Server-state/caching: TanStack
+  Query.
+- One consistent animation approach will be used; critical permit
+  operations never depend on animation.
+- API routes are versioned, beginning with `/api/v1/`.
+- Architecture starts as a modular monolith; no microservices, Redis,
+  Kubernetes, or message brokers without an actual current requirement.
+
+### Authorization
+- No directly assigned operational roles. Operational permissions are
+  derived: Team + Position -> Capabilities. Backend checks capabilities,
+  not role labels.
+- Authorization is default-deny.
+- Privileged management access (CEO, Site Manager) is separate from
+  operational capabilities:
+  - Only one active CEO at a time.
+  - CEO is not created through the ordinary user-management workflow and
+    is specially protected from normal modification/removal.
+  - Only the CEO may grant or revoke Site Manager access.
+  - A Site Manager cannot grant another Site Manager.
+  - Team + Position never automatically grants CEO or Site Manager
+    authority.
+  - Privileged access changes must be audited.
+  - Management privilege does not bypass permit data-integrity
+    protections.
+- V5.19's `SYSTEM_ADMIN` role is not assumed to exist in this system.
+
+### Numbering
+- Every permit has a Permit Number; every JSA has its own JSA Number.
+- Review, CRO send-back, HSE send-back, correction, resubmission, hold,
+  and resume all keep the same Permit Number and same JSA Number.
+- Only a post-midnight renewal creates a new Permit Number, keeping the
+  same JSA Number.
+- Number generation must eventually be atomic, unique, and
+  concurrency-safe.
+
+### Validity
+- Permits are valid only until the next midnight in the configured site
+  timezone (not a rolling 24-hour window), evaluated using authoritative
+  backend/database time — never client/browser/device time.
+
+### Review Workflow
+- Submission always goes to CRO first (`PENDING_CRO`).
+- CRO may review, send back for correction, and forward to HSE.
+  CRO send-back preserves Permit Number and JSA Number.
+- CRO forwarding to HSE moves the permit to `PENDING_HSE` and starts a
+  strict 5-minute HSE review window,
+  enforced via authoritative backend timestamps
+  (`hse_review_started_at`, `hse_review_deadline_at`); the browser
+  countdown is display-only.
+- Within the window, HSE may approve or send back (same Permit Number,
+  same JSA Number).
+- If HSE does not act within the window, CRO gains fallback approval
+  authority. Once CRO performs fallback approval, HSE can no longer act
+  on that completed approval cycle.
+- Issuance occurs via valid HSE approval or valid CRO fallback approval,
+  and records authoritative actor/timestamp plus an audit event.
+
+### CRO Workstation
+- Four CRO personnel total; normally one on duty/authenticated at a
+  time, using a shared workstation across shifts but individual
+  accounts.
+- No normal requirement for simultaneous CRO claim/assignment.
+- Pending-CRO permits remain in a common queue when no CRO is logged in.
+- Every CRO action records the actual authenticated CRO identity.
+- Backend concurrency protection is required regardless of the
+  single-active-CRO assumption.
+
+### Hold / Resume / Cancel / Closure / Renewal
+- Hold and Resume preserve Permit Number and JSA Number, and create
+  append-only lifecycle/audit events with actor, timestamp, and
+  reason/remarks where applicable.
+- Cancellation never deletes a permit; it preserves history and creates
+  an audit event.
+- Closure is performed only by CRO — there is no creator closure request
+  or creator final closure. Closed permits are immutable historical
+  records through ordinary operations.
+- Renewal occurs after midnight expiry, is performed by CRO, issues a
+  new Permit Number, keeps the same JSA Number, and preserves/links the
+  previous permit's history without overwriting or deleting it.
+
+### Forms / UI
+- Permit UI reflects the official permit form layout; the eventual
+  read-only PDF preserves the same field organization and form-style
+  presentation.
+- Required fields show a red asterisk and are enforced by backend
+  validation and database constraints where appropriate.
+- Company field includes ESET, SGRE, ZPL, Other; choosing Other allows
+  free-text entry.
+- Large checkbox sections support a logical "Check All" scoped per
+  logical section, not one global checkbox across unrelated sections.
+
+### PDF
+- Issued and closed permits get a generated, read-only PDF from
+  authoritative backend data, preserving the official form-style layout,
+  supporting View and Download, not user-editable within the
+  application. No digital-signature functionality is implemented; any
+  paper signature boxes are preserved visually unless specified
+  otherwise later.
+
+### Notifications
+- WhatsApp lifecycle notifications (ISSUED, HOLD, RESUMED, RENEWED,
+  CLOSED) are delivered via a future, decoupled agent/integration.
+  Permit/database actions never depend on notification delivery
+  succeeding; notifications are durable and retryable via an outbox
+  pattern, with future idempotency/unique event IDs to prevent
+  duplicates. The CRO PC has no WhatsApp agent yet, and the final
+  integration method is not decided (see Open Decisions).
+
+### Data Integrity
+- No silent overwrite: stale writes (e.g. editing an outdated version)
+  must be rejected (e.g. HTTP 409), not silently applied.
+- Critical operations (approval, hold, resume, cancel, renewal, closure,
+  Permit Number generation, JSA Number generation) must eventually be
+  atomic and concurrency-safe. Management/privileged users do not bypass
+  these protections.
+
+### Development Process
+- Development proceeds section by section: implement, run/verify
+  manually, lint, typecheck, test, build, security-review, inspect
+  `git diff`/`git status`, then commit — before starting the next
+  section.
+
+## Open Decisions
+
+These are explicitly **unresolved** and must not be implemented until
+confirmed. Do not invent behavior for these.
+
+1. **HSE window expired, fallback approval not yet performed.**
+   What is permitted, if anything, during the gap after the HSE
+   5-minute window has expired but before CRO has actually performed
+   fallback approval? (E.g.: can HSE still act during this gap? Is there
+   a distinct intermediate state? Is there a time limit on how long a
+   permit can sit in this gap?) See `WORKFLOW.md` → "HSE Five-Minute
+   Window."
+
+2. **Allowed states for Hold.**
+   The exact set of permit states from which CRO may place a permit on
+   Hold is not finalized (e.g. only `ISSUED`, or also mid-review
+   states?). See `WORKFLOW.md` → "Hold / Resume."
+
+3. **Allowed states for Cancel.**
+   The exact set of permit states from which CRO may cancel a permit is
+   not finalized and must be explicitly defined before implementation.
+   See `WORKFLOW.md` → "Cancel."
+
+4. **WhatsApp integration method.**
+   The final mechanism for WhatsApp group/agent integration (which
+   provider/API, how the CRO PC agent is installed, how it authenticates
+   to the WhatsApp group) is not decided and requires research/
+   verification before implementation. See `ARCHITECTURE.md` →
+   "Notifications (Future)."
+
+Additional open questions may be appended here as they are identified
+during future sections; each new entry should record enough context to
+be actionable later (what's undecided, why it matters, where it's
+referenced).
