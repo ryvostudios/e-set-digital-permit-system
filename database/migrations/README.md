@@ -14,6 +14,6 @@ Versioned, plain SQL migration files, applied in filename order by
 - No down/rollback files: forward-only migrations, consistent with this
   project's append-only/immutable-history principles (see `DATABASE.md`).
 
-No migrations exist yet. Business schema (permits, JSAs, users,
-teams/positions, capabilities, audit tables, etc.) is added in later,
-scoped implementation sections — not here.
+Migrations are added section by section as each is implemented. Permit
+and JSA business schema (permits, JSAs, audit tables, etc.) is added in
+later, scoped implementation sections — not here.

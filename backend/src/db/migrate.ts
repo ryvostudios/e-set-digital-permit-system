@@ -12,6 +12,12 @@ const MIGRATIONS_DIR = path.resolve(__dirname, '../../../database/migrations');
 // PostgreSQL session-level advisory lock (held on this dedicated client).
 const MIGRATION_LOCK_KEY = 7_298_183_340;
 
+// Every statement here is idempotent (safe to re-run on every migration
+// invocation, whether schema_migrations already existed or was just
+// created): CREATE TABLE IF NOT EXISTS, ENABLE ROW LEVEL SECURITY, and
+// REVOKE all no-op cleanly when already applied. This table is never
+// readable/writable by anon/authenticated (or PUBLIC) - only the
+// backend's own database role (table owner) uses it.
 async function ensureMigrationsTable(client: Client): Promise<void> {
   await client.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -20,6 +26,8 @@ async function ensureMigrationsTable(client: Client): Promise<void> {
       applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `);
+  await client.query('ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY');
+  await client.query('REVOKE ALL ON TABLE schema_migrations FROM PUBLIC, anon, authenticated');
 }
 
 async function getAppliedMigrations(client: Client): Promise<Set<string>> {
