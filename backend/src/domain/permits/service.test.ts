@@ -136,6 +136,13 @@ class FakeDb {
       const [jsaId, createdBy, siteTimezone] = params as [string, string, string];
       this.permitCounter += 1;
       this.permitSeq += 1;
+      // Offsetting each permit's created_at by its insertion order (like
+      // a real database's sub-millisecond timestamp precision would)
+      // keeps pagination ordering deterministic in these tests without
+      // every test having to manually advance `this.now` between
+      // creates - mirrors why the real SQL also adds `id` as a tiebreaker
+      // (see listOwnPermits/listPermitsByStatus in service.ts).
+      const createdAt = new Date(this.now.getTime() + this.permitCounter).toISOString();
       const permit: PermitRow = {
         id: `permit-${this.permitCounter}`,
         permit_sequence: String(this.permitSeq),
@@ -154,8 +161,8 @@ class FakeDb {
         closed_by: null,
         closed_at: null,
         closure_remarks: null,
-        created_at: this.now.toISOString(),
-        updated_at: this.now.toISOString(),
+        created_at: createdAt,
+        updated_at: createdAt,
       };
       return { rows: [this.setPermit(permit)] };
     }
@@ -312,19 +319,31 @@ class FakeDb {
         ],
       };
     }
-    if (sql.startsWith('SELECT * FROM permits WHERE created_by = $1')) {
-      const [createdBy] = params as [string];
+    if (sql.startsWith('SELECT * FROM permits WHERE created_by = $1 ORDER BY')) {
+      const [createdBy, limit, offset] = params as [string, number, number];
       const rows = [...this.permits.values()]
         .filter((p) => p.created_by === createdBy)
-        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+        .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
+        .slice(offset, offset + limit);
       return { rows };
     }
-    if (sql.startsWith('SELECT * FROM permits WHERE status = $1')) {
-      const [status] = params as [PermitRow['status']];
+    if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE created_by = $1')) {
+      const [createdBy] = params as [string];
+      const count = [...this.permits.values()].filter((p) => p.created_by === createdBy).length;
+      return { rows: [{ count: String(count) }] };
+    }
+    if (sql.startsWith('SELECT * FROM permits WHERE status = $1 ORDER BY')) {
+      const [status, limit, offset] = params as [PermitRow['status'], number, number];
       const rows = [...this.permits.values()]
         .filter((p) => p.status === status)
-        .sort((a, b) => a.created_at.localeCompare(b.created_at));
+        .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+        .slice(offset, offset + limit);
       return { rows };
+    }
+    if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE status = $1')) {
+      const [status] = params as [PermitRow['status']];
+      const count = [...this.permits.values()].filter((p) => p.status === status).length;
+      return { rows: [{ count: String(count) }] };
     }
     if (sql.startsWith('SELECT * FROM permit_lifecycle_events WHERE permit_id = $1')) {
       const [permitId] = params as [string];
@@ -1144,20 +1163,130 @@ test('getJsaById throws for an id with no matching row (FK-guaranteed invariant,
   await assert.rejects(() => getJsaById('no-such-jsa', db.deps()));
 });
 
+const DEFAULT_PAGE = { page: 1, pageSize: 20 };
+
 test('listOwnPermits returns only the given user\'s permits, most recent first', async () => {
   const db = new FakeDb();
   const first = await createDraftPermit('owner-a', 'UTC', db.deps());
   const second = await createDraftPermit('owner-a', 'UTC', db.deps());
   await createDraftPermit('owner-b', 'UTC', db.deps());
 
-  const results = await listOwnPermits('owner-a', db.deps());
+  const page = await listOwnPermits('owner-a', DEFAULT_PAGE, db.deps());
 
-  assert.equal(results.length, 2);
-  assert.ok(results.every((p) => p.created_by === 'owner-a'));
+  assert.equal(page.items.length, 2);
+  assert.ok(page.items.every((p) => p.created_by === 'owner-a'));
   assert.deepEqual(
-    results.map((p) => p.id).sort(),
+    page.items.map((p) => p.id).sort(),
     [first.permit.id, second.permit.id].sort(),
   );
+  // most recent first: `second` was created after `first`.
+  assert.deepEqual(page.items.map((p) => p.id), [second.permit.id, first.permit.id]);
+});
+
+test('listOwnPermits: pagination metadata is accurate, and a page never includes another user\'s permits (no cross-user leakage under pagination)', async () => {
+  const db = new FakeDb();
+  for (let i = 0; i < 5; i += 1) {
+    await createDraftPermit('owner-a', 'UTC', db.deps());
+  }
+  await createDraftPermit('owner-b', 'UTC', db.deps());
+
+  const firstPage = await listOwnPermits('owner-a', { page: 1, pageSize: 2 }, db.deps());
+  const secondPage = await listOwnPermits('owner-a', { page: 2, pageSize: 2 }, db.deps());
+  const thirdPage = await listOwnPermits('owner-a', { page: 3, pageSize: 2 }, db.deps());
+
+  assert.equal(firstPage.totalCount, 5);
+  assert.equal(firstPage.totalPages, 3);
+  assert.equal(firstPage.items.length, 2);
+  assert.equal(firstPage.hasNextPage, true);
+  assert.equal(firstPage.hasPreviousPage, false);
+
+  assert.equal(secondPage.items.length, 2);
+  assert.equal(secondPage.hasNextPage, true);
+  assert.equal(secondPage.hasPreviousPage, true);
+
+  assert.equal(thirdPage.items.length, 1);
+  assert.equal(thirdPage.hasNextPage, false);
+  assert.equal(thirdPage.hasPreviousPage, true);
+
+  const allIds = [...firstPage.items, ...secondPage.items, ...thirdPage.items].map((p) => p.id);
+  assert.equal(new Set(allIds).size, 5, 'no permit repeated across pages');
+  assert.ok(
+    [...firstPage.items, ...secondPage.items, ...thirdPage.items].every((p) => p.created_by === 'owner-a'),
+    'owner-b\'s permit must never appear on any of owner-a\'s pages',
+  );
+});
+
+test('listOwnPermits: an empty result set reports zero totalPages/totalCount, not an error', async () => {
+  const db = new FakeDb();
+  const page = await listOwnPermits('nobody-has-created-anything', DEFAULT_PAGE, db.deps());
+  assert.deepEqual(page.items, []);
+  assert.equal(page.totalCount, 0);
+  assert.equal(page.totalPages, 0);
+  assert.equal(page.hasNextPage, false);
+  assert.equal(page.hasPreviousPage, false);
+});
+
+// --- Service-layer pagination defense: independently re-derives every
+// invariant (page shape, pageSize shape, THEN the computed offset) from
+// scratch, never assuming route-level validation already ran - see
+// `pageOffset` in service.ts. Every invalid case below must reject
+// BEFORE any SQL query executes (proven via `db.queries.length === 0`
+// after the rejection), and never silently clamp to a nearby valid
+// value.
+
+const INVALID_PAGE_PARAMS: Array<{ label: string; pageParams: { page: number; pageSize: number } }> = [
+  { label: 'page = 0', pageParams: { page: 0, pageSize: 20 } },
+  { label: 'page = -1', pageParams: { page: -1, pageSize: 20 } },
+  { label: 'fractional page', pageParams: { page: 1.5, pageSize: 20 } },
+  { label: 'unsafe-integer page', pageParams: { page: Number.MAX_SAFE_INTEGER + 10, pageSize: 20 } },
+  { label: 'pageSize = 0', pageParams: { page: 1, pageSize: 0 } },
+  { label: 'negative pageSize', pageParams: { page: 1, pageSize: -5 } },
+  { label: 'fractional pageSize', pageParams: { page: 1, pageSize: 2.5 } },
+  { label: 'pageSize > 100', pageParams: { page: 1, pageSize: 101 } },
+  { label: 'unsafe-integer pageSize', pageParams: { page: 1, pageSize: Number.MAX_SAFE_INTEGER } },
+  { label: 'offset above 100000', pageParams: { page: 1002, pageSize: 100 } },
+];
+
+for (const { label, pageParams } of INVALID_PAGE_PARAMS) {
+  test(`listOwnPermits: rejects ${label} before any SQL query executes (defensive, independent of route validation)`, async () => {
+    const db = new FakeDb();
+    await assert.rejects(() => listOwnPermits('owner-a', pageParams, db.deps()), RangeError);
+    assert.equal(db.queries.length, 0, 'no SQL query should have run for an invalid pageParams');
+  });
+
+  test(`listPermitsByStatus: rejects ${label} before any SQL query executes (defensive, independent of route validation)`, async () => {
+    const db = new FakeDb();
+    await assert.rejects(() => listPermitsByStatus('ISSUED', pageParams, db.deps()), RangeError);
+    assert.equal(db.queries.length, 0, 'no SQL query should have run for an invalid pageParams');
+  });
+}
+
+test('listOwnPermits: the exact maximum allowed offset (100_000) succeeds - the boundary itself is valid, not rejected', async () => {
+  const db = new FakeDb();
+  const page = await listOwnPermits('owner-a', { page: 1001, pageSize: 100 }, db.deps());
+  assert.deepEqual(page.items, []);
+  assert.ok(db.queries.length > 0, 'a valid request must still actually query the database');
+});
+
+test('listPermitsByStatus: the exact maximum allowed offset (100_000) succeeds', async () => {
+  const db = new FakeDb();
+  const page = await listPermitsByStatus('ISSUED', { page: 1001, pageSize: 100 }, db.deps());
+  assert.deepEqual(page.items, []);
+  assert.ok(db.queries.length > 0, 'a valid request must still actually query the database');
+});
+
+test('listOwnPermits: ordinary valid pagination still succeeds unaffected by the defensive checks', async () => {
+  const db = new FakeDb();
+  await createDraftPermit('owner-a', 'UTC', db.deps());
+  const page = await listOwnPermits('owner-a', { page: 1, pageSize: 20 }, db.deps());
+  assert.equal(page.items.length, 1);
+});
+
+test('listPermitsByStatus: ordinary valid pagination still succeeds unaffected by the defensive checks', async () => {
+  const db = new FakeDb();
+  const pendingHse = await createPendingHsePermit(db, 'owner-a');
+  const page = await listPermitsByStatus('PENDING_HSE', { page: 1, pageSize: 20 }, db.deps());
+  assert.deepEqual(page.items.map((p) => p.id), [pendingHse.id]);
 });
 
 test('listPermitsByStatus returns only permits currently in that status, regardless of who created them', async () => {
@@ -1165,10 +1294,30 @@ test('listPermitsByStatus returns only permits currently in that status, regardl
   const pendingHse = await createPendingHsePermit(db, 'owner-a');
   await createDraftPermit('owner-b', 'UTC', db.deps());
 
-  const results = await listPermitsByStatus('PENDING_HSE', db.deps());
+  const page = await listPermitsByStatus('PENDING_HSE', DEFAULT_PAGE, db.deps());
 
-  assert.equal(results.length, 1);
-  assert.equal(results[0]?.id, pendingHse.id);
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0]?.id, pendingHse.id);
+});
+
+test('listPermitsByStatus: pagination metadata is accurate and ordering is oldest-first (FIFO) across pages', async () => {
+  const db = new FakeDb();
+  const permits = [];
+  for (let i = 0; i < 3; i += 1) {
+    const { permit } = await createDraftPermit('someone', 'UTC', db.deps());
+    permits.push(permit);
+  }
+
+  const firstPage = await listPermitsByStatus('DRAFT', { page: 1, pageSize: 2 }, db.deps());
+  const secondPage = await listPermitsByStatus('DRAFT', { page: 2, pageSize: 2 }, db.deps());
+
+  assert.equal(firstPage.totalCount, 3);
+  assert.equal(firstPage.totalPages, 2);
+  assert.deepEqual(
+    firstPage.items.map((p) => p.id),
+    [permits[0]?.id, permits[1]?.id],
+  );
+  assert.deepEqual(secondPage.items.map((p) => p.id), [permits[2]?.id]);
 });
 
 test('getPermitLifecycleEvents returns the append-only history for a permit, in order', async () => {

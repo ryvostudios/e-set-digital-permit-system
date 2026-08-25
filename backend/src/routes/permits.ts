@@ -23,6 +23,7 @@ import {
   updateDraftPermit,
   type JsaRow,
   type LifecycleEventRow,
+  type Page,
   type PermitRow,
 } from '../domain/permits/service.js';
 import {
@@ -31,12 +32,14 @@ import {
   fallbackApproveBodySchema,
   forwardToHseBodySchema,
   hseApproveBodySchema,
+  paginationQuerySchema,
   permitIdParamsSchema,
   permitQueueQuerySchema,
   submitPermitBodySchema,
   updatePermitBodySchema,
 } from '../domain/permits/validation.js';
 import { requireAuth } from '../middleware/auth.js';
+import { mutationLimiter } from '../middleware/rateLimit.js';
 import { requireCapability } from '../middleware/requireCapability.js';
 
 export const permitsRouter = Router();
@@ -51,6 +54,18 @@ function serializePermit(permit: PermitRow) {
 
 function serializeJsa(jsa: JsaRow) {
   return { ...jsa, jsaDisplayNumber: toDisplayNumber(BigInt(jsa.jsa_sequence)) };
+}
+
+/** The pagination metadata block attached to every paginated list response - the same shape regardless of which list endpoint produced it. */
+function serializePagination(page: Page<unknown>) {
+  return {
+    page: page.page,
+    pageSize: page.pageSize,
+    totalCount: page.totalCount,
+    totalPages: page.totalPages,
+    hasNextPage: page.hasNextPage,
+    hasPreviousPage: page.hasPreviousPage,
+  };
 }
 
 function sendValidationError(res: Response, issues: unknown): void {
@@ -81,7 +96,7 @@ function getAuthenticatedUserId(req: Request, res: Response): string | null {
 // permits (created_by) at the service layer - capability alone is never
 // enough for object access (SECURITY.md IDOR/BOLA guidance).
 
-permitsRouter.post('/permits', requireAuth, requireCapability('permit.create'), async (req: Request, res: Response) => {
+permitsRouter.post('/permits', requireAuth, mutationLimiter, requireCapability('permit.create'), async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   if (!userId) return;
 
@@ -109,13 +124,25 @@ permitsRouter.post('/permits', requireAuth, requireCapability('permit.create'), 
  * lost it must still be able to see their own history; requiring
  * `permit.create` here would incorrectly couple "can list what I already
  * created" to "can create new ones".
+ *
+ * Paginated (`page`/`pageSize` query params, validated/clamped by
+ * `paginationQuerySchema` - safe defaults, hard max page size) so this
+ * can never retrieve an unbounded result set; omitting both params keeps
+ * working exactly as before pagination was added (page 1, the default
+ * page size), just now with a `pagination` block alongside `permits`.
  */
 permitsRouter.get('/permits/mine', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   if (!userId) return;
 
-  const permits = await listOwnPermits(userId);
-  res.status(200).json({ permits: permits.map(serializePermit) });
+  const query = paginationQuerySchema.safeParse(req.query);
+  if (!query.success) {
+    sendValidationError(res, query.error.issues);
+    return;
+  }
+
+  const page = await listOwnPermits(userId, query.data);
+  res.status(200).json({ permits: page.items.map(serializePermit), pagination: serializePagination(page) });
 });
 
 /**
@@ -127,6 +154,9 @@ permitsRouter.get('/permits/mine', requireAuth, async (req: Request, res: Respon
  * default-deny resolver (`resolveUserCapabilities`) and the same
  * status->capability mapping that governs read access to a single permit
  * (`domain/permits/access.ts`), so it can't drift from that.
+ *
+ * Paginated the same way, and for the same reason, as `/permits/mine`
+ * above (`permitQueueQuerySchema` composes `paginationQuerySchema`).
  */
 permitsRouter.get('/permits/queue', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
@@ -146,8 +176,8 @@ permitsRouter.get('/permits/queue', requireAuth, async (req: Request, res: Respo
     return;
   }
 
-  const permits = await listPermitsByStatus(query.data.status);
-  res.status(200).json({ permits: permits.map(serializePermit) });
+  const page = await listPermitsByStatus(query.data.status, query.data);
+  res.status(200).json({ permits: page.items.map(serializePermit), pagination: serializePagination(page) });
 });
 
 /**
@@ -235,6 +265,7 @@ permitsRouter.get('/permits/:id/history', requireAuth, async (req: Request, res:
 permitsRouter.patch(
   '/permits/:id',
   requireAuth,
+  mutationLimiter,
   requireCapability('permit.create'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
@@ -272,6 +303,7 @@ permitsRouter.patch(
 permitsRouter.post(
   '/permits/:id/submit',
   requireAuth,
+  mutationLimiter,
   requireCapability('permit.submit'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
@@ -318,6 +350,7 @@ permitsRouter.post(
 permitsRouter.post(
   '/permits/:id/forward-hse',
   requireAuth,
+  mutationLimiter,
   requireCapability('permit.forward_hse'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
@@ -351,6 +384,7 @@ permitsRouter.post(
 permitsRouter.post(
   '/permits/:id/hse-approve',
   requireAuth,
+  mutationLimiter,
   requireCapability('permit.hse_review'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
@@ -384,6 +418,7 @@ permitsRouter.post(
 permitsRouter.post(
   '/permits/:id/fallback-approve',
   requireAuth,
+  mutationLimiter,
   requireCapability('permit.fallback_approve'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
@@ -432,6 +467,7 @@ permitsRouter.post(
 permitsRouter.post(
   '/permits/:id/close',
   requireAuth,
+  mutationLimiter,
   requireCapability('permit.close'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);

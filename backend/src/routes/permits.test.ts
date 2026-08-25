@@ -91,11 +91,17 @@ before(() => {
     if (sql.startsWith('SELECT DISTINCT c.name')) {
       return { rows: grantedCapabilities.map((name) => ({ name })) };
     }
-    if (sql.startsWith('SELECT * FROM permits WHERE created_by')) {
+    if (sql.startsWith('SELECT * FROM permits WHERE created_by = $1 ORDER BY')) {
       return { rows: mockOwnPermitRows };
+    }
+    if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE created_by')) {
+      return { rows: [{ count: String(mockOwnPermitRows.length) }] };
     }
     if (sql.startsWith('SELECT * FROM permits WHERE status')) {
       return { rows: mockQueuePermitRows };
+    }
+    if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE status')) {
+      return { rows: [{ count: String(mockQueuePermitRows.length) }] };
     }
     if (sql.startsWith('SELECT * FROM permits WHERE id = $1')) {
       // getPermitById - permit only, no JSA join. Authorization
@@ -230,6 +236,20 @@ test('POST /permits/:id/close lets an authenticated actor with permit.close reac
   }
 });
 
+test('POST /permits/:id/close is covered by the mutation rate limiter (RateLimit-* response headers present)', async () => {
+  grantedCapabilities = ['permit.close'];
+  const { url, close } = await startServer();
+  try {
+    const res = await closeRequest(url, VALID_TOKEN);
+    // `standardHeaders: 'draft-7'` (see middleware/rateLimit.ts) emits a
+    // single combined `RateLimit` header (e.g. "limit=30, remaining=29,
+    // reset=900"), not the older per-field RateLimit-Limit/-Remaining.
+    assert.ok(res.headers.get('ratelimit'), 'expected a RateLimit response header from the mutation limiter');
+  } finally {
+    await close();
+  }
+});
+
 test('the close route is bound specifically to permit.close, not any other permit.* capability', async () => {
   grantedCapabilities = [
     'permit.create',
@@ -265,8 +285,73 @@ test('GET /permits/mine is ownership-based, not permit.create-gated: an authenti
   try {
     const res = await getRequest(url, '/permits/mine', VALID_TOKEN);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { permits: unknown[] };
+    const body = (await res.json()) as { permits: unknown[]; pagination: Record<string, unknown> };
     assert.equal(body.permits.length, 1);
+    assert.deepEqual(body.pagination, {
+      page: 1,
+      pageSize: 20,
+      totalCount: 1,
+      totalPages: 1,
+      hasNextPage: false,
+      hasPreviousPage: false,
+    });
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/mine accepts page/pageSize query params and reflects them in the pagination metadata', async () => {
+  grantedCapabilities = [];
+  mockOwnPermitRows = [makePermitDetailRow({ created_by: AUTHENTICATED_USER_ID })];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, '/permits/mine?page=2&pageSize=5', VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pagination: Record<string, unknown> };
+    assert.equal(body.pagination.page, 2);
+    assert.equal(body.pagination.pageSize, 5);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/mine rejects an out-of-range page (400)', async () => {
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, '/permits/mine?page=0', VALID_TOKEN)).status, 400);
+    assert.equal((await getRequest(url, '/permits/mine?page=-1', VALID_TOKEN)).status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/mine enforces the hard maximum page size - a client cannot request an unbounded result set (400)', async () => {
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, '/permits/mine?pageSize=101', VALID_TOKEN)).status, 400);
+    assert.equal((await getRequest(url, '/permits/mine?pageSize=1000000', VALID_TOKEN)).status, 400);
+    assert.equal((await getRequest(url, '/permits/mine?pageSize=100', VALID_TOKEN)).status, 200);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/mine: a syntactically valid but pathological offset (huge page x pageSize) is rejected (400), even though page/pageSize individually pass their own bounds', async () => {
+  grantedCapabilities = [];
+  mockOwnPermitRows = [];
+  const { url, close } = await startServer();
+  try {
+    // (1001 - 1) * 100 === 100_000, the exact documented maximum offset - accepted.
+    assert.equal((await getRequest(url, '/permits/mine?page=1001&pageSize=100', VALID_TOKEN)).status, 200);
+    // (1002 - 1) * 100 === 100_100, one page beyond it - rejected.
+    assert.equal((await getRequest(url, '/permits/mine?page=1002&pageSize=100', VALID_TOKEN)).status, 400);
+    // page alone is a "valid" positive integer, but the resulting offset is nowhere near safe/sane.
+    assert.equal(
+      (await getRequest(url, `/permits/mine?page=${Number.MAX_SAFE_INTEGER}&pageSize=100`, VALID_TOKEN)).status,
+      400,
+    );
   } finally {
     await close();
   }
@@ -294,10 +379,12 @@ test('GET /permits/mine never queries by anything other than the authenticated c
     await getRequest(url, '/permits/mine', VALID_TOKEN);
     const ownPermitsQuery = capturedQueries.find((q) => q.sql.startsWith('SELECT * FROM permits WHERE created_by'));
     assert.ok(ownPermitsQuery, 'expected the own-permits query to have run');
-    // The request has no path/query/body field for an identity at all -
-    // this is the authenticated actor's own id (from the verified
-    // token), never anything a client could supply.
-    assert.deepEqual(ownPermitsQuery?.params, [AUTHENTICATED_USER_ID]);
+    // The first (identity) param is never anything a client could
+    // supply - it's the authenticated actor's own id, from the verified
+    // token. The remaining params are the default pagination bounds
+    // (pageSize/offset), not an identity of any kind.
+    assert.equal(ownPermitsQuery?.params[0], AUTHENTICATED_USER_ID);
+    assert.deepEqual(ownPermitsQuery?.params, [AUTHENTICATED_USER_ID, 20, 0]);
   } finally {
     await close();
   }
@@ -383,6 +470,70 @@ test('GET /permits/queue?status=PENDING_CRO: an unrelated permit capability does
   const { url, close } = await startServer();
   try {
     assert.equal((await getRequest(url, '/permits/queue?status=PENDING_CRO', VALID_TOKEN)).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/queue returns paginated results with pagination metadata, defaulting page/pageSize when omitted', async () => {
+  mockQueuePermitRows = [makePermitDetailRow({ status: 'PENDING_CRO' })];
+  grantedCapabilities = ['permit.cro_review'];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, '/permits/queue?status=PENDING_CRO', VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { permits: unknown[]; pagination: Record<string, unknown> };
+    assert.equal(body.permits.length, 1);
+    assert.deepEqual(body.pagination, {
+      page: 1,
+      pageSize: 20,
+      totalCount: 1,
+      totalPages: 1,
+      hasNextPage: false,
+      hasPreviousPage: false,
+    });
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/queue rejects an invalid pageSize (400) - hard maximum enforced the same way as /permits/mine', async () => {
+  grantedCapabilities = ['permit.cro_review'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, '/permits/queue?status=PENDING_CRO&pageSize=0', VALID_TOKEN)).status, 400);
+    assert.equal((await getRequest(url, '/permits/queue?status=PENDING_CRO&pageSize=101', VALID_TOKEN)).status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/queue: a pathological offset is rejected (400) even when status is valid and the capability is held - no ownership/status leakage regression (the query never even runs)', async () => {
+  grantedCapabilities = ['permit.cro_review'];
+  mockQueuePermitRows = [];
+  const { url, close } = await startServer();
+  try {
+    assert.equal(
+      (await getRequest(url, '/permits/queue?status=PENDING_CRO&page=1001&pageSize=100', VALID_TOKEN)).status,
+      200,
+    );
+    assert.equal(
+      (await getRequest(url, '/permits/queue?status=PENDING_CRO&page=1002&pageSize=100', VALID_TOKEN)).status,
+      400,
+    );
+    const statusQueryBeforeExcessive = capturedQueries.filter((q) => q.sql.startsWith('SELECT * FROM permits WHERE status'));
+    // Only the accepted (page=1001) request above should have reached the database.
+    assert.equal(statusQueryBeforeExcessive.length, 1);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/queue: an invalid pagination param is rejected (400) even when the status is valid and the capability is held - validation runs regardless', async () => {
+  grantedCapabilities = ['permit.cro_review'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, '/permits/queue?status=PENDING_CRO&page=abc', VALID_TOKEN)).status, 400);
   } finally {
     await close();
   }

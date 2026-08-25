@@ -135,6 +135,40 @@ confirmed.
   atomic and concurrency-safe. Management/privileged users do not bypass
   these protections.
 
+### Production Hardening
+- Rate limiting is backend-wide, in-memory, per-instance
+  (`express-rate-limit`'s default store) - consistent with "no
+  microservices/Redis/etc. without an actual current requirement"
+  (Technology, above) at this project's current single-instance scale.
+  This is a deliberate, documented tradeoff, not an oversight: see
+  `DEPLOYMENT.md` for the exact horizontal-scaling constraint it implies
+  and what replacing it (a shared/Redis-backed store) would require.
+- A global limit applies to every request regardless of authentication
+  state (so authenticating can never exempt a client from it); a
+  stricter limit, keyed by authenticated actor id, applies in addition
+  to every state-changing permit endpoint. This backend has no
+  password login/signup endpoint of its own (the frontend authenticates
+  directly against Supabase Auth), so there is no separate "login route"
+  to rate-limit; the mutation-endpoint limit is the closest equivalent.
+- Trusted-proxy configuration (`TRUST_PROXY_CIDRS`) is an explicit
+  address/network allowlist, never a hop count and never a wildcard -
+  a hop count trusts any address that many hops back, which cannot tell
+  a real reverse proxy apart from an attacker directly connecting and
+  forging that many `X-Forwarded-For` entries itself. This is not
+  sufficient on its own: it is only meaningful given the additional,
+  required network-topology constraint that the backend is not publicly
+  reachable except through that proxy (firewall/security-group/private
+  network) - see `DEPLOYMENT.md`'s "Network topology requirement."
+- Every numeric/timing environment variable (port, database pool size/
+  timeouts, rate-limit window/counts, pagination page size) has a
+  documented, enforced practical range, not just "must be a positive
+  integer" - an unbounded value is itself a footgun (e.g. a
+  millisecond delay is a Node timer value internally, with its own
+  overflow ceiling; an unbounded pagination offset is a pathological
+  database query). Out-of-range configuration fails startup/the request
+  validation it applies to; it is never silently clamped to the nearest
+  valid value.
+
 ### Development Process
 - Development proceeds section by section: implement, run/verify
   manually, lint, typecheck, test, build, security-review, inspect

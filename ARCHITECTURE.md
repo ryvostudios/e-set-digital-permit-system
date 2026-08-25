@@ -158,6 +158,22 @@ Permit/database actions must remain valid and complete even if WhatsApp
 delivery is unavailable, delayed, or fails. The specific integration
 method is not yet decided (see `DECISIONS.md`).
 
+## Production Hardening
+
+The backend includes: backend-wide rate limiting (in-memory,
+per-instance - a deliberate application of "no infrastructure without an
+actual current requirement" below; see `DEPLOYMENT.md` for the
+documented scaling constraint this implies), security response headers,
+a bounded request body size, sanitized error responses (no stack
+traces/SQL/internal detail ever reach a client), strict startup
+environment validation (fails fast on missing/invalid production
+config), a `/ready` readiness endpoint alongside the existing `/health`
+liveness endpoint, and structured per-request logging (correlation id;
+never logs tokens, the `Authorization` header, or request/response
+bodies). See `SECURITY.md`'s "Implemented Production Hardening" and
+`DEPLOYMENT.md` for detail and the manual configuration this still
+requires per deployment.
+
 ## Scalability Principle
 
 Design modules and interfaces so the system can later support additional

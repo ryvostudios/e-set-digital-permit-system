@@ -1,5 +1,6 @@
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import { query, withTransaction } from '../../db/pool.js';
+import { MAX_PAGE_SIZE, MAX_PAGINATION_OFFSET } from './validation.js';
 
 export type PermitStatus = 'DRAFT' | 'PENDING_CRO' | 'PENDING_HSE' | 'ISSUED' | 'CLOSED';
 export type Company = 'ESET' | 'SGRE' | 'ZPL' | 'OTHER';
@@ -213,31 +214,116 @@ export async function getPermitWithJsa(
   return row ? splitPermitJsaRow(row) : null;
 }
 
-/** Every permit `actorUserId` created, most recent first - the creator's own list/dashboard view. */
+export interface PageParams {
+  /** 1-based. */
+  page: number;
+  pageSize: number;
+}
+
+export interface Page<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+}
+
+/** Shared shape/math for every paginated list below - so `hasNextPage`/`totalPages` can't drift between them. */
+function toPage<T>(items: T[], pageParams: PageParams, totalCount: number): Page<T> {
+  const totalPages = totalCount === 0 ? 0 : Math.ceil(totalCount / pageParams.pageSize);
+  return {
+    items,
+    page: pageParams.page,
+    pageSize: pageParams.pageSize,
+    totalCount,
+    totalPages,
+    hasNextPage: pageParams.page < totalPages,
+    hasPreviousPage: pageParams.page > 1,
+  };
+}
+
+/**
+ * The route layer already rejects an invalid `page`/`pageSize` (and any
+ * combination whose offset exceeds `MAX_PAGINATION_OFFSET`) before this
+ * is ever called - see
+ * `domain/permits/validation.ts::{paginationQuerySchema,rejectExcessivePaginationOffset}`.
+ * This does NOT assume that already happened: it independently
+ * re-derives every invariant from scratch (page/pageSize shape first,
+ * then the offset computed from them), so a pathological OFFSET can
+ * never reach the database even if some future caller invoked
+ * `listOwnPermits`/`listPermitsByStatus` directly, bypassing route
+ * validation entirely. Throws (never clamps) before any query runs.
+ */
+function pageOffset(pageParams: PageParams): number {
+  const { page, pageSize } = pageParams;
+
+  if (!Number.isSafeInteger(page) || page < 1) {
+    throw new RangeError(`invalid pagination: page must be a safe integer >= 1 (got ${page})`);
+  }
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
+    throw new RangeError(`invalid pagination: pageSize must be a safe integer in [1, ${MAX_PAGE_SIZE}] (got ${pageSize})`);
+  }
+
+  const offset = (page - 1) * pageSize;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > MAX_PAGINATION_OFFSET) {
+    throw new RangeError(
+      `invalid pagination: offset must be a safe integer in [0, ${MAX_PAGINATION_OFFSET}] (page=${page}, pageSize=${pageSize}, offset=${offset})`,
+    );
+  }
+  return offset;
+}
+
+/**
+ * Every permit `actorUserId` created, most recent first - the creator's
+ * own list/dashboard view. Bounded by `pageParams` (validated/clamped
+ * before this is ever called - see `domain/permits/validation.ts::paginationQuerySchema`),
+ * so this never retrieves an unbounded result set regardless of how many
+ * permits the caller has created. `created_at DESC, id DESC` is a
+ * deterministic total order - `id` breaks ties when two permits share a
+ * `created_at` (otherwise possible, if not likely, and would otherwise
+ * make page boundaries non-deterministic under LIMIT/OFFSET).
+ */
 export async function listOwnPermits(
   actorUserId: string,
+  pageParams: PageParams,
   deps: PermitsServiceDeps = defaultDeps,
-): Promise<PermitRow[]> {
-  const result = await deps.query<PermitRow>('SELECT * FROM permits WHERE created_by = $1 ORDER BY created_at DESC', [
-    actorUserId,
+): Promise<Page<PermitRow>> {
+  const [rowsResult, countResult] = await Promise.all([
+    deps.query<PermitRow>(
+      'SELECT * FROM permits WHERE created_by = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3',
+      [actorUserId, pageParams.pageSize, pageOffset(pageParams)],
+    ),
+    deps.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM permits WHERE created_by = $1', [
+      actorUserId,
+    ]),
   ]);
-  return result.rows;
+  return toPage(rowsResult.rows, pageParams, Number(countResult.rows[0]?.count ?? '0'));
 }
 
 /**
  * Every permit currently in `status`, oldest first (FIFO work queue) -
  * not scoped by ownership. Callers authorize which `status` a given
  * caller may request (see `domain/permits/access.ts::STATUS_VIEW_CAPABILITIES`)
- * before calling this.
+ * before calling this. Bounded by `pageParams` the same way, and for the
+ * same reason, as `listOwnPermits` above; `created_at ASC, id ASC` keeps
+ * the FIFO ordering deterministic under LIMIT/OFFSET for the same
+ * tie-breaking reason.
  */
 export async function listPermitsByStatus(
   status: PermitStatus,
+  pageParams: PageParams,
   deps: PermitsServiceDeps = defaultDeps,
-): Promise<PermitRow[]> {
-  const result = await deps.query<PermitRow>('SELECT * FROM permits WHERE status = $1 ORDER BY created_at ASC', [
-    status,
+): Promise<Page<PermitRow>> {
+  const [rowsResult, countResult] = await Promise.all([
+    deps.query<PermitRow>(
+      'SELECT * FROM permits WHERE status = $1 ORDER BY created_at ASC, id ASC LIMIT $2 OFFSET $3',
+      [status, pageParams.pageSize, pageOffset(pageParams)],
+    ),
+    deps.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM permits WHERE status = $1', [status]),
   ]);
-  return result.rows;
+  return toPage(rowsResult.rows, pageParams, Number(countResult.rows[0]?.count ?? '0'));
 }
 
 /** A permit's full append-only lifecycle history, in the order it happened. */

@@ -15,9 +15,12 @@ is not being ported into this system.
 
 ## Project Stage
 
-**Documentation / planning stage.** No application code, dependencies,
-frameworks, or database schema exist yet. This repository currently
-contains only planning documentation:
+**Backend implementation in progress; frontend workflow UI not yet
+started.** This repository's documentation set is still the
+authoritative source of truth for anything not yet superseded by actual
+code/migrations - see [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for
+the current, accurate implementation snapshot before assuming anything
+below.
 
 - [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) — current-state summary and scope
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — target stack, trust boundaries, module principles
@@ -25,11 +28,24 @@ contains only planning documentation:
 - [`SECURITY.md`](./SECURITY.md) — security/integrity requirements and dev gates
 - [`DATABASE.md`](./DATABASE.md) — database design principles (no schema yet)
 - [`DECISIONS.md`](./DECISIONS.md) — accepted decisions and open decisions log
+- [`DEPLOYMENT.md`](./DEPLOYMENT.md) — manual production configuration and deployment-time constraints
 
-Empty `backend/`, `frontend/`, `database/`, and `docs/` directories exist
-as placeholders for future work and currently contain no code.
+`backend/` is a working Node.js + Express + TypeScript application:
+Supabase Auth token verification, Team + Position -> Capabilities
+authorization, the permit/JSA domain (draft/submit/CRO review/HSE
+review/fallback approval/closure, plus paginated read APIs), database
+migrations `0001`-`0011` (applied to the live Supabase project - see
+`database/migrations/README.md`), and backend production hardening
+(rate limiting, security headers, structured logging, environment
+validation, a `/ready` readiness endpoint) - see `PROJECT_CONTEXT.md`
+for the precise, current breakdown. `frontend/` is a React + Vite +
+TypeScript PWA scaffold with Supabase Auth wired up; no permit-workflow
+UI exists yet. Send-back, Hold, Resume, Cancel, Renewal, PDF generation,
+and WhatsApp notifications are deliberately not implemented - each is
+blocked on a specific unresolved business rule (`DECISIONS.md`'s Open
+Decisions), not merely unscheduled.
 
-## Target Technology (not yet installed)
+## Technology
 
 - **Frontend:** React + Vite + TypeScript, built as a PWA
 - **Backend:** Node.js + Express + TypeScript, REST API

@@ -118,6 +118,38 @@ protections.
 - Changing device time, JavaScript state, or refreshing the browser must
   not change any authorization or validity outcome.
 
+## Implemented Production Hardening
+
+The requirements above that are backend-cross-cutting (rather than
+specific to one workflow section) are implemented as of the
+production-hardening batch:
+
+- **Rate limiting**: backend-wide (`middleware/rateLimit.ts`) - a
+  generous global limit on every `/api/v1` request (IP-keyed, so
+  authenticating never exempts a client from it), and a stricter limit
+  on every state-changing permit endpoint, keyed by authenticated actor
+  id once `requireAuth` has run (so switching IP/network doesn't reset
+  an authenticated caller's budget). This backend has no password
+  login/signup endpoint of its own (Supabase Auth is called directly by
+  the frontend), so there is no separate "login route" to rate-limit the
+  way this guidance usually implies - the mutation limiter is the
+  closest equivalent. The limiter store is in-memory/per-instance - see
+  `DEPLOYMENT.md` for the documented horizontal-scaling constraint this
+  implies; it is not silently presented as more scalable than it is.
+- **Request-size limits**: JSON bodies are capped (`app.ts`); an
+  oversized or malformed body gets a sanitized 413/400, never a stack
+  trace or a generic 500.
+- **Production-safe error responses**: the central error handler
+  (`app.ts`) never returns a stack trace, raw error message, or SQL to a
+  client; database errors are always passed through
+  `db/pool.ts::toSafeDbErrorMessage` before being logged, and never
+  logged or returned verbatim.
+- **Secure session/authentication handling**: `requireAuth` verifies the
+  Supabase access token server-side on every request (never trusts a
+  client-supplied identity) and fails closed (401) on any missing,
+  malformed, or invalid/expired token or verification error - see
+  `middleware/auth.ts`.
+
 ## Notification Security
 
 - WhatsApp lifecycle notifications are decoupled from the permit

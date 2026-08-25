@@ -50,10 +50,36 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   a capability-gated status queue (`GET /permits/queue?status=...`),
   permit detail with its JSA/computed validity/available-actions hint
   (`GET /permits/:id`), and lifecycle history (`GET /permits/:id/history`).
-  Send-back, Hold, Resume, Cancel, Renewal, PDF generation, and WhatsApp
+  `GET /permits/mine` and `GET /permits/queue` are paginated
+  (`page`/`pageSize`, safe defaults, hard maximum page size of 100, and
+  a hard maximum on the COMPUTED offset - `(page - 1) * pageSize` may
+  not exceed 100,000, rejected with 400 rather than silently clamped,
+  since `pageSize` alone can turn an innocuous-looking `page` into a
+  pathological offset - see
+  `domain/permits/validation.ts::{paginationQuerySchema,MAX_PAGINATION_OFFSET}`).
+  Send-back,
+  Hold, Resume, Cancel, Renewal, PDF generation, and WhatsApp
   notifications are not implemented - each is blocked on a specific
   unresolved business rule, not merely unscheduled; see `DECISIONS.md`'s
   Open Decisions (items 1-3, 6-7) for exactly what is undecided.
+- Production hardening: backend-wide rate limiting (global + a stricter,
+  identity-keyed limit on mutation endpoints - `middleware/rateLimit.ts`),
+  security headers (`helmet`), a bounded JSON body limit with sanitized
+  malformed-JSON/oversized-body handling, an explicit trusted-proxy
+  address/network allowlist (`TRUST_PROXY_CIDRS` - never a hop count or
+  a wildcard; see `config/trustProxy.ts`), a `/ready` readiness endpoint
+  alongside the existing `/health` liveness endpoint, structured
+  per-request logging with a correlation id (`middleware/requestLog.ts` -
+  never logs tokens/headers/bodies), and startup-time environment
+  hardening (fail-fast validation with documented practical bounds on
+  every numeric/timing config value - port, DB pool/timeouts, rate-limit
+  window/counts - and a guard against a service-role key being placed in
+  `SUPABASE_PUBLISHABLE_KEY`). See `DEPLOYMENT.md` for the manual
+  production configuration this still requires (in particular,
+  `TRUST_PROXY_CIDRS` and the network-topology requirement it depends on
+  - the backend must not be reachable except through the configured
+  proxy) and the documented single-instance constraint on the in-memory
+  rate limiter.
 
 ## Core Scope
 
@@ -92,6 +118,7 @@ Open Decisions) govern what's actually confirmed or still unresolved.
 - [`SECURITY.md`](./SECURITY.md) — security/integrity requirements and per-section development gates.
 - [`DATABASE.md`](./DATABASE.md) — database design principles only (no schema yet).
 - [`DECISIONS.md`](./DECISIONS.md) — accepted decisions and the authoritative open-decisions log.
+- [`DEPLOYMENT.md`](./DEPLOYMENT.md) — manual production configuration and deployment-time constraints (not workflow/business rules).
 
 These files are the authoritative source of truth for requirements until
 superseded by actual code, migrations, and configuration once
