@@ -27,9 +27,21 @@ const envSchema = z
         message: 'DATABASE_URL must be a postgresql:// or postgres:// connection string',
       }),
     DB_SSL: booleanFlag.default(true),
+    // Path to a PEM-encoded CA certificate to trust for the database TLS
+    // connection (e.g. Supabase's CA). Optional; when unset and DB_SSL is
+    // true, the platform's default trusted CA store is used instead.
+    DB_CA_CERT_PATH: z.string().optional(),
     DB_POOL_MAX: z.coerce.number().int().positive().default(10),
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(30_000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(5_000),
+
+    SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
+    SUPABASE_PUBLISHABLE_KEY: z.string().min(1, 'SUPABASE_PUBLISHABLE_KEY is required'),
+
+    // Comma-separated list of allowed frontend origins for CORS (e.g.
+    // "https://permits.example.com"). Required in production; in
+    // development, falls back to the local Vite dev origin if unset.
+    CORS_ALLOWED_ORIGINS: z.string().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.NODE_ENV === 'production' && !value.DB_SSL) {
@@ -38,6 +50,24 @@ const envSchema = z
         path: ['DB_SSL'],
         message: 'DB_SSL must not be disabled in production',
       });
+    }
+
+    if (value.NODE_ENV === 'production') {
+      if (!value.CORS_ALLOWED_ORIGINS?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['CORS_ALLOWED_ORIGINS'],
+          message: 'CORS_ALLOWED_ORIGINS is required in production',
+        });
+      } else if (
+        value.CORS_ALLOWED_ORIGINS.split(',').some((origin) => origin.trim() === '*')
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['CORS_ALLOWED_ORIGINS'],
+          message: 'CORS_ALLOWED_ORIGINS must not contain "*" in production',
+        });
+      }
     }
   });
 

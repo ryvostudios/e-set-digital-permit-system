@@ -1,14 +1,34 @@
+import { readFileSync } from 'node:fs';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg';
 import { env } from '../config/env.js';
 
 let pool: Pool | undefined;
 
+/** Thrown when TLS is enabled but the configured CA certificate can't be loaded. */
+export class DbTlsConfigError extends Error {}
+
+/**
+ * Builds the `ssl` option for a pg Pool/Client. Certificate verification is
+ * always kept enabled — never sets rejectUnauthorized: false. When DB_SSL
+ * is enabled and DB_CA_CERT_PATH is configured, that CA is loaded and
+ * pinned; if it can't be read, this fails closed (throws) rather than
+ * silently falling back to unpinned trust.
+ */
+export function buildSslConfig(): PoolConfig['ssl'] {
+  if (!env.DB_SSL) return undefined;
+  if (!env.DB_CA_CERT_PATH) return true;
+
+  try {
+    return { ca: readFileSync(env.DB_CA_CERT_PATH, 'utf8') };
+  } catch {
+    throw new DbTlsConfigError('Unable to read the configured database CA certificate');
+  }
+}
+
 function buildPoolConfig(): PoolConfig {
   return {
     connectionString: env.DATABASE_URL,
-    // `true` enables TLS with default (certificate-verifying) behavior.
-    // Do not set rejectUnauthorized: false — that disables verification.
-    ssl: env.DB_SSL ? true : undefined,
+    ssl: buildSslConfig(),
     max: env.DB_POOL_MAX,
     idleTimeoutMillis: env.DB_IDLE_TIMEOUT_MS,
     connectionTimeoutMillis: env.DB_CONNECTION_TIMEOUT_MS,
@@ -17,6 +37,9 @@ function buildPoolConfig(): PoolConfig {
 
 /** Formats a database error for logging without leaking query text, connection details, or credentials. */
 export function toSafeDbErrorMessage(err: unknown): string {
+  if (err instanceof DbTlsConfigError) {
+    return err.message;
+  }
   if (err && typeof err === 'object' && 'code' in err && typeof (err as { code?: unknown }).code === 'string') {
     return `database error (code ${(err as { code: string }).code})`;
   }

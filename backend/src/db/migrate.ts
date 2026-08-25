@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 import { env } from '../config/env.js';
-import { toSafeDbErrorMessage } from './pool.js';
+import { buildSslConfig, toSafeDbErrorMessage } from './pool.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, '../../../database/migrations');
@@ -62,7 +62,7 @@ async function applyMigration(client: Client, file: string): Promise<void> {
 async function runMigrations(): Promise<void> {
   const client = new Client({
     connectionString: env.DATABASE_URL,
-    ssl: env.DB_SSL ? true : undefined,
+    ssl: buildSslConfig(),
   });
 
   await client.connect();
