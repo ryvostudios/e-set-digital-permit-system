@@ -30,20 +30,24 @@ below.
 - [`DECISIONS.md`](./DECISIONS.md) — accepted decisions and open decisions log
 - [`DEPLOYMENT.md`](./DEPLOYMENT.md) — manual production configuration and deployment-time constraints
 
-`backend/` is a working Node.js + Express + TypeScript application:
-Supabase Auth token verification, Team + Position -> Capabilities
-authorization, the permit/JSA domain (draft/submit/CRO review/HSE
-review/fallback approval/closure, plus paginated read APIs), database
-migrations `0001`-`0011` (applied to the live Supabase project - see
-`database/migrations/README.md`), and backend production hardening
-(rate limiting, security headers, structured logging, environment
-validation, a `/ready` readiness endpoint) - see `PROJECT_CONTEXT.md`
-for the precise, current breakdown. `frontend/` is a React + Vite +
-TypeScript PWA scaffold with Supabase Auth wired up; no permit-workflow
-UI exists yet. Send-back, Hold, Resume, Cancel, Renewal, PDF generation,
-and WhatsApp notifications are deliberately not implemented - each is
-blocked on a specific unresolved business rule (`DECISIONS.md`'s Open
-Decisions), not merely unscheduled.
+`backend/` is a working Node.js + Express + TypeScript application
+implementing the full agreed Permit workflow: draft creation/submission,
+CRO review (forward-to-HSE, send-back to applicant), applicant
+correction/resubmission, HSE review (approval, send-back to CRO),
+CRO fallback approval, Hold/Resume, Cancel, Close, and Renewal - plus
+paginated read APIs - all under Team + Position -> Capabilities
+authorization with Supabase Auth token verification. Database migrations
+`0001`-`0012` are applied and live-verified against the live Supabase
+project (see `database/migrations/README.md`) - `0012` is the workflow-
+completion schema (Send-Back/Hold/Resume/Cancel/Renewal). Backend production
+hardening (rate limiting, security headers, structured logging,
+environment validation, a `/ready` readiness endpoint) is also in place
+- see `PROJECT_CONTEXT.md` for the precise, current breakdown. `frontend/`
+is a React + Vite + TypeScript PWA scaffold with Supabase Auth wired up;
+no permit-workflow UI exists yet. PDF generation and WhatsApp
+notifications remain not implemented - each is blocked on a specific
+unresolved business rule (`DECISIONS.md`'s Open Decisions), not merely
+unscheduled.
 
 ## Technology
 
@@ -64,7 +68,10 @@ Development proceeds section by section: implement one section, verify it
 
 ## Status of Open Decisions
 
-Several workflow rules are intentionally **not yet finalized** (e.g. the
-gap between HSE window expiry and CRO fallback approval, and the exact
-permit states that allow Hold/Cancel). See the "Open Decisions" section of
-[`DECISIONS.md`](./DECISIONS.md) before implementing related behavior.
+A few workflow rules remain intentionally **not yet finalized** - the
+gap between HSE window expiry and CRO fallback approval, the WhatsApp
+integration method, and whether closure remarks are mandatory. (The
+allowed states for Hold/Cancel, the CRO/HSE send-back target state, and
+the status of a renewed permit are now resolved and implemented.) See
+the "Open Decisions" section of [`DECISIONS.md`](./DECISIONS.md) before
+implementing related behavior.

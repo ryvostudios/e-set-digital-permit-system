@@ -131,9 +131,92 @@ export const fallbackApproveBodySchema = z
 // other free-text field, `companyOther`) is validated here. `.strict()`
 // also means closed_by/closed_at can't be smuggled in via the body -
 // those are always server-derived (see domain/permits/service.ts).
+// `HELD` is also closable now (see domain/permits/service.ts::closePermit);
+// this body shape is unaffected by which source status the permit was
+// closed from.
 export const closePermitBodySchema = z
   .object({
     version: z.number().int().positive(),
     closureRemarks: z.string().trim().min(1).max(2000).optional(),
   })
   .strict();
+
+// A shared, non-mandatory free-text shape reused by every new workflow
+// action below whose reason/remarks isn't documented as mandatory (CRO
+// send-back, HSE send-back, Cancel) - same trimmed/non-empty-when-
+// present/length-capped discipline as `closureRemarks` above.
+const optionalReason = z.string().trim().min(1).max(2000).optional();
+
+// CRO send-back to applicant: PENDING_CRO -> PENDING_CORRECTION. `reason`
+// is optional - not documented as mandatory (unlike Hold's).
+export const sendBackBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+    reason: optionalReason,
+  })
+  .strict();
+
+// Applicant resubmission after a CRO send-back: PENDING_CORRECTION ->
+// PENDING_CRO. Only the expected version - the same shape as
+// `submitPermitBodySchema`, kept as its own named schema (rather than
+// reused directly) since the two represent distinct API contracts that
+// could diverge later, matching this file's existing convention (see
+// `forwardToHseBodySchema`/`hseApproveBodySchema`/`fallbackApproveBodySchema`).
+export const resubmitBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+// HSE send-back to CRO: PENDING_HSE -> PENDING_CRO. `reason` optional,
+// same reasoning as CRO send-back above.
+export const hseSendBackBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+    reason: optionalReason,
+  })
+  .strict();
+
+// CRO Hold: ISSUED -> HELD. `reason` is MANDATORY ("HOLD REASON IS
+// MANDATORY" - this batch's Hold rules) - trimmed/non-empty/length-capped,
+// enforced again at the database level (permits_hold_consistent) as
+// defense in depth, not only here.
+export const holdBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+    reason: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+
+// CRO Resume: HELD -> ISSUED. Only the expected version - no other
+// client-suppliable field (in particular, no way to influence the
+// midnight-expiry check, which is computed server-side from the
+// permit's own stored `issued_at`/`site_timezone` and the backend
+// clock).
+export const resumeBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+// CRO Cancel: ISSUED or HELD -> CANCELLED. `reason` optional - "not
+// mandatory unless current docs already require one" (this batch's
+// Cancel rules); none do.
+export const cancelBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+    reason: optionalReason,
+  })
+  .strict();
+
+// Renewal: creates a brand-new permit linked to the given (already-
+// CLOSED) permit - there is nothing for a client to legitimately supply
+// here at all. `previous_permit_id`/`jsa_id`/`company`/`site_timezone`/
+// `created_by` are all derived server-side from the OLD permit being
+// renewed (see domain/permits/service.ts::renewPermit), and there is no
+// "expected version" of the old permit to check - renewal never writes
+// to it (see that function's doc comment on why a database-level
+// uniqueness constraint, not an optimistic-concurrency check, is what
+// actually prevents a double renewal). `.strict()` with no fields means
+// any body content at all is rejected, not silently ignored.
+export const renewBodySchema = z.object({}).strict();

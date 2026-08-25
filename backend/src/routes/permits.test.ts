@@ -196,6 +196,13 @@ function getRequest(url: string, path: string, token?: string): Promise<Response
   return fetch(`${url}/api/v1${path}`, { method: 'GET', headers });
 }
 
+/** Generic POST helper for the new workflow-completion mutation routes below (send-back, resubmit, hold, resume, cancel, renew, hse-send-back). */
+function postRequest(url: string, path: string, token: string | undefined, body: unknown): Promise<Response> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  return fetch(`${url}/api/v1${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+}
+
 test('POST /permits/:id/close denies an unauthenticated request (401)', async () => {
   const { url, close } = await startServer();
   try {
@@ -262,6 +269,273 @@ test('the close route is bound specifically to permit.close, not any other permi
   try {
     const res = await closeRequest(url, VALID_TOKEN);
     assert.equal(res.status, 403);
+  } finally {
+    await close();
+  }
+});
+
+// --- Workflow-completion mutation routes: wiring only ---
+//
+// Same philosophy as the /close tests above: `Pool.prototype.connect`'s
+// stub always returns no rows, so any request that gets PAST
+// auth/capability lands on the service layer's own "not_found" outcome
+// (404) - proving the route reached the handler/service, not that any
+// particular business rule is correct (that's `service.test.ts`'s job).
+
+const RESUBMIT_PATH = `/permits/${SOME_PERMIT_ID}/resubmit`;
+const SEND_BACK_PATH = `/permits/${SOME_PERMIT_ID}/send-back`;
+const HSE_SEND_BACK_PATH = `/permits/${SOME_PERMIT_ID}/hse-send-back`;
+const HOLD_PATH = `/permits/${SOME_PERMIT_ID}/hold`;
+const RESUME_PATH = `/permits/${SOME_PERMIT_ID}/resume`;
+const CANCEL_PATH = `/permits/${SOME_PERMIT_ID}/cancel`;
+const RENEW_PATH = `/permits/${SOME_PERMIT_ID}/renew`;
+
+test('POST /permits/:id/resubmit denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, RESUBMIT_PATH, undefined, { version: 1 })).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/resubmit denies an authenticated actor without permit.submit (403)', async () => {
+  grantedCapabilities = ['permit.create'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, RESUBMIT_PATH, VALID_TOKEN, { version: 1 })).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/resubmit lets an authenticated actor with permit.submit reach the handler/service', async () => {
+  grantedCapabilities = ['permit.submit'];
+  const { url, close } = await startServer();
+  try {
+    const res = await postRequest(url, RESUBMIT_PATH, VALID_TOKEN, { version: 1 });
+    assert.notEqual(res.status, 401);
+    assert.notEqual(res.status, 403);
+    assert.equal(res.status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/send-back denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, SEND_BACK_PATH, undefined, { version: 1 })).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/send-back denies an authenticated actor without permit.send_back (403)', async () => {
+  grantedCapabilities = ['permit.cro_review'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, SEND_BACK_PATH, VALID_TOKEN, { version: 1 })).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/send-back lets an authenticated actor with permit.send_back reach the handler/service, with or without an optional reason', async () => {
+  grantedCapabilities = ['permit.send_back'];
+  const { url, close } = await startServer();
+  try {
+    const withoutReason = await postRequest(url, SEND_BACK_PATH, VALID_TOKEN, { version: 1 });
+    assert.equal(withoutReason.status, 404);
+    const withReason = await postRequest(url, SEND_BACK_PATH, VALID_TOKEN, { version: 1, reason: 'missing signage' });
+    assert.equal(withReason.status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/hse-send-back denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, HSE_SEND_BACK_PATH, undefined, { version: 1 })).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/hse-send-back denies an authenticated actor without permit.hse_review (403)', async () => {
+  grantedCapabilities = ['permit.fallback_approve'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, HSE_SEND_BACK_PATH, VALID_TOKEN, { version: 1 })).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/hse-send-back lets an authenticated actor with permit.hse_review reach the handler/service', async () => {
+  grantedCapabilities = ['permit.hse_review'];
+  const { url, close } = await startServer();
+  try {
+    const res = await postRequest(url, HSE_SEND_BACK_PATH, VALID_TOKEN, { version: 1 });
+    assert.equal(res.status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/hold denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, HOLD_PATH, undefined, { version: 1, reason: 'x' })).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/hold denies an authenticated actor without permit.hold (403)', async () => {
+  grantedCapabilities = ['permit.close'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, HOLD_PATH, VALID_TOKEN, { version: 1, reason: 'x' })).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/hold rejects a missing/blank reason (400) - mandatory, enforced at the validation layer before the handler runs', async () => {
+  grantedCapabilities = ['permit.hold'];
+  const { url, close } = await startServer();
+  try {
+    const missing = await postRequest(url, HOLD_PATH, VALID_TOKEN, { version: 1 });
+    assert.equal(missing.status, 400);
+    const blank = await postRequest(url, HOLD_PATH, VALID_TOKEN, { version: 1, reason: '   ' });
+    assert.equal(blank.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/hold lets an authenticated actor with permit.hold and a real reason reach the handler/service', async () => {
+  grantedCapabilities = ['permit.hold'];
+  const { url, close } = await startServer();
+  try {
+    const res = await postRequest(url, HOLD_PATH, VALID_TOKEN, { version: 1, reason: 'crane inspection overdue' });
+    assert.equal(res.status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('the hold route is bound specifically to permit.hold, not any other permit.* capability', async () => {
+  grantedCapabilities = ['permit.create', 'permit.submit', 'permit.cancel', 'permit.resume', 'permit.close'];
+  const { url, close } = await startServer();
+  try {
+    const res = await postRequest(url, HOLD_PATH, VALID_TOKEN, { version: 1, reason: 'x' });
+    assert.equal(res.status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/resume denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, RESUME_PATH, undefined, { version: 1 })).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/resume denies an authenticated actor without permit.resume (403)', async () => {
+  grantedCapabilities = ['permit.hold'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, RESUME_PATH, VALID_TOKEN, { version: 1 })).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/resume lets an authenticated actor with permit.resume reach the handler/service', async () => {
+  grantedCapabilities = ['permit.resume'];
+  const { url, close } = await startServer();
+  try {
+    const res = await postRequest(url, RESUME_PATH, VALID_TOKEN, { version: 1 });
+    assert.equal(res.status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/cancel denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, CANCEL_PATH, undefined, { version: 1 })).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/cancel denies an authenticated actor without permit.cancel (403)', async () => {
+  grantedCapabilities = ['permit.hold'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, CANCEL_PATH, VALID_TOKEN, { version: 1 })).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/cancel lets an authenticated actor with permit.cancel reach the handler/service, with or without an optional reason', async () => {
+  grantedCapabilities = ['permit.cancel'];
+  const { url, close } = await startServer();
+  try {
+    const withoutReason = await postRequest(url, CANCEL_PATH, VALID_TOKEN, { version: 1 });
+    assert.equal(withoutReason.status, 404);
+    const withReason = await postRequest(url, CANCEL_PATH, VALID_TOKEN, { version: 1, reason: 'no longer needed' });
+    assert.equal(withReason.status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/renew denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, RENEW_PATH, undefined, {})).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/renew denies an authenticated actor without permit.renew (403)', async () => {
+  grantedCapabilities = ['permit.close'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await postRequest(url, RENEW_PATH, VALID_TOKEN, {})).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/renew rejects a client-supplied body field (400) - no mass assignment, nothing is legitimately client-suppliable for renewal', async () => {
+  grantedCapabilities = ['permit.renew'];
+  const { url, close } = await startServer();
+  try {
+    const res = await postRequest(url, RENEW_PATH, VALID_TOKEN, { version: 1 });
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/renew lets an authenticated actor with permit.renew reach the handler/service with an empty body', async () => {
+  grantedCapabilities = ['permit.renew'];
+  const { url, close } = await startServer();
+  try {
+    const res = await postRequest(url, RENEW_PATH, VALID_TOKEN, {});
+    assert.equal(res.status, 404);
   } finally {
     await close();
   }
@@ -704,6 +978,91 @@ test('GET /permits/:id: an authorized request DOES query the JSA (only after aut
     assert.notEqual(permitQueryIndex, -1);
     assert.notEqual(jsaQueryIndex, -1);
     assert.ok(jsaQueryIndex > permitQueryIndex, 'the JSA must be fetched strictly after the permit');
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id: a non-owner with permit.send_back can view a PENDING_CORRECTION permit and sees no forwarding/resubmit actions (those require capabilities they don\'t hold)', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'PENDING_CORRECTION', created_by: 'someone-else' });
+  grantedCapabilities = ['permit.send_back'];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { availableActions: string[] };
+    assert.deepEqual(body.availableActions, []);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id: a non-owner without permit.send_back cannot view a PENDING_CORRECTION permit (404, IDOR-safe)', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'PENDING_CORRECTION', created_by: 'someone-else' });
+  grantedCapabilities = ['permit.close'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN)).status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id: a HELD permit is visible via any of resume/cancel/close, and its availableActions reflect exactly which capability is held', async () => {
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'HELD',
+    created_by: 'someone-else',
+    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    site_timezone: 'UTC',
+  });
+  grantedCapabilities = ['permit.resume'];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { availableActions: string[]; validity: { isValid: boolean } | null };
+    assert.deepEqual(body.availableActions, ['resume']);
+    // HELD is never valid for work, regardless of time-of-day.
+    assert.equal(body.validity?.isValid, false);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id: a CANCELLED permit is visible via permit.cancel and exposes no available actions (terminal)', async () => {
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'CANCELLED',
+    created_by: 'someone-else',
+    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    site_timezone: 'UTC',
+  });
+  grantedCapabilities = ['permit.cancel'];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { availableActions: string[]; validity: { isValid: boolean } | null };
+    assert.deepEqual(body.availableActions, []);
+    assert.equal(body.validity?.isValid, false);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id: an ISSUED permit exposes hold/cancel/close together when the viewer holds all three capabilities', async () => {
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'ISSUED',
+    created_by: 'someone-else',
+    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    site_timezone: 'UTC',
+  });
+  grantedCapabilities = ['permit.hold', 'permit.cancel', 'permit.close'];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { availableActions: string[] };
+    assert.deepEqual(body.availableActions.sort(), ['cancel', 'close', 'hold']);
   } finally {
     await close();
   }

@@ -1,19 +1,26 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  cancelPermit,
   closePermit,
   createDraftPermit,
   croFallbackApprove,
+  croSendBackToApplicant,
   forwardToHseReview,
   getJsaById,
   getOwnPermit,
   getPermitById,
   getPermitLifecycleEvents,
   getPermitWithJsa,
+  holdPermit,
   hseApprove,
+  hseSendBackToCro,
   listOwnPermits,
   listPermitsByStatus,
   PERMIT_CLOSED_EVENT_TYPE,
+  renewPermit,
+  resubmitPermit,
+  resumePermit,
   submitPermit,
   updateDraftPermit,
   type JsaRow,
@@ -23,25 +30,34 @@ import {
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 
-const PRE_HSE_STATUSES = new Set(['DRAFT', 'PENDING_CRO']);
-const HSE_WINDOW_STATUSES = new Set(['PENDING_HSE', 'ISSUED', 'CLOSED']);
-const ISSUED_OR_LATER_STATUSES = new Set(['ISSUED', 'CLOSED']);
+const NO_HSE_WINDOW_STATUSES = new Set(['DRAFT', 'PENDING_CRO', 'PENDING_CORRECTION']);
+const ALWAYS_HSE_WINDOW_STATUSES = new Set(['PENDING_HSE']);
+const MAYBE_HSE_WINDOW_STATUSES = new Set(['ISSUED', 'HELD', 'CLOSED', 'CANCELLED']);
+const ISSUED_OR_LATER_STATUSES = new Set(['ISSUED', 'HELD', 'CLOSED', 'CANCELLED']);
 
 /**
- * Mirrors migration 0008/0010's permits CHECK constraints
+ * Mirrors migration 0008/0010/0012's permits CHECK constraints
  * (permits_hse_window_status_consistent, permits_hse_deadline_exact,
- * permits_issued_at_consistent, permits_closure_consistent), so a
+ * permits_issued_at_consistent, permits_closure_consistent,
+ * permits_hold_consistent, permits_cancellation_consistent), so a
  * service.ts bug that would violate them fails the same way it would
  * against the real database.
  */
 function assertPermitInvariants(permit: PermitRow): void {
   const hasWindow = permit.hse_review_started_at !== null && permit.hse_review_deadline_at !== null;
   const noWindow = permit.hse_review_started_at === null && permit.hse_review_deadline_at === null;
+  // ISSUED/HELD/CLOSED/CANCELLED normally carry the window (they were,
+  // transitively, once PENDING_HSE) - EXCEPT a renewed permit
+  // (previous_permit_id set), which skips review entirely and so never
+  // has one (migration 0012's carve-out).
+  const renewalWindowCarveOut = noWindow && permit.previous_permit_id !== null;
   const windowStatusOk =
-    (PRE_HSE_STATUSES.has(permit.status) && noWindow) || (HSE_WINDOW_STATUSES.has(permit.status) && hasWindow);
+    (NO_HSE_WINDOW_STATUSES.has(permit.status) && noWindow) ||
+    (ALWAYS_HSE_WINDOW_STATUSES.has(permit.status) && hasWindow) ||
+    (MAYBE_HSE_WINDOW_STATUSES.has(permit.status) && (hasWindow || renewalWindowCarveOut));
   if (!windowStatusOk) {
     throw new Error(
-      `simulated CHECK constraint violation: permits_hse_window_status_consistent (status=${permit.status}, started=${permit.hse_review_started_at}, deadline=${permit.hse_review_deadline_at})`,
+      `simulated CHECK constraint violation: permits_hse_window_status_consistent (status=${permit.status}, started=${permit.hse_review_started_at}, deadline=${permit.hse_review_deadline_at}, previous_permit_id=${permit.previous_permit_id})`,
     );
   }
   if (permit.hse_review_started_at !== null && permit.hse_review_deadline_at !== null) {
@@ -67,6 +83,29 @@ function assertPermitInvariants(permit: PermitRow): void {
   if (!closureOk) {
     throw new Error(
       `simulated CHECK constraint violation: permits_closure_consistent (status=${permit.status}, closed_by=${permit.closed_by}, closed_at=${permit.closed_at}, closure_remarks=${permit.closure_remarks})`,
+    );
+  }
+  const holdOk =
+    (permit.status === 'HELD' &&
+      permit.held_by !== null &&
+      permit.held_at !== null &&
+      permit.hold_reason !== null &&
+      permit.hold_reason.trim() !== '') ||
+    (permit.status !== 'HELD' && permit.held_by === null && permit.held_at === null && permit.hold_reason === null);
+  if (!holdOk) {
+    throw new Error(
+      `simulated CHECK constraint violation: permits_hold_consistent (status=${permit.status}, held_by=${permit.held_by}, held_at=${permit.held_at}, hold_reason=${permit.hold_reason})`,
+    );
+  }
+  const cancellationOk =
+    (permit.status === 'CANCELLED' && permit.cancelled_by !== null && permit.cancelled_at !== null) ||
+    (permit.status !== 'CANCELLED' &&
+      permit.cancelled_by === null &&
+      permit.cancelled_at === null &&
+      permit.cancel_reason === null);
+  if (!cancellationOk) {
+    throw new Error(
+      `simulated CHECK constraint violation: permits_cancellation_consistent (status=${permit.status}, cancelled_by=${permit.cancelled_by}, cancelled_at=${permit.cancelled_at}, cancel_reason=${permit.cancel_reason})`,
     );
   }
 }
@@ -132,6 +171,63 @@ class FakeDb {
       this.jsas.set(jsa.id, jsa);
       return { rows: [jsa] };
     }
+    if (sql.startsWith('INSERT INTO permits') && sql.includes('previous_permit_id')) {
+      // renewPermit's INSERT - distinct column list/params shape from the
+      // plain draft-creation INSERT below. Checked FIRST/more
+      // specifically: both this and the plain-creation INSERT literally
+      // start with "INSERT INTO permits", so order matters here.
+      const [jsaId, createdBy, previousPermitId, siteTimezone, company, companyOther] = params as [
+        string,
+        string,
+        string,
+        string,
+        PermitRow['company'],
+        string | null,
+      ];
+      // Mirrors permits_previous_permit_id_unique (migration 0012): at
+      // most one permit may ever point back at a given previous permit.
+      const alreadyRenewed = [...this.permits.values()].some((p) => p.previous_permit_id === previousPermitId);
+      if (alreadyRenewed) {
+        const uniqueViolation = new Error('simulated unique_violation: permits_previous_permit_id_unique') as Error & {
+          code: string;
+          constraint: string;
+        };
+        uniqueViolation.code = '23505';
+        uniqueViolation.constraint = 'permits_previous_permit_id_unique';
+        throw uniqueViolation;
+      }
+      this.permitCounter += 1;
+      this.permitSeq += 1;
+      const createdAt = new Date(this.now.getTime() + this.permitCounter).toISOString();
+      const permit: PermitRow = {
+        id: `permit-${this.permitCounter}`,
+        permit_sequence: String(this.permitSeq),
+        jsa_id: jsaId,
+        status: 'ISSUED',
+        version: 1,
+        created_by: createdBy,
+        previous_permit_id: previousPermitId,
+        site_timezone: siteTimezone,
+        company,
+        company_other: companyOther,
+        submitted_at: null,
+        hse_review_started_at: null,
+        hse_review_deadline_at: null,
+        issued_at: this.now.toISOString(),
+        closed_by: null,
+        closed_at: null,
+        closure_remarks: null,
+        held_by: null,
+        held_at: null,
+        hold_reason: null,
+        cancelled_by: null,
+        cancelled_at: null,
+        cancel_reason: null,
+        created_at: createdAt,
+        updated_at: createdAt,
+      };
+      return { rows: [this.setPermit(permit)] };
+    }
     if (sql.startsWith('INSERT INTO permits')) {
       const [jsaId, createdBy, siteTimezone] = params as [string, string, string];
       this.permitCounter += 1;
@@ -161,6 +257,12 @@ class FakeDb {
         closed_by: null,
         closed_at: null,
         closure_remarks: null,
+        held_by: null,
+        held_at: null,
+        hold_reason: null,
+        cancelled_by: null,
+        cancelled_at: null,
+        cancel_reason: null,
         created_at: createdAt,
         updated_at: createdAt,
       };
@@ -179,16 +281,24 @@ class FakeDb {
         this.failNextLifecycleEventInsert = null;
         throw new Error(`simulated database failure inserting ${eventType} lifecycle event`);
       }
-      // Mirrors migration 0006/0008/0010's permit_lifecycle_events_event_status_consistent
-      // CHECK constraint, so a violation here fails the same way it would
-      // against the real database.
+      // Mirrors migration 0006/0008/0010/0012's
+      // permit_lifecycle_events_event_status_consistent CHECK constraint,
+      // so a violation here fails the same way it would against the real
+      // database.
       const allowed =
         (eventType === 'CREATED' && fromStatus === null && toStatus === 'DRAFT') ||
         (eventType === 'SUBMITTED' && fromStatus === 'DRAFT' && toStatus === 'PENDING_CRO') ||
         (eventType === 'CRO_FORWARDED_HSE' && fromStatus === 'PENDING_CRO' && toStatus === 'PENDING_HSE') ||
         (eventType === 'HSE_APPROVED' && fromStatus === 'PENDING_HSE' && toStatus === 'ISSUED') ||
         (eventType === 'CRO_FALLBACK_APPROVED' && fromStatus === 'PENDING_HSE' && toStatus === 'ISSUED') ||
-        (eventType === PERMIT_CLOSED_EVENT_TYPE && fromStatus === 'ISSUED' && toStatus === 'CLOSED');
+        (eventType === PERMIT_CLOSED_EVENT_TYPE && (fromStatus === 'ISSUED' || fromStatus === 'HELD') && toStatus === 'CLOSED') ||
+        (eventType === 'CRO_SENT_BACK_TO_APPLICANT' && fromStatus === 'PENDING_CRO' && toStatus === 'PENDING_CORRECTION') ||
+        (eventType === 'APPLICANT_RESUBMITTED' && fromStatus === 'PENDING_CORRECTION' && toStatus === 'PENDING_CRO') ||
+        (eventType === 'HSE_SENT_BACK_TO_CRO' && fromStatus === 'PENDING_HSE' && toStatus === 'PENDING_CRO') ||
+        (eventType === 'HELD' && fromStatus === 'ISSUED' && toStatus === 'HELD') ||
+        (eventType === 'RESUMED' && fromStatus === 'HELD' && toStatus === 'ISSUED') ||
+        (eventType === 'CANCELLED' && (fromStatus === 'ISSUED' || fromStatus === 'HELD') && toStatus === 'CANCELLED') ||
+        (eventType === 'RENEWED' && fromStatus === null && toStatus === 'ISSUED');
       if (!allowed) {
         throw new Error(
           `simulated CHECK constraint violation: permit_lifecycle_events_event_status_consistent (event_type=${eventType}, from_status=${fromStatus}, to_status=${toStatus})`,
@@ -223,6 +333,15 @@ class FakeDb {
       const permit = this.permits.get(id);
       return permit ? { rows: [permit] } : { rows: [] };
     }
+    if (sql.startsWith('SELECT p.*, now() AS db_now FROM permits p WHERE p.id = $1 FOR UPDATE')) {
+      // resumePermit/renewPermit's DB-authoritative-time read - `db_now`
+      // is `this.now` (the fake DB's own clock), deliberately never the
+      // real wall clock, so tests can prove application-clock skew has
+      // no effect (see the "DB-authoritative time" test group below).
+      const [id] = params as [string];
+      const permit = this.permits.get(id);
+      return permit ? { rows: [{ ...permit, db_now: this.now.toISOString() }] } : { rows: [] };
+    }
     if (sql === 'SELECT * FROM permits WHERE id = $1') {
       const [id] = params as [string];
       const permit = this.permits.get(id);
@@ -246,7 +365,31 @@ class FakeDb {
       };
       return { rows: [this.setPermit(updated)] };
     }
+    if (sql.startsWith('UPDATE permits') && sql.includes("SET status = 'PENDING_CRO'") && sql.includes('hse_review_started_at = NULL')) {
+      // hseSendBackToCro's UPDATE - distinct from submit/resubmit below:
+      // clears the HSE window ("the timer stops immediately"), never
+      // touches submitted_at. Checked first/more specifically, since
+      // both this and the submit/resubmit UPDATE contain
+      // "SET status = 'PENDING_CRO'".
+      const [id] = params as [string];
+      const existing = this.permits.get(id);
+      if (!existing) return { rows: [] };
+      const updated: PermitRow = {
+        ...existing,
+        status: 'PENDING_CRO',
+        hse_review_started_at: null,
+        hse_review_deadline_at: null,
+        version: existing.version + 1,
+        updated_at: this.now.toISOString(),
+      };
+      return { rows: [this.setPermit(updated)] };
+    }
     if (sql.startsWith('UPDATE permits') && sql.includes("SET status = 'PENDING_CRO'")) {
+      // submitPermit (DRAFT -> PENDING_CRO) and resubmitPermit
+      // (PENDING_CORRECTION -> PENDING_CRO) issue the exact same UPDATE -
+      // they differ only in their WHERE-clause source-status check
+      // (already enforced above, in the service layer) and which
+      // lifecycle event they record.
       const [id] = params as [string];
       const existing = this.permits.get(id);
       if (!existing) return { rows: [] };
@@ -255,6 +398,18 @@ class FakeDb {
         status: 'PENDING_CRO',
         version: existing.version + 1,
         submitted_at: this.now.toISOString(),
+        updated_at: this.now.toISOString(),
+      };
+      return { rows: [this.setPermit(updated)] };
+    }
+    if (sql.startsWith('UPDATE permits') && sql.includes("SET status = 'PENDING_CORRECTION'")) {
+      const [id] = params as [string];
+      const existing = this.permits.get(id);
+      if (!existing) return { rows: [] };
+      const updated: PermitRow = {
+        ...existing,
+        status: 'PENDING_CORRECTION',
+        version: existing.version + 1,
         updated_at: this.now.toISOString(),
       };
       return { rows: [this.setPermit(updated)] };
@@ -268,6 +423,25 @@ class FakeDb {
         status: 'PENDING_HSE',
         hse_review_started_at: this.now.toISOString(),
         hse_review_deadline_at: new Date(this.now.getTime() + FIVE_MINUTES_MS).toISOString(),
+        version: existing.version + 1,
+        updated_at: this.now.toISOString(),
+      };
+      return { rows: [this.setPermit(updated)] };
+    }
+    if (sql.startsWith('UPDATE permits') && sql.includes("SET status = 'ISSUED'") && sql.includes('held_by = NULL')) {
+      // resumePermit's UPDATE - distinct from hseApprove/croFallbackApprove
+      // below: never touches issued_at (resume must not restart/extend
+      // validity), clears the hold columns instead. Checked first/more
+      // specifically for the same reason as the PENDING_CRO split above.
+      const [id] = params as [string];
+      const existing = this.permits.get(id);
+      if (!existing) return { rows: [] };
+      const updated: PermitRow = {
+        ...existing,
+        status: 'ISSUED',
+        held_by: null,
+        held_at: null,
+        hold_reason: null,
         version: existing.version + 1,
         updated_at: this.now.toISOString(),
       };
@@ -296,6 +470,42 @@ class FakeDb {
         closed_by: closedBy,
         closed_at: this.now.toISOString(),
         closure_remarks: closureRemarks,
+        held_by: null,
+        held_at: null,
+        hold_reason: null,
+        version: existing.version + 1,
+        updated_at: this.now.toISOString(),
+      };
+      return { rows: [this.setPermit(updated)] };
+    }
+    if (sql.startsWith('UPDATE permits') && sql.includes("SET status = 'HELD'")) {
+      const [id, heldBy, holdReason] = params as [string, string, string];
+      const existing = this.permits.get(id);
+      if (!existing) return { rows: [] };
+      const updated: PermitRow = {
+        ...existing,
+        status: 'HELD',
+        held_by: heldBy,
+        held_at: this.now.toISOString(),
+        hold_reason: holdReason,
+        version: existing.version + 1,
+        updated_at: this.now.toISOString(),
+      };
+      return { rows: [this.setPermit(updated)] };
+    }
+    if (sql.startsWith('UPDATE permits') && sql.includes("SET status = 'CANCELLED'")) {
+      const [id, cancelledBy, cancelReason] = params as [string, string, string | null];
+      const existing = this.permits.get(id);
+      if (!existing) return { rows: [] };
+      const updated: PermitRow = {
+        ...existing,
+        status: 'CANCELLED',
+        cancelled_by: cancelledBy,
+        cancelled_at: this.now.toISOString(),
+        cancel_reason: cancelReason,
+        held_by: null,
+        held_at: null,
+        hold_reason: null,
         version: existing.version + 1,
         updated_at: this.now.toISOString(),
       };
@@ -497,7 +707,7 @@ test('updateDraftPermit rejects updating a permit that is no longer DRAFT', asyn
     db.deps(),
   );
 
-  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_draft' });
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_editable' });
 });
 
 test('submitPermit rejects the transition when the required company field is missing', async () => {
@@ -938,7 +1148,7 @@ test('closePermit rejects a DRAFT permit (wrong state rejected)', async () => {
 
   const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
 
-  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_issued' });
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_closable' });
 });
 
 test('closePermit rejects a PENDING_CRO permit (wrong state rejected)', async () => {
@@ -958,7 +1168,7 @@ test('closePermit rejects a PENDING_CRO permit (wrong state rejected)', async ()
 
   const result = await closePermit('cro-2', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
 
-  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_issued' });
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_closable' });
 });
 
 test('closePermit rejects a PENDING_HSE permit (wrong state rejected)', async () => {
@@ -967,7 +1177,7 @@ test('closePermit rejects a PENDING_HSE permit (wrong state rejected)', async ()
 
   const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
 
-  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_issued' });
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_closable' });
 });
 
 test('closePermit rejects an already-CLOSED permit (cannot close again)', async () => {
@@ -984,7 +1194,7 @@ test('closePermit rejects an already-CLOSED permit (cannot close again)', async 
     db.deps(),
   );
 
-  assert.deepEqual(secondClose, { outcome: 'conflict', reason: 'not_issued' });
+  assert.deepEqual(secondClose, { outcome: 'conflict', reason: 'not_closable' });
 });
 
 test('closePermit rejects a stale version instead of silently overwriting', async () => {
@@ -1027,10 +1237,18 @@ test('every other permit-mutating path already rejects a CLOSED permit (immutabi
     { expectedVersion: closed.permit.version, company: 'SGRE' },
     db.deps(),
   );
-  assert.deepEqual(updateAttempt, { outcome: 'conflict', reason: 'not_draft' });
+  assert.deepEqual(updateAttempt, { outcome: 'conflict', reason: 'not_editable' });
 
   const submitAttempt = await submitPermit('owner', permit.id, { expectedVersion: closed.permit.version }, db.deps());
   assert.deepEqual(submitAttempt, { outcome: 'conflict', reason: 'not_draft' });
+
+  const resubmitAttempt = await resubmitPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: closed.permit.version },
+    db.deps(),
+  );
+  assert.deepEqual(resubmitAttempt, { outcome: 'conflict', reason: 'not_pending_correction' });
 
   const forwardAttempt = await forwardToHseReview(
     'cro-1',
@@ -1040,8 +1258,46 @@ test('every other permit-mutating path already rejects a CLOSED permit (immutabi
   );
   assert.deepEqual(forwardAttempt, { outcome: 'conflict', reason: 'not_pending_cro' });
 
+  const sendBackAttempt = await croSendBackToApplicant(
+    'cro-1',
+    permit.id,
+    { expectedVersion: closed.permit.version },
+    db.deps(),
+  );
+  assert.deepEqual(sendBackAttempt, { outcome: 'conflict', reason: 'not_pending_cro' });
+
   const hseAttempt = await hseApprove('hse-1', permit.id, { expectedVersion: closed.permit.version }, db.deps());
   assert.deepEqual(hseAttempt, { outcome: 'conflict', reason: 'not_pending_hse' });
+
+  const hseSendBackAttempt = await hseSendBackToCro(
+    'hse-1',
+    permit.id,
+    { expectedVersion: closed.permit.version },
+    db.deps(),
+  );
+  assert.deepEqual(hseSendBackAttempt, { outcome: 'conflict', reason: 'not_pending_hse' });
+
+  const holdAttempt = await holdPermit(
+    'cro-1',
+    permit.id,
+    { expectedVersion: closed.permit.version, reason: 'unsafe conditions' },
+    db.deps(),
+  );
+  assert.deepEqual(holdAttempt, { outcome: 'conflict', reason: 'not_issued' });
+
+  const resumeAttempt = await resumePermit('cro-1', permit.id, { expectedVersion: closed.permit.version }, db.deps());
+  assert.deepEqual(resumeAttempt, { outcome: 'conflict', reason: 'not_held' });
+
+  const cancelAttempt = await cancelPermit('cro-1', permit.id, { expectedVersion: closed.permit.version }, db.deps());
+  assert.deepEqual(cancelAttempt, { outcome: 'conflict', reason: 'not_cancellable' });
+
+  const closeAgainAttempt = await closePermit(
+    'cro-1',
+    permit.id,
+    { expectedVersion: closed.permit.version },
+    db.deps(),
+  );
+  assert.deepEqual(closeAgainAttempt, { outcome: 'conflict', reason: 'not_closable' });
 });
 
 test('assertPermitInvariants (mirroring permits_closure_consistent/permits_issued_at_consistent) rejects invalid closure states', () => {
@@ -1063,6 +1319,12 @@ test('assertPermitInvariants (mirroring permits_closure_consistent/permits_issue
     closed_by: null,
     closed_at: null,
     closure_remarks: null,
+    held_by: null,
+    held_at: null,
+    hold_reason: null,
+    cancelled_by: null,
+    cancelled_at: null,
+    cancel_reason: null,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:05:00.000Z',
   };
@@ -1099,6 +1361,967 @@ test('assertPermitInvariants (mirroring permits_closure_consistent/permits_issue
       }),
     /permits_issued_at_consistent/,
   );
+
+  // A valid HELD row passes.
+  assert.doesNotThrow(() =>
+    assertPermitInvariants({
+      ...base,
+      status: 'HELD',
+      held_by: 'cro-3',
+      held_at: '2026-01-01T02:00:00.000Z',
+      hold_reason: 'unsafe wind conditions',
+    }),
+  );
+  // HELD without hold metadata, or hold metadata on a non-HELD row,
+  // violates permits_hold_consistent.
+  assert.throws(() => assertPermitInvariants({ ...base, status: 'HELD' }), /permits_hold_consistent/);
+  assert.throws(
+    () => assertPermitInvariants({ ...base, held_by: 'cro-3', held_at: '2026-01-01T02:00:00.000Z', hold_reason: 'x' }),
+    /permits_hold_consistent/,
+  );
+  // A blank (whitespace-only) hold_reason on a HELD row also violates it -
+  // mirrors the database CHECK's btrim(hold_reason) <> '' clause.
+  assert.throws(
+    () =>
+      assertPermitInvariants({
+        ...base,
+        status: 'HELD',
+        held_by: 'cro-3',
+        held_at: '2026-01-01T02:00:00.000Z',
+        hold_reason: '   ',
+      }),
+    /permits_hold_consistent/,
+  );
+
+  // A valid CANCELLED row passes.
+  assert.doesNotThrow(() =>
+    assertPermitInvariants({
+      ...base,
+      status: 'CANCELLED',
+      cancelled_by: 'cro-3',
+      cancelled_at: '2026-01-01T02:00:00.000Z',
+    }),
+  );
+  // CANCELLED without cancellation metadata, or cancellation metadata on
+  // a non-CANCELLED row, violates permits_cancellation_consistent.
+  assert.throws(() => assertPermitInvariants({ ...base, status: 'CANCELLED' }), /permits_cancellation_consistent/);
+  assert.throws(
+    () => assertPermitInvariants({ ...base, cancelled_by: 'cro-3', cancelled_at: '2026-01-01T02:00:00.000Z' }),
+    /permits_cancellation_consistent/,
+  );
+});
+
+// --- Workflow completion: CRO/HSE send-back, Hold, Resume, Cancel, Renewal ---
+
+// Any real "now" during this project's lifetime is safely past this UTC
+// instant's next midnight - used to construct already-expired fixtures
+// without depending on wall-clock timing at test-run time.
+const LONG_PAST_ISSUED_AT = '2020-01-01T00:00:00.000Z';
+
+async function createHeldPermit(
+  db: FakeDb,
+  actorUserId = 'owner',
+  croId = 'cro-2',
+  reason = 'unsafe wind conditions',
+): Promise<PermitRow> {
+  const issued = await createIssuedPermit(db, actorUserId);
+  const held = await holdPermit(croId, issued.id, { expectedVersion: issued.version, reason }, db.deps());
+  if (held.outcome !== 'ok') throw new Error('setup failed: holdPermit');
+  return held.permit;
+}
+
+async function createClosedPermit(db: FakeDb, actorUserId = 'owner'): Promise<PermitRow> {
+  const issued = await createIssuedPermit(db, actorUserId);
+  const closed = await closePermit('cro-2', issued.id, { expectedVersion: issued.version }, db.deps());
+  if (closed.outcome !== 'ok') throw new Error('setup failed: closePermit');
+  return closed.permit;
+}
+
+/** Test-only fixture manipulation - directly backdates a permit's issued_at (never exposed through any real service function) so expiry-dependent tests (Resume/Renew) don't depend on wall-clock timing at test-run time. */
+function backdateIssuedAt(db: FakeDb, permit: PermitRow, issuedAtIso: string): PermitRow {
+  const updated: PermitRow = { ...permit, issued_at: issuedAtIso };
+  db.permits.set(permit.id, updated);
+  return updated;
+}
+
+// --- CRO send-back to applicant / applicant resubmission ---
+
+test('croSendBackToApplicant: PENDING_CRO -> PENDING_CORRECTION, recording the CRO actor and an optional reason', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+
+  const result = await croSendBackToApplicant(
+    'cro-1',
+    permit.id,
+    { expectedVersion: submitted.permit.version, reason: 'missing hazard signage' },
+    db.deps(),
+  );
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'PENDING_CORRECTION');
+  // Permit Number / JSA Number unchanged.
+  assert.equal(result.permit.permit_sequence, permit.permit_sequence);
+  assert.equal(result.permit.jsa_id, permit.jsa_id);
+
+  const events = await getPermitLifecycleEvents(permit.id, db.deps());
+  const sentBack = events.find((e) => e.event_type === 'CRO_SENT_BACK_TO_APPLICANT');
+  assert.ok(sentBack);
+  assert.equal(sentBack?.actor_user_id, 'cro-1');
+  assert.equal(sentBack?.from_status, 'PENDING_CRO');
+  assert.equal(sentBack?.to_status, 'PENDING_CORRECTION');
+  assert.equal(sentBack?.reason, 'missing hazard signage');
+});
+
+test('croSendBackToApplicant rejects a permit that is not PENDING_CRO (wrong state rejected)', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const result = await croSendBackToApplicant('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_pending_cro' });
+});
+
+test('croSendBackToApplicant rejects a stale version', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+
+  const result = await croSendBackToApplicant('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
+});
+
+test('the applicant CAN edit a PENDING_CORRECTION permit (updateDraftPermit widened beyond DRAFT)', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  const sentBack = await croSendBackToApplicant(
+    'cro-1',
+    permit.id,
+    { expectedVersion: submitted.permit.version },
+    db.deps(),
+  );
+  if (sentBack.outcome !== 'ok') throw new Error('setup failed');
+
+  const edited = await updateDraftPermit(
+    'applicant-1',
+    permit.id,
+    { expectedVersion: sentBack.permit.version, company: 'SGRE' },
+    db.deps(),
+  );
+
+  assert.equal(edited.outcome, 'ok');
+  if (edited.outcome !== 'ok') return;
+  assert.equal(edited.permit.company, 'SGRE');
+  assert.equal(edited.permit.status, 'PENDING_CORRECTION');
+});
+
+test('resubmitPermit: PENDING_CORRECTION -> PENDING_CRO, only by the original applicant', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  const sentBack = await croSendBackToApplicant(
+    'cro-1',
+    permit.id,
+    { expectedVersion: submitted.permit.version },
+    db.deps(),
+  );
+  if (sentBack.outcome !== 'ok') throw new Error('setup failed');
+
+  // Someone who is NOT the original applicant cannot resubmit - the
+  // ownership-scoped query finds no matching row for them.
+  const notOwner = await resubmitPermit(
+    'someone-else',
+    permit.id,
+    { expectedVersion: sentBack.permit.version },
+    db.deps(),
+  );
+  assert.deepEqual(notOwner, { outcome: 'not_found' });
+
+  const result = await resubmitPermit(
+    'applicant-1',
+    permit.id,
+    { expectedVersion: sentBack.permit.version },
+    db.deps(),
+  );
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'PENDING_CRO');
+  assert.equal(result.permit.permit_sequence, permit.permit_sequence);
+  assert.equal(result.permit.jsa_id, permit.jsa_id);
+
+  const events = await getPermitLifecycleEvents(permit.id, db.deps());
+  const resubmitted = events.find((e) => e.event_type === 'APPLICANT_RESUBMITTED');
+  assert.ok(resubmitted);
+  assert.equal(resubmitted?.actor_user_id, 'applicant-1');
+  assert.equal(resubmitted?.from_status, 'PENDING_CORRECTION');
+  assert.equal(resubmitted?.to_status, 'PENDING_CRO');
+});
+
+test('resubmitPermit rejects a permit that is not PENDING_CORRECTION', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const result = await resubmitPermit('applicant-1', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_pending_correction' });
+});
+
+test('resubmitPermit rejects a stale version', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  await croSendBackToApplicant('cro-1', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
+
+  const result = await resubmitPermit('applicant-1', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
+});
+
+test('resubmitPermit rejects when required fields are missing (defensive - unreachable via the normal API, since submission already required company, but re-checked here anyway)', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  const sentBack = await croSendBackToApplicant(
+    'cro-1',
+    permit.id,
+    { expectedVersion: submitted.permit.version },
+    db.deps(),
+  );
+  if (sentBack.outcome !== 'ok') throw new Error('setup failed');
+  db.permits.set(permit.id, { ...sentBack.permit, company: null });
+
+  const result = await resubmitPermit(
+    'applicant-1',
+    permit.id,
+    { expectedVersion: sentBack.permit.version },
+    db.deps(),
+  );
+  assert.deepEqual(result, { outcome: 'invalid', reason: 'missing_required_fields' });
+});
+
+test('a full send-back/resubmit/re-forward cycle: old review history is retained, and re-forwarding opens a completely NEW 5-minute window', async () => {
+  const db = new FakeDb();
+  const pending = await createPendingHsePermit(db, 'applicant-1'); // first forward
+  const firstWindowStart = pending.hse_review_started_at;
+
+  db.advanceTime(60_000); // 1 minute passes
+  const sentBackByHse = await hseSendBackToCro('hse-1', pending.id, { expectedVersion: pending.version }, db.deps());
+  if (sentBackByHse.outcome !== 'ok') throw new Error('setup failed');
+  assert.equal(sentBackByHse.permit.status, 'PENDING_CRO');
+  assert.equal(sentBackByHse.permit.hse_review_started_at, null);
+  assert.equal(sentBackByHse.permit.hse_review_deadline_at, null);
+
+  const sentBackToApplicant = await croSendBackToApplicant(
+    'cro-1',
+    pending.id,
+    { expectedVersion: sentBackByHse.permit.version },
+    db.deps(),
+  );
+  if (sentBackToApplicant.outcome !== 'ok') throw new Error('setup failed');
+
+  db.advanceTime(60_000);
+  const resubmitted = await resubmitPermit(
+    'applicant-1',
+    pending.id,
+    { expectedVersion: sentBackToApplicant.permit.version },
+    db.deps(),
+  );
+  if (resubmitted.outcome !== 'ok') throw new Error('setup failed');
+
+  db.advanceTime(60_000);
+  const reforwarded = await forwardToHseReview(
+    'cro-1',
+    pending.id,
+    { expectedVersion: resubmitted.permit.version },
+    db.deps(),
+  );
+  assert.equal(reforwarded.outcome, 'ok');
+  if (reforwarded.outcome !== 'ok') return;
+
+  // A completely new window - never reused/continued from the first one.
+  assert.notEqual(reforwarded.permit.hse_review_started_at, firstWindowStart);
+  const newStarted = new Date(reforwarded.permit.hse_review_started_at as string).getTime();
+  const newDeadline = new Date(reforwarded.permit.hse_review_deadline_at as string).getTime();
+  assert.equal(newDeadline - newStarted, FIVE_MINUTES_MS);
+
+  // Every step of history remains, in order - nothing overwritten/lost.
+  const events = await getPermitLifecycleEvents(pending.id, db.deps());
+  assert.deepEqual(events.map((e) => e.event_type), [
+    'CREATED',
+    'SUBMITTED',
+    'CRO_FORWARDED_HSE',
+    'HSE_SENT_BACK_TO_CRO',
+    'CRO_SENT_BACK_TO_APPLICANT',
+    'APPLICANT_RESUBMITTED',
+    'CRO_FORWARDED_HSE',
+  ]);
+});
+
+// --- HSE send-back to CRO ---
+
+test('hseSendBackToCro: PENDING_HSE -> PENDING_CRO, clearing the HSE review window immediately', async () => {
+  const db = new FakeDb();
+  const permit = await createPendingHsePermit(db);
+
+  const result = await hseSendBackToCro(
+    'hse-1',
+    permit.id,
+    { expectedVersion: permit.version, reason: 'incomplete isolation plan' },
+    db.deps(),
+  );
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'PENDING_CRO');
+  assert.equal(result.permit.hse_review_started_at, null);
+  assert.equal(result.permit.hse_review_deadline_at, null);
+  assert.equal(result.permit.permit_sequence, permit.permit_sequence);
+  assert.equal(result.permit.jsa_id, permit.jsa_id);
+
+  const events = await getPermitLifecycleEvents(permit.id, db.deps());
+  const sentBack = events.find((e) => e.event_type === 'HSE_SENT_BACK_TO_CRO');
+  assert.ok(sentBack);
+  assert.equal(sentBack?.actor_user_id, 'hse-1');
+  assert.equal(sentBack?.reason, 'incomplete isolation plan');
+});
+
+test('hseSendBackToCro rejects a permit that is not PENDING_HSE', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const result = await hseSendBackToCro('hse-1', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_pending_hse' });
+});
+
+test('hseSendBackToCro rejects a stale version', async () => {
+  const db = new FakeDb();
+  const permit = await createPendingHsePermit(db);
+  // A mismatched version - too high, not "reused" - since PENDING_HSE
+  // can't be re-reached to naturally produce a lagging version the way
+  // e.g. croSendBackToApplicant's equivalent test does via DRAFT's extra
+  // update/submit steps.
+  const result = await hseSendBackToCro('hse-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
+});
+
+test('a simulated HSE-approve-vs-HSE-send-back race cannot produce both outcomes - exactly one wins', async () => {
+  const db = new FakeDb();
+  const permit = await createPendingHsePermit(db);
+
+  const [approveResult, sendBackResult] = await Promise.all([
+    hseApprove('hse-1', permit.id, { expectedVersion: permit.version }, db.deps()),
+    hseSendBackToCro('hse-2', permit.id, { expectedVersion: permit.version }, db.deps()),
+  ]);
+
+  const outcomes = [approveResult.outcome, sendBackResult.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(outcomes.includes('conflict'));
+});
+
+test('a simulated CRO-fallback-approve-vs-HSE-send-back race cannot produce both outcomes - exactly one wins', async () => {
+  const db = new FakeDb();
+  const permit = await createPendingHsePermit(db);
+  db.advanceTime(FIVE_MINUTES_MS);
+
+  const [fallbackResult, sendBackResult] = await Promise.all([
+    croFallbackApprove('cro-1', permit.id, { expectedVersion: permit.version }, db.deps()),
+    hseSendBackToCro('hse-1', permit.id, { expectedVersion: permit.version }, db.deps()),
+  ]);
+
+  const outcomes = [fallbackResult.outcome, sendBackResult.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(outcomes.includes('conflict'));
+});
+
+// --- Hold ---
+
+test('holdPermit: ISSUED -> HELD, recording the actor, DB-authoritative time, and the mandatory reason', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+
+  const result = await holdPermit(
+    'cro-2',
+    permit.id,
+    { expectedVersion: permit.version, reason: 'crane inspection overdue' },
+    db.deps(),
+  );
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'HELD');
+  assert.equal(result.permit.held_by, 'cro-2');
+  assert.ok(result.permit.held_at);
+  assert.equal(result.permit.hold_reason, 'crane inspection overdue');
+  // Same Permit Number / JSA Number.
+  assert.equal(result.permit.permit_sequence, permit.permit_sequence);
+  assert.equal(result.permit.jsa_id, permit.jsa_id);
+
+  const events = await getPermitLifecycleEvents(permit.id, db.deps());
+  const held = events.find((e) => e.event_type === 'HELD');
+  assert.ok(held);
+  assert.equal(held?.actor_user_id, 'cro-2');
+  assert.equal(held?.reason, 'crane inspection overdue');
+});
+
+test('holdPermit only applies from ISSUED (wrong state rejected)', async () => {
+  const db = new FakeDb();
+  const { permit: draft } = await createDraftPermit('owner', 'UTC', db.deps());
+  const draftResult = await holdPermit('cro-1', draft.id, { expectedVersion: draft.version, reason: 'x' }, db.deps());
+  assert.deepEqual(draftResult, { outcome: 'conflict', reason: 'not_issued' });
+
+  const held = await createHeldPermit(db);
+  const alreadyHeldResult = await holdPermit(
+    'cro-1',
+    held.id,
+    { expectedVersion: held.version, reason: 'x' },
+    db.deps(),
+  );
+  assert.deepEqual(alreadyHeldResult, { outcome: 'conflict', reason: 'not_issued' });
+});
+
+test('holdPermit rejects a stale version', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+  const result = await holdPermit('cro-3', permit.id, { expectedVersion: permit.version + 1, reason: 'y' }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
+});
+
+// --- Resume ---
+
+test('resumePermit: HELD -> ISSUED before the original midnight expiry, without touching issued_at/numbers', async () => {
+  const db = new FakeDb();
+  const held = await createHeldPermit(db);
+
+  const result = await resumePermit('cro-3', held.id, { expectedVersion: held.version }, db.deps());
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'ISSUED');
+  assert.equal(result.permit.held_by, null);
+  assert.equal(result.permit.held_at, null);
+  assert.equal(result.permit.hold_reason, null);
+  // issued_at, and so the original midnight boundary, is untouched.
+  assert.equal(result.permit.issued_at, held.issued_at);
+  assert.equal(result.permit.permit_sequence, held.permit_sequence);
+  assert.equal(result.permit.jsa_id, held.jsa_id);
+  // No NEW HSE timer - resume doesn't touch these at all, so whatever
+  // this permit already carried (its original real review window, from
+  // when it was first forwarded to HSE, long before ever being held) is
+  // exactly what it still carries - never cleared, never regenerated.
+  assert.equal(result.permit.hse_review_started_at, held.hse_review_started_at);
+  assert.equal(result.permit.hse_review_deadline_at, held.hse_review_deadline_at);
+
+  const events = await getPermitLifecycleEvents(held.id, db.deps());
+  const resumed = events.find((e) => e.event_type === 'RESUMED');
+  assert.ok(resumed);
+  assert.equal(resumed?.actor_user_id, 'cro-3');
+  assert.equal(resumed?.from_status, 'HELD');
+  assert.equal(resumed?.to_status, 'ISSUED');
+});
+
+test('resumePermit fails once the permit\'s midnight expiry has passed', async () => {
+  const db = new FakeDb();
+  const held = await createHeldPermit(db);
+  const backdated = backdateIssuedAt(db, held, LONG_PAST_ISSUED_AT);
+
+  const result = await resumePermit('cro-3', backdated.id, { expectedVersion: backdated.version }, db.deps());
+
+  assert.deepEqual(result, { outcome: 'expired' });
+});
+
+test('resumePermit only applies from HELD (wrong state rejected)', async () => {
+  const db = new FakeDb();
+  const issued = await createIssuedPermit(db);
+  const result = await resumePermit('cro-1', issued.id, { expectedVersion: issued.version }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_held' });
+});
+
+test('resumePermit rejects a stale version', async () => {
+  const db = new FakeDb();
+  const held = await createHeldPermit(db);
+  const result = await resumePermit('cro-3', held.id, { expectedVersion: held.version + 1 }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
+});
+
+test('a simulated resume-vs-close race cannot produce both outcomes - exactly one wins', async () => {
+  const db = new FakeDb();
+  const held = await createHeldPermit(db);
+
+  const [resumeResult, closeResult] = await Promise.all([
+    resumePermit('cro-1', held.id, { expectedVersion: held.version }, db.deps()),
+    closePermit('cro-2', held.id, { expectedVersion: held.version }, db.deps()),
+  ]);
+
+  const outcomes = [resumeResult.outcome, closeResult.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(outcomes.includes('conflict'));
+});
+
+test('a simulated resume-vs-cancel race cannot produce both outcomes - exactly one wins', async () => {
+  const db = new FakeDb();
+  const held = await createHeldPermit(db);
+
+  const [resumeResult, cancelResult] = await Promise.all([
+    resumePermit('cro-1', held.id, { expectedVersion: held.version }, db.deps()),
+    cancelPermit('cro-2', held.id, { expectedVersion: held.version }, db.deps()),
+  ]);
+
+  const outcomes = [resumeResult.outcome, cancelResult.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(outcomes.includes('conflict'));
+});
+
+test('a simulated hold-vs-close race (both racing from ISSUED) cannot produce both outcomes - exactly one wins', async () => {
+  const db = new FakeDb();
+  const issued = await createIssuedPermit(db);
+
+  const [holdResult, closeResult] = await Promise.all([
+    holdPermit('cro-1', issued.id, { expectedVersion: issued.version, reason: 'x' }, db.deps()),
+    closePermit('cro-2', issued.id, { expectedVersion: issued.version }, db.deps()),
+  ]);
+
+  const outcomes = [holdResult.outcome, closeResult.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(outcomes.includes('conflict'));
+});
+
+test('a simulated hold-vs-cancel race (both racing from ISSUED) cannot produce both outcomes - exactly one wins', async () => {
+  const db = new FakeDb();
+  const issued = await createIssuedPermit(db);
+
+  const [holdResult, cancelResult] = await Promise.all([
+    holdPermit('cro-1', issued.id, { expectedVersion: issued.version, reason: 'x' }, db.deps()),
+    cancelPermit('cro-2', issued.id, { expectedVersion: issued.version }, db.deps()),
+  ]);
+
+  const outcomes = [holdResult.outcome, cancelResult.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(outcomes.includes('conflict'));
+});
+
+// --- Cancel ---
+
+test('cancelPermit: ISSUED -> CANCELLED, permanently, recording the actor and an optional reason', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+
+  const result = await cancelPermit(
+    'cro-2',
+    permit.id,
+    { expectedVersion: permit.version, reason: 'work no longer required' },
+    db.deps(),
+  );
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'CANCELLED');
+  assert.equal(result.permit.cancelled_by, 'cro-2');
+  assert.ok(result.permit.cancelled_at);
+  assert.equal(result.permit.cancel_reason, 'work no longer required');
+  assert.equal(result.permit.permit_sequence, permit.permit_sequence);
+  assert.equal(result.permit.jsa_id, permit.jsa_id);
+
+  const events = await getPermitLifecycleEvents(permit.id, db.deps());
+  const cancelled = events.find((e) => e.event_type === 'CANCELLED');
+  assert.ok(cancelled);
+  assert.equal(cancelled?.from_status, 'ISSUED');
+  assert.equal(cancelled?.to_status, 'CANCELLED');
+});
+
+test('cancelPermit: HELD -> CANCELLED also succeeds, and clears the (now-stale) hold columns', async () => {
+  const db = new FakeDb();
+  const held = await createHeldPermit(db);
+
+  const result = await cancelPermit('cro-3', held.id, { expectedVersion: held.version }, db.deps());
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'CANCELLED');
+  assert.equal(result.permit.held_by, null);
+  assert.equal(result.permit.held_at, null);
+  assert.equal(result.permit.hold_reason, null);
+
+  const events = await getPermitLifecycleEvents(held.id, db.deps());
+  const cancelled = events.find((e) => e.event_type === 'CANCELLED');
+  assert.equal(cancelled?.from_status, 'HELD');
+});
+
+test('cancelPermit rejects every source status except ISSUED/HELD', async () => {
+  const db = new FakeDb();
+
+  const { permit: draft } = await createDraftPermit('owner', 'UTC', db.deps());
+  assert.deepEqual(
+    await cancelPermit('cro-1', draft.id, { expectedVersion: draft.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_cancellable' },
+  );
+
+  const pendingHse = await createPendingHsePermit(db, 'owner-2');
+  assert.deepEqual(
+    await cancelPermit('cro-1', pendingHse.id, { expectedVersion: pendingHse.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_cancellable' },
+  );
+
+  const closed = await createClosedPermit(db, 'owner-3');
+  assert.deepEqual(
+    await cancelPermit('cro-1', closed.id, { expectedVersion: closed.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_cancellable' },
+  );
+});
+
+test('cancelPermit rejects a stale version', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+  const result = await cancelPermit('cro-2', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
+});
+
+test('a simulated concurrent double-cancel race has exactly one winner', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+
+  const [first, second] = await Promise.all([
+    cancelPermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps()),
+    cancelPermit('cro-3', permit.id, { expectedVersion: permit.version }, db.deps()),
+  ]);
+
+  const outcomes = [first.outcome, second.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(outcomes.includes('conflict'));
+});
+
+test('a CANCELLED permit is immutable through every other mutation path', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+  const cancelled = await cancelPermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.equal(cancelled.outcome, 'ok');
+  if (cancelled.outcome !== 'ok') return;
+
+  assert.deepEqual(
+    await updateDraftPermit('owner', permit.id, { expectedVersion: cancelled.permit.version, company: 'SGRE' }, db.deps()),
+    { outcome: 'conflict', reason: 'not_editable' },
+  );
+  assert.deepEqual(
+    await submitPermit('owner', permit.id, { expectedVersion: cancelled.permit.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_draft' },
+  );
+  assert.deepEqual(
+    await forwardToHseReview('cro-1', permit.id, { expectedVersion: cancelled.permit.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_pending_cro' },
+  );
+  assert.deepEqual(
+    await hseApprove('hse-1', permit.id, { expectedVersion: cancelled.permit.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_pending_hse' },
+  );
+  assert.deepEqual(
+    await holdPermit('cro-1', permit.id, { expectedVersion: cancelled.permit.version, reason: 'x' }, db.deps()),
+    { outcome: 'conflict', reason: 'not_issued' },
+  );
+  assert.deepEqual(
+    await resumePermit('cro-1', permit.id, { expectedVersion: cancelled.permit.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_held' },
+  );
+  assert.deepEqual(
+    await closePermit('cro-1', permit.id, { expectedVersion: cancelled.permit.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_closable' },
+  );
+  assert.deepEqual(
+    await cancelPermit('cro-1', permit.id, { expectedVersion: cancelled.permit.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_cancellable' },
+  );
+});
+
+// --- Close (widened to also accept HELD) ---
+
+test('closePermit: HELD -> CLOSED also succeeds, records the correct from_status, and clears the hold columns', async () => {
+  const db = new FakeDb();
+  const held = await createHeldPermit(db);
+
+  const result = await closePermit('cro-3', held.id, { expectedVersion: held.version }, db.deps());
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'CLOSED');
+  assert.equal(result.permit.held_by, null);
+  assert.equal(result.permit.held_at, null);
+  assert.equal(result.permit.hold_reason, null);
+
+  const events = await getPermitLifecycleEvents(held.id, db.deps());
+  const closedEvent = events.find((e) => e.event_type === PERMIT_CLOSED_EVENT_TYPE);
+  assert.equal(closedEvent?.from_status, 'HELD');
+});
+
+test('closePermit still works from ISSUED directly (regression - the HELD path is additive, not a replacement)', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+  const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  const events = await getPermitLifecycleEvents(permit.id, db.deps());
+  const closedEvent = events.find((e) => e.event_type === PERMIT_CLOSED_EVENT_TYPE);
+  assert.equal(closedEvent?.from_status, 'ISSUED');
+});
+
+// --- Renewal ---
+
+test('renewPermit: creates a brand-new ISSUED permit, same JSA, new Permit Number, linked via previous_permit_id, no HSE timer', async () => {
+  const db = new FakeDb();
+  const closed = await createClosedPermit(db, 'applicant-1');
+  const backdated = backdateIssuedAt(db, closed, LONG_PAST_ISSUED_AT);
+
+  const result = await renewPermit('cro-1', backdated.id, db.deps());
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'ISSUED');
+  assert.notEqual(result.permit.id, backdated.id);
+  assert.notEqual(result.permit.permit_sequence, backdated.permit_sequence);
+  assert.equal(result.permit.jsa_id, backdated.jsa_id);
+  assert.equal(result.jsa.id, backdated.jsa_id);
+  assert.equal(result.permit.previous_permit_id, backdated.id);
+  assert.equal(result.permit.created_by, backdated.created_by);
+  assert.equal(result.permit.company, backdated.company);
+  assert.equal(result.permit.site_timezone, backdated.site_timezone);
+  assert.notEqual(result.permit.issued_at, backdated.issued_at);
+  assert.ok(result.permit.issued_at);
+  // No HSE review, no timer, for renewal.
+  assert.equal(result.permit.hse_review_started_at, null);
+  assert.equal(result.permit.hse_review_deadline_at, null);
+  assert.equal(result.permit.submitted_at, null);
+
+  const newEvents = await getPermitLifecycleEvents(result.permit.id, db.deps());
+  assert.equal(newEvents.length, 1);
+  assert.equal(newEvents[0]?.event_type, 'RENEWED');
+  assert.equal(newEvents[0]?.from_status, null);
+  assert.equal(newEvents[0]?.to_status, 'ISSUED');
+  assert.equal(newEvents[0]?.actor_user_id, 'cro-1');
+});
+
+test('renewPermit never mutates the old permit - it remains CLOSED, same version, exact same row', async () => {
+  const db = new FakeDb();
+  const closed = await createClosedPermit(db, 'applicant-1');
+  const backdated = backdateIssuedAt(db, closed, LONG_PAST_ISSUED_AT);
+  const oldEventsBefore = await getPermitLifecycleEvents(backdated.id, db.deps());
+
+  await renewPermit('cro-1', backdated.id, db.deps());
+
+  const oldPermitAfter = await getPermitById(backdated.id, db.deps());
+  assert.equal(oldPermitAfter?.status, 'CLOSED');
+  assert.equal(oldPermitAfter?.version, backdated.version);
+  const oldEventsAfter = await getPermitLifecycleEvents(backdated.id, db.deps());
+  assert.equal(oldEventsAfter.length, oldEventsBefore.length, 'no new event should be recorded on the OLD permit');
+});
+
+test('renewPermit rejects a permit that is not CLOSED', async () => {
+  const db = new FakeDb();
+  const issued = await createIssuedPermit(db);
+  const result = await renewPermit('cro-1', issued.id, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_closed' });
+});
+
+test('renewPermit rejects renewal before the old permit\'s midnight expiry has passed', async () => {
+  const db = new FakeDb();
+  const closed = await createClosedPermit(db); // issued/closed "now" - not yet expired
+  const result = await renewPermit('cro-1', closed.id, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_yet_expired' });
+});
+
+test('renewPermit rejects a nonexistent permit', async () => {
+  const db = new FakeDb();
+  const result = await renewPermit('cro-1', 'no-such-permit', db.deps());
+  assert.deepEqual(result, { outcome: 'not_found' });
+});
+
+test('a simulated double-renewal race on the SAME old permit has exactly one winner', async () => {
+  const db = new FakeDb();
+  const closed = await createClosedPermit(db, 'applicant-1');
+  const backdated = backdateIssuedAt(db, closed, LONG_PAST_ISSUED_AT);
+
+  const [first, second] = await Promise.all([
+    renewPermit('cro-1', backdated.id, db.deps()),
+    renewPermit('cro-2', backdated.id, db.deps()),
+  ]);
+
+  const outcomes = [first.outcome, second.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(
+    outcomes.includes('conflict'),
+    `expected the loser to see a conflict (already_renewed), got: ${outcomes.join(', ')}`,
+  );
+  const loser = first.outcome === 'ok' ? second : first;
+  assert.deepEqual(loser, { outcome: 'conflict', reason: 'already_renewed' });
+});
+
+test('renewal numbering: concurrent renewals of DIFFERENT old permits each get a unique new Permit Number', async () => {
+  const db = new FakeDb();
+  const closedA = backdateIssuedAt(db, await createClosedPermit(db, 'applicant-a'), LONG_PAST_ISSUED_AT);
+  const closedB = backdateIssuedAt(db, await createClosedPermit(db, 'applicant-b'), LONG_PAST_ISSUED_AT);
+
+  const [resultA, resultB] = await Promise.all([
+    renewPermit('cro-1', closedA.id, db.deps()),
+    renewPermit('cro-1', closedB.id, db.deps()),
+  ]);
+
+  assert.equal(resultA.outcome, 'ok');
+  assert.equal(resultB.outcome, 'ok');
+  if (resultA.outcome !== 'ok' || resultB.outcome !== 'ok') return;
+  assert.notEqual(resultA.permit.permit_sequence, resultB.permit.permit_sequence);
+  assert.notEqual(resultA.permit.id, resultB.permit.id);
+});
+
+test('a renewed (new) permit is immediately closable/cancellable but never re-renewable/re-reviewable - normal status rules apply to it exactly like any other ISSUED permit', async () => {
+  const db = new FakeDb();
+  const closed = await createClosedPermit(db, 'applicant-1');
+  const backdated = backdateIssuedAt(db, closed, LONG_PAST_ISSUED_AT);
+  const renewed = await renewPermit('cro-1', backdated.id, db.deps());
+  if (renewed.outcome !== 'ok') throw new Error('setup failed');
+
+  // Cannot be "re-renewed" - it isn't CLOSED.
+  assert.deepEqual(await renewPermit('cro-1', renewed.permit.id, db.deps()), {
+    outcome: 'conflict',
+    reason: 'not_closed',
+  });
+  // Cannot be forwarded/approved - it was never a review-pending permit.
+  assert.deepEqual(
+    await forwardToHseReview('cro-1', renewed.permit.id, { expectedVersion: renewed.permit.version }, db.deps()),
+    { outcome: 'conflict', reason: 'not_pending_cro' },
+  );
+  // Ordinary ISSUED actions work normally on it.
+  const held = await holdPermit(
+    'cro-1',
+    renewed.permit.id,
+    { expectedVersion: renewed.permit.version, reason: 'x' },
+    db.deps(),
+  );
+  assert.equal(held.outcome, 'ok');
+});
+
+// --- DB-authoritative time: application-server clock skew must never
+// affect a midnight/expiry authorization decision (resumePermit,
+// renewPermit, and - for completeness - the already-DB-computed HSE
+// fallback-approve eligibility). Each test below deliberately fakes the
+// application process's own `Date` (via node:test's `t.mock.timers`) to
+// report a WRONG "now" - one that would flip the outcome if the
+// production code ever read it - while independently controlling the
+// fake database's own clock (`db.now`, what the FakeDb's `now() AS
+// db_now`/`now()` SQL expressions actually return). The real service
+// functions never call `new Date()`/`Date.now()` for these decisions
+// any more, so the faked application clock must have zero effect; the
+// outcome must track `db.now` alone. ---
+
+const MIDNIGHT_TEST_ISSUED_AT = '2026-03-05T09:00:00.000Z'; // UTC site_timezone -> next midnight is 2026-03-06T00:00:00.000Z
+const MIDNIGHT_TEST_EXPIRY = '2026-03-06T00:00:00.000Z';
+
+test('resumePermit: DB time strictly BEFORE midnight succeeds, even while the application clock falsely reports being long AFTER midnight', async (t) => {
+  const db = new FakeDb();
+  db.now = new Date(MIDNIGHT_TEST_ISSUED_AT);
+  const held = await createHeldPermit(db);
+  assert.equal(held.issued_at, MIDNIGHT_TEST_ISSUED_AT);
+
+  db.now = new Date('2026-03-05T23:59:59.000Z'); // DB: strictly before midnight
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-10T00:00:00.000Z') }); // app clock: days after midnight
+  try {
+    const result = await resumePermit('cro-3', held.id, { expectedVersion: held.version }, db.deps());
+    assert.equal(result.outcome, 'ok');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test('resumePermit: DB time AT midnight is rejected, even while the application clock falsely reports being BEFORE midnight', async (t) => {
+  const db = new FakeDb();
+  db.now = new Date(MIDNIGHT_TEST_ISSUED_AT);
+  const held = await createHeldPermit(db);
+
+  db.now = new Date(MIDNIGHT_TEST_EXPIRY); // DB: exactly at midnight
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-05T10:00:00.000Z') }); // app clock: hours before midnight
+  try {
+    const result = await resumePermit('cro-3', held.id, { expectedVersion: held.version }, db.deps());
+    assert.deepEqual(result, { outcome: 'expired' });
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test('resumePermit: DB time AFTER midnight is rejected, even while the application clock falsely reports being BEFORE midnight', async (t) => {
+  const db = new FakeDb();
+  db.now = new Date(MIDNIGHT_TEST_ISSUED_AT);
+  const held = await createHeldPermit(db);
+
+  db.now = new Date('2026-03-06T00:00:01.000Z'); // DB: just after midnight
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-05T10:00:00.000Z') }); // app clock: hours before midnight
+  try {
+    const result = await resumePermit('cro-3', held.id, { expectedVersion: held.version }, db.deps());
+    assert.deepEqual(result, { outcome: 'expired' });
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test('renewPermit: DB time strictly BEFORE expiry is rejected, even while the application clock falsely reports being AFTER expiry', async (t) => {
+  const db = new FakeDb();
+  db.now = new Date(MIDNIGHT_TEST_ISSUED_AT);
+  const closed = await createClosedPermit(db, 'applicant-1');
+  assert.equal(closed.issued_at, MIDNIGHT_TEST_ISSUED_AT);
+
+  db.now = new Date('2026-03-05T23:59:59.000Z'); // DB: strictly before expiry
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-10T00:00:00.000Z') }); // app clock: days after expiry
+  try {
+    const result = await renewPermit('cro-1', closed.id, db.deps());
+    assert.deepEqual(result, { outcome: 'conflict', reason: 'not_yet_expired' });
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test('renewPermit: DB time exactly AT expiry succeeds, even while the application clock falsely reports being BEFORE expiry', async (t) => {
+  const db = new FakeDb();
+  db.now = new Date(MIDNIGHT_TEST_ISSUED_AT);
+  const closed = await createClosedPermit(db, 'applicant-1');
+
+  db.now = new Date(MIDNIGHT_TEST_EXPIRY); // DB: exactly at expiry
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-05T10:00:00.000Z') }); // app clock: hours before expiry
+  try {
+    const result = await renewPermit('cro-1', closed.id, db.deps());
+    assert.equal(result.outcome, 'ok');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test('renewPermit: DB time AFTER expiry succeeds, even while the application clock falsely reports being BEFORE expiry', async (t) => {
+  const db = new FakeDb();
+  db.now = new Date(MIDNIGHT_TEST_ISSUED_AT);
+  const closed = await createClosedPermit(db, 'applicant-1');
+
+  db.now = new Date('2026-03-06T00:00:01.000Z'); // DB: just after expiry
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-05T10:00:00.000Z') }); // app clock: hours before expiry
+  try {
+    const result = await renewPermit('cro-1', closed.id, db.deps());
+    assert.equal(result.outcome, 'ok');
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test('croFallbackApprove: eligibility remains DB-authoritative even while the application clock falsely reports being before the deadline (verifies the same class of bug is NOT present here)', async (t) => {
+  const db = new FakeDb();
+  const permit = await createPendingHsePermit(db);
+  db.advanceTime(FIVE_MINUTES_MS); // DB: the 5-minute window has genuinely elapsed
+
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2020-01-01T00:00:00.000Z') }); // app clock: long before the window even opened
+  try {
+    const result = await croFallbackApprove('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
+    assert.equal(result.outcome, 'ok');
+  } finally {
+    t.mock.timers.reset();
+  }
 });
 
 // --- Read APIs: permit detail+JSA, own/queue lists, lifecycle history ---

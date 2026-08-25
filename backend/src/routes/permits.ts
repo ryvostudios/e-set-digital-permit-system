@@ -9,16 +9,23 @@ import {
 } from '../domain/permits/access.js';
 import { toDisplayNumber } from '../domain/permits/numbering.js';
 import {
+  cancelPermit,
   closePermit,
   createDraftPermit,
   croFallbackApprove,
+  croSendBackToApplicant,
   forwardToHseReview,
   getJsaById,
   getPermitById,
   getPermitLifecycleEvents,
+  holdPermit,
   hseApprove,
+  hseSendBackToCro,
   listOwnPermits,
   listPermitsByStatus,
+  renewPermit,
+  resubmitPermit,
+  resumePermit,
   submitPermit,
   updateDraftPermit,
   type JsaRow,
@@ -27,14 +34,21 @@ import {
   type PermitRow,
 } from '../domain/permits/service.js';
 import {
+  cancelBodySchema,
   closePermitBodySchema,
   createPermitBodySchema,
   fallbackApproveBodySchema,
   forwardToHseBodySchema,
+  holdBodySchema,
   hseApproveBodySchema,
+  hseSendBackBodySchema,
   paginationQuerySchema,
   permitIdParamsSchema,
   permitQueueQuerySchema,
+  renewBodySchema,
+  resubmitBodySchema,
+  resumeBodySchema,
+  sendBackBodySchema,
   submitPermitBodySchema,
   updatePermitBodySchema,
 } from '../domain/permits/validation.js';
@@ -340,6 +354,54 @@ permitsRouter.post(
   },
 );
 
+/**
+ * Applicant resubmission after a CRO send-back: PENDING_CORRECTION ->
+ * PENDING_CRO. Same ownership-scoping as `/submit` (only the original
+ * applicant may resubmit their own permit) - `permit.submit` is reused
+ * as the authorization gate, the same capability that gates the
+ * original submission, since resubmitting is the same underlying
+ * "finalize and send to CRO" authority.
+ */
+permitsRouter.post(
+  '/permits/:id/resubmit',
+  requireAuth,
+  mutationLimiter,
+  requireCapability('permit.submit'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = resubmitBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await resubmitPermit(userId, params.data.id, { expectedVersion: body.data.version });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    if (result.outcome === 'invalid') {
+      res
+        .status(422)
+        .json({ error: 'invalid_state', message: 'Permit is missing required fields for resubmission', reason: result.reason });
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
 // CRO forward-to-HSE, HSE approve, and CRO fallback approve act on any
 // permit in the relevant state, not just permits the caller created
 // (WORKFLOW.md's "common queue") - so, unlike the draft endpoints above,
@@ -381,6 +443,44 @@ permitsRouter.post(
   },
 );
 
+/** CRO send-back to applicant: PENDING_CRO -> PENDING_CORRECTION. */
+permitsRouter.post(
+  '/permits/:id/send-back',
+  requireAuth,
+  mutationLimiter,
+  requireCapability('permit.send_back'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = sendBackBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await croSendBackToApplicant(userId, params.data.id, {
+      expectedVersion: body.data.version,
+      reason: body.data.reason,
+    });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
 permitsRouter.post(
   '/permits/:id/hse-approve',
   requireAuth,
@@ -402,6 +502,49 @@ permitsRouter.post(
     }
 
     const result = await hseApprove(userId, params.data.id, { expectedVersion: body.data.version });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+/**
+ * HSE send-back to CRO: PENDING_HSE -> PENDING_CRO (never directly to
+ * the applicant). Authorized by `permit.hse_review` - the same
+ * capability that gates `/hse-approve` - since both are HSE's two
+ * possible verdicts on a pending review.
+ */
+permitsRouter.post(
+  '/permits/:id/hse-send-back',
+  requireAuth,
+  mutationLimiter,
+  requireCapability('permit.hse_review'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = hseSendBackBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await hseSendBackToCro(userId, params.data.id, {
+      expectedVersion: body.data.version,
+      reason: body.data.reason,
+    });
 
     if (result.outcome === 'not_found') {
       sendNotFound(res);
@@ -457,13 +600,140 @@ permitsRouter.post(
   },
 );
 
+/** CRO Hold: ISSUED -> HELD. `reason` is mandatory (holdBodySchema requires it). */
+permitsRouter.post(
+  '/permits/:id/hold',
+  requireAuth,
+  mutationLimiter,
+  requireCapability('permit.hold'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = holdBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await holdPermit(userId, params.data.id, {
+      expectedVersion: body.data.version,
+      reason: body.data.reason,
+    });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+/**
+ * CRO Resume: HELD -> ISSUED, only strictly before the permit's original
+ * midnight expiry. Never touches `issued_at` - resume cannot extend
+ * validity or restart it (see domain/permits/service.ts::resumePermit).
+ */
+permitsRouter.post(
+  '/permits/:id/resume',
+  requireAuth,
+  mutationLimiter,
+  requireCapability('permit.resume'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = resumeBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await resumePermit(userId, params.data.id, { expectedVersion: body.data.version });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    if (result.outcome === 'expired') {
+      res.status(409).json({
+        error: 'conflict',
+        message: "The permit's midnight expiry has already passed - it can no longer be resumed",
+        reason: 'expired',
+      });
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+/**
+ * CRO Cancel: ISSUED or HELD -> CANCELLED, permanently. `reason` is
+ * optional - not documented as mandatory.
+ */
+permitsRouter.post(
+  '/permits/:id/cancel',
+  requireAuth,
+  mutationLimiter,
+  requireCapability('permit.cancel'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = cancelBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await cancelPermit(userId, params.data.id, {
+      expectedVersion: body.data.version,
+      reason: body.data.reason,
+    });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
 // Closure: "Only CRO closes a permit" (WORKFLOW.md) - no creator
 // closure request/final-closure step, so this follows the same
 // no-ownership-scoping pattern as forward-hse/hse-approve/
 // fallback-approve above. closed_by/closed_at are never read from the
 // request body (closePermitBodySchema only accepts version/
 // closureRemarks) - they are always the authenticated actor and the
-// database's own time.
+// database's own time. HELD is also closable now - see
+// domain/permits/service.ts::closePermit.
 permitsRouter.post(
   '/permits/:id/close',
   requireAuth,
@@ -498,5 +768,48 @@ permitsRouter.post(
       return;
     }
     res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+/**
+ * Renewal: creates a brand-new permit linked to the given, already-
+ * CLOSED permit - not a mutation of it (see
+ * domain/permits/service.ts::renewPermit for the full rules: same JSA,
+ * new Permit Number, immediately ISSUED, no HSE timer). 201, not 200:
+ * this creates a new resource, matching `POST /permits`'s own status
+ * code for the same reason. The `:id` in the route refers to the OLD
+ * (CLOSED) permit being renewed, not the new one being created.
+ */
+permitsRouter.post(
+  '/permits/:id/renew',
+  requireAuth,
+  mutationLimiter,
+  requireCapability('permit.renew'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = renewBodySchema.safeParse(req.body ?? {});
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await renewPermit(userId, params.data.id);
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    res.status(201).json({ permit: serializePermit(result.permit), jsa: serializeJsa(result.jsa) });
   },
 );

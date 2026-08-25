@@ -96,13 +96,18 @@ non-negotiable requirement:
   `DB_SSL=true` (enforced by `env.ts`); set `DB_CA_CERT_PATH` if the
   platform's default trusted CA store doesn't already cover Supabase's
   CA.
-- **Applying migrations.** `database/migrations/0001`-`0011` are applied
+- **Applying migrations.** `database/migrations/0001`-`0012` are applied
   and live-verified against the current Supabase project
-  (`yfxnigovfmngypbgcnaw`) - see `PROJECT_CONTEXT.md`. No migration was
-  added by the production-hardening batch that introduced this
-  document. Running `npm run migrate` (from `backend/`) against a new/
-  different database applies whatever hasn't been applied yet, in
-  order; nothing here changes that process.
+  (`yfxnigovfmngypbgcnaw`) - see `PROJECT_CONTEXT.md`. Migration
+  `0012_permit_workflow_completion.sql` (the Send-Back/Hold/Resume/
+  Cancel/Renewal schema) has been applied and live-verified: migration
+  recorded, new workflow statuses/constraints live, hold/cancel
+  invariants valid, renewal uniqueness active, lifecycle append-only
+  protections intact, RLS/default-deny intact, no anon/authenticated
+  direct grants, no new policies, no data-integrity violations found.
+  Running `npm run migrate` (from `backend/`) against a database applies
+  whatever hasn't been applied yet, in order; nothing here changes that
+  process.
 
 ## Rate limiting - production scaling constraint
 

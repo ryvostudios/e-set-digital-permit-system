@@ -3,11 +3,15 @@ import { test } from 'node:test';
 import { canViewPermit, computeAvailableActions, computePermitValidity } from './access.js';
 import type { PermitRow } from './service.js';
 
-function basePermit(overrides: Partial<PermitRow> = {}): Pick<PermitRow, 'status' | 'created_by' | 'hse_review_deadline_at'> {
+function basePermit(
+  overrides: Partial<PermitRow> = {},
+): Pick<PermitRow, 'status' | 'created_by' | 'hse_review_deadline_at' | 'issued_at' | 'site_timezone'> {
   return {
     status: 'DRAFT',
     created_by: 'owner',
     hse_review_deadline_at: null,
+    issued_at: null,
+    site_timezone: 'UTC',
     ...overrides,
   };
 }
@@ -118,13 +122,13 @@ test('computeAvailableActions: fallback_approve only appears once the DB-recorde
   assert.deepEqual(after, ['fallback_approve']);
 });
 
-test('computeAvailableActions: hse_approve has no time gate (whether HSE can act post-timeout is unresolved, not restricted)', () => {
+test('computeAvailableActions: hse_approve (and hse_send_back) have no time gate (whether HSE can act post-timeout is unresolved, not restricted)', () => {
   const permit = basePermit({
     status: 'PENDING_HSE',
     hse_review_deadline_at: new Date('2020-01-01T00:00:00.000Z').toISOString(),
   });
   const actions = computeAvailableActions(permit, 'hse-1', new Set(['permit.hse_review']), Date.now());
-  assert.deepEqual(actions, ['hse_approve']);
+  assert.deepEqual(actions.sort(), ['hse_approve', 'hse_send_back']);
 });
 
 test('computeAvailableActions: close only appears for ISSUED with permit.close', () => {
@@ -133,6 +137,144 @@ test('computeAvailableActions: close only appears for ISSUED with permit.close',
     ['close'],
   );
   assert.deepEqual(computeAvailableActions(basePermit({ status: 'CLOSED' }), 'cro-1', new Set(['permit.close']), Date.now()), []);
+});
+
+// --- canViewPermit: new statuses (PENDING_CORRECTION, HELD, CANCELLED) ---
+
+test('canViewPermit: PENDING_CORRECTION is visible to permit.send_back holders (the same capability that performs the send-back)', () => {
+  assert.equal(
+    canViewPermit(basePermit({ status: 'PENDING_CORRECTION' }), 'cro-1', new Set(['permit.send_back'])),
+    true,
+  );
+  assert.equal(
+    canViewPermit(basePermit({ status: 'PENDING_CORRECTION' }), 'cro-1', new Set(['permit.hold'])),
+    false,
+  );
+});
+
+test('canViewPermit: HELD is visible to any of resume/cancel/close holders (OR-based)', () => {
+  assert.equal(canViewPermit(basePermit({ status: 'HELD' }), 'cro-1', new Set(['permit.resume'])), true);
+  assert.equal(canViewPermit(basePermit({ status: 'HELD' }), 'cro-1', new Set(['permit.cancel'])), true);
+  assert.equal(canViewPermit(basePermit({ status: 'HELD' }), 'cro-1', new Set(['permit.close'])), true);
+  assert.equal(canViewPermit(basePermit({ status: 'HELD' }), 'cro-1', new Set(['permit.hold'])), false);
+});
+
+test('canViewPermit: CANCELLED is visible to permit.cancel holders', () => {
+  assert.equal(canViewPermit(basePermit({ status: 'CANCELLED' }), 'cro-1', new Set(['permit.cancel'])), true);
+  assert.equal(canViewPermit(basePermit({ status: 'CANCELLED' }), 'cro-1', new Set(['permit.close'])), false);
+});
+
+// --- computeAvailableActions: new actions ---
+
+function timedPermit(
+  overrides: Partial<Pick<PermitRow, 'status' | 'created_by' | 'hse_review_deadline_at' | 'issued_at' | 'site_timezone'>> = {},
+) {
+  return basePermit(overrides);
+}
+
+test('computeAvailableActions: PENDING_CORRECTION - owner sees update/resubmit with the matching capabilities, a non-owner sees neither', () => {
+  const permit = timedPermit({ status: 'PENDING_CORRECTION', created_by: 'applicant-1' });
+  const ownerActions = computeAvailableActions(
+    permit,
+    'applicant-1',
+    new Set(['permit.create', 'permit.submit']),
+    Date.now(),
+  );
+  assert.deepEqual(ownerActions.sort(), ['resubmit', 'update']);
+
+  const nonOwnerActions = computeAvailableActions(
+    permit,
+    'someone-else',
+    new Set(['permit.create', 'permit.submit']),
+    Date.now(),
+  );
+  assert.deepEqual(nonOwnerActions, []);
+});
+
+test('computeAvailableActions: PENDING_CRO exposes both forward_hse and send_back independently, per capability held', () => {
+  const permit = timedPermit({ status: 'PENDING_CRO' });
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(['permit.forward_hse']), Date.now()), [
+    'forward_hse',
+  ]);
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(['permit.send_back']), Date.now()), [
+    'send_back',
+  ]);
+  assert.deepEqual(
+    computeAvailableActions(permit, 'cro-1', new Set(['permit.forward_hse', 'permit.send_back']), Date.now()).sort(),
+    ['forward_hse', 'send_back'],
+  );
+});
+
+test('computeAvailableActions: PENDING_HSE exposes hse_send_back alongside hse_approve, gated by the same permit.hse_review capability', () => {
+  const permit = timedPermit({ status: 'PENDING_HSE' });
+  assert.deepEqual(
+    computeAvailableActions(permit, 'hse-1', new Set(['permit.hse_review']), Date.now()).sort(),
+    ['hse_approve', 'hse_send_back'],
+  );
+  assert.deepEqual(computeAvailableActions(permit, 'hse-1', new Set(), Date.now()), []);
+});
+
+test('computeAvailableActions: ISSUED exposes hold/cancel/close independently, per capability held', () => {
+  const permit = timedPermit({ status: 'ISSUED' });
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(['permit.hold']), Date.now()), ['hold']);
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(['permit.cancel']), Date.now()), ['cancel']);
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(['permit.close']), Date.now()), ['close']);
+  assert.deepEqual(
+    computeAvailableActions(permit, 'cro-1', new Set(['permit.hold', 'permit.cancel', 'permit.close']), Date.now()).sort(),
+    ['cancel', 'close', 'hold'],
+  );
+});
+
+test('computeAvailableActions: HELD exposes cancel/close unconditionally, but resume only strictly before the midnight expiry', () => {
+  const issuedAt = '2026-03-05T09:00:00.000Z';
+  const permit = timedPermit({ status: 'HELD', issued_at: issuedAt, site_timezone: 'UTC' });
+  const capabilities = new Set(['permit.resume', 'permit.cancel', 'permit.close']);
+
+  const beforeExpiry = new Date('2026-03-05T23:59:59.000Z').getTime();
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', capabilities, beforeExpiry).sort(), [
+    'cancel',
+    'close',
+    'resume',
+  ]);
+
+  const atExpiry = new Date('2026-03-06T00:00:00.000Z').getTime();
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', capabilities, atExpiry).sort(), ['cancel', 'close']);
+});
+
+test('computeAvailableActions: HELD never exposes resume without permit.resume, even before expiry', () => {
+  const permit = timedPermit({ status: 'HELD', issued_at: '2026-03-05T09:00:00.000Z', site_timezone: 'UTC' });
+  const beforeExpiry = new Date('2026-03-05T10:00:00.000Z').getTime();
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(['permit.cancel']), beforeExpiry), ['cancel']);
+});
+
+test('computeAvailableActions: CLOSED exposes renew only once expired and only with permit.renew', () => {
+  const issuedAt = '2026-03-05T09:00:00.000Z';
+  const permit = timedPermit({ status: 'CLOSED', issued_at: issuedAt, site_timezone: 'UTC' });
+
+  const beforeExpiry = new Date('2026-03-05T23:59:59.000Z').getTime();
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(['permit.renew']), beforeExpiry), []);
+
+  const afterExpiry = new Date('2026-03-06T00:00:01.000Z').getTime();
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(['permit.renew']), afterExpiry), ['renew']);
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', new Set(), afterExpiry), []);
+});
+
+test('computeAvailableActions: CANCELLED exposes no actions at all, regardless of capabilities held', () => {
+  const permit = timedPermit({ status: 'CANCELLED' });
+  const allCapabilities = new Set([
+    'permit.create',
+    'permit.submit',
+    'permit.send_back',
+    'permit.forward_hse',
+    'permit.hse_review',
+    'permit.fallback_approve',
+    'permit.hold',
+    'permit.resume',
+    'permit.cancel',
+    'permit.close',
+    'permit.renew',
+  ]);
+  assert.deepEqual(computeAvailableActions(permit, 'cro-1', allCapabilities, Date.now()), []);
 });
 
 // --- computePermitValidity ---
@@ -193,9 +335,31 @@ test('computePermitValidity: expiresAt is unchanged by status - CLOSED reports t
 });
 
 test('computePermitValidity: no status other than ISSUED can ever be reported valid', () => {
-  for (const status of ['DRAFT', 'PENDING_CRO', 'PENDING_HSE', 'CLOSED'] as const) {
+  for (const status of [
+    'DRAFT',
+    'PENDING_CRO',
+    'PENDING_HSE',
+    'PENDING_CORRECTION',
+    'HELD',
+    'CANCELLED',
+    'CLOSED',
+  ] as const) {
     const permit = issuedPermit({ status });
     const result = computePermitValidity(permit, new Date('2026-03-05T10:00:00.000Z'));
     assert.equal(result?.isValid, false, `expected ${status} to never be valid`);
   }
+});
+
+test('computePermitValidity: a HELD permit is NEVER valid, even strictly before what would otherwise be its expiry (the same regression class as CLOSED)', () => {
+  const permit = issuedPermit({ status: 'HELD' });
+  const wellBeforeWhatWouldHaveBeenExpiry = new Date('2026-03-05T10:00:00.000Z');
+  const result = computePermitValidity(permit, wellBeforeWhatWouldHaveBeenExpiry);
+  assert.equal(result?.isValid, false);
+});
+
+test('computePermitValidity: a CANCELLED permit is NEVER valid, even strictly before what would otherwise be its expiry', () => {
+  const permit = issuedPermit({ status: 'CANCELLED' });
+  const wellBeforeWhatWouldHaveBeenExpiry = new Date('2026-03-05T10:00:00.000Z');
+  const result = computePermitValidity(permit, wellBeforeWhatWouldHaveBeenExpiry);
+  assert.equal(result?.isValid, false);
 });

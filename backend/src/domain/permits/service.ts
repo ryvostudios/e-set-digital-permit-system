@@ -1,8 +1,30 @@
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import { query, withTransaction } from '../../db/pool.js';
 import { MAX_PAGE_SIZE, MAX_PAGINATION_OFFSET } from './validation.js';
+import { isPermitValid } from './validity.js';
 
-export type PermitStatus = 'DRAFT' | 'PENDING_CRO' | 'PENDING_HSE' | 'ISSUED' | 'CLOSED';
+/** Postgres SQLSTATE for a unique-constraint violation. */
+const UNIQUE_VIOLATION_SQLSTATE = '23505';
+
+/** Whether `err` is a `pg` unique-constraint-violation error for exactly `constraintName` - used to turn a database-enforced race outcome (see `renewPermit`) into a normal conflict result, not an uncaught throw. */
+function isUniqueViolation(err: unknown, constraintName: string): boolean {
+  return (
+    err !== null &&
+    typeof err === 'object' &&
+    (err as { code?: unknown }).code === UNIQUE_VIOLATION_SQLSTATE &&
+    (err as { constraint?: unknown }).constraint === constraintName
+  );
+}
+
+export type PermitStatus =
+  | 'DRAFT'
+  | 'PENDING_CRO'
+  | 'PENDING_HSE'
+  | 'PENDING_CORRECTION'
+  | 'ISSUED'
+  | 'HELD'
+  | 'CANCELLED'
+  | 'CLOSED';
 export type Company = 'ESET' | 'SGRE' | 'ZPL' | 'OTHER';
 
 export interface PermitRow {
@@ -32,6 +54,18 @@ export interface PermitRow {
   closed_by: string | null;
   closed_at: string | null;
   closure_remarks: string | null;
+  // Set together, DB-side, by holdPermit; cleared (NULL) by resumePermit/
+  // closePermit/cancelPermit - present if and only if status = 'HELD'
+  // (permits_hold_consistent). `hold_reason` is mandatory whenever set.
+  held_by: string | null;
+  held_at: string | null;
+  hold_reason: string | null;
+  // Set together, DB-side, by cancelPermit - present if and only if
+  // status = 'CANCELLED' (permits_cancellation_consistent). Never
+  // cleared: cancellation is terminal.
+  cancelled_by: string | null;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -346,17 +380,25 @@ export interface UpdateDraftInput {
 
 export type UpdateDraftOutcome =
   | { outcome: 'not_found' }
-  | { outcome: 'conflict'; reason: 'not_draft' | 'stale_version' }
+  | { outcome: 'conflict'; reason: 'not_editable' | 'stale_version' }
   | { outcome: 'ok'; permit: PermitRow };
 
+// A permit is editable by its creator in exactly two statuses: DRAFT
+// (never submitted yet) and PENDING_CORRECTION (CRO sent it back for
+// correction - "Applicant must be able to edit it", this batch's CRO
+// send-back rules). Shared with `resubmitPermit`'s ownership/edit-status
+// story below.
+const EDITABLE_STATUSES: readonly PermitStatus[] = ['DRAFT', 'PENDING_CORRECTION'];
+
 /**
- * Updates a DRAFT permit's editable fields (currently just `company` /
- * `company_other` - the only field DECISIONS.md documents). Only applies
- * if the permit belongs to `actorUserId`, is still DRAFT, and
- * `expectedVersion` matches the current row version - otherwise it's a
- * conflict, never a silent overwrite (SECURITY.md). The read-then-write
- * happens under a row lock (`FOR UPDATE`) inside one transaction so the
- * check and the write are atomic even under concurrent requests.
+ * Updates a DRAFT-or-PENDING_CORRECTION permit's editable fields
+ * (currently just `company` / `company_other` - the only field
+ * DECISIONS.md documents). Only applies if the permit belongs to
+ * `actorUserId`, is in an editable status, and `expectedVersion` matches
+ * the current row version - otherwise it's a conflict, never a silent
+ * overwrite (SECURITY.md). The read-then-write happens under a row lock
+ * (`FOR UPDATE`) inside one transaction so the check and the write are
+ * atomic even under concurrent requests.
  */
 export async function updateDraftPermit(
   actorUserId: string,
@@ -371,7 +413,7 @@ export async function updateDraftPermit(
     );
     const existing = existingResult.rows[0];
     if (!existing) return { outcome: 'not_found' };
-    if (existing.status !== 'DRAFT') return { outcome: 'conflict', reason: 'not_draft' };
+    if (!EDITABLE_STATUSES.includes(existing.status)) return { outcome: 'conflict', reason: 'not_editable' };
     if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
 
     const nextCompany = input.company ?? existing.company;
@@ -448,6 +490,66 @@ export async function submitPermit(
   });
 }
 
+export interface ResubmitInput {
+  expectedVersion: number;
+}
+
+export type ResubmitOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_pending_correction' | 'stale_version' }
+  | { outcome: 'invalid'; reason: 'missing_required_fields' }
+  | { outcome: 'ok'; permit: PermitRow };
+
+/**
+ * Applicant resubmission after a CRO send-back: PENDING_CORRECTION ->
+ * PENDING_CRO ("Applicant resubmission returns permit to PENDING_CRO" -
+ * this batch's CRO send-back rules). Same ownership/status/version-
+ * conflict shape as `submitPermit` (only the original applicant may
+ * resubmit their own permit - `created_by = actorUserId`, not just any
+ * capability holder), and the same required-field re-check
+ * (`isSubmittable`) - a resubmission must clear the same completeness
+ * bar the original submission did. Deliberately a separate function
+ * from `submitPermit` rather than widening it to accept either source
+ * status: the two record different, distinctly-named lifecycle events
+ * (SUBMITTED vs APPLICANT_RESUBMITTED), matching every other
+ * status-specific transition in this file.
+ */
+export async function resubmitPermit(
+  actorUserId: string,
+  permitId: string,
+  input: ResubmitInput,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<ResubmitOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow>(
+      'SELECT * FROM permits WHERE id = $1 AND created_by = $2 FOR UPDATE',
+      [permitId, actorUserId],
+    );
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (existing.status !== 'PENDING_CORRECTION') return { outcome: 'conflict', reason: 'not_pending_correction' };
+    if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
+    if (!isSubmittable(existing)) return { outcome: 'invalid', reason: 'missing_required_fields' };
+
+    const updateResult = await client.query<PermitRow>(
+      `UPDATE permits
+          SET status = 'PENDING_CRO', version = version + 1, submitted_at = now(), updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [permitId],
+    );
+    const permit = requireRow(updateResult.rows);
+
+    await client.query(
+      `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [permitId, 'APPLICANT_RESUBMITTED', actorUserId, 'PENDING_CORRECTION', 'PENDING_CRO'],
+    );
+
+    return { outcome: 'ok', permit };
+  });
+}
+
 // CRO/HSE review actions (below) are never scoped by `created_by`: CRO
 // and HSE act on permits they did not create - WORKFLOW.md's "common
 // queue" - so object access is authorized by capability alone, backed by
@@ -510,6 +612,60 @@ export async function forwardToHseReview(
   });
 }
 
+export interface SendBackInput {
+  expectedVersion: number;
+  reason?: string | undefined;
+}
+
+export type SendBackOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_pending_cro' | 'stale_version' }
+  | { outcome: 'ok'; permit: PermitRow };
+
+/**
+ * CRO send-back to applicant: PENDING_CRO -> PENDING_CORRECTION ("While
+ * permit is PENDING_CRO: CRO may send it back to the original applicant
+ * for correction" - this batch's CRO send-back rules). Same
+ * no-ownership-scoping as `forwardToHseReview` (CRO acts on permits it
+ * did not create); `permit.send_back` is the sole authorization gate.
+ * `reason` is optional (not documented as mandatory, unlike Hold's
+ * reason) but recorded on the lifecycle event when supplied.
+ */
+export async function croSendBackToApplicant(
+  actorUserId: string,
+  permitId: string,
+  input: SendBackInput,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<SendBackOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
+      permitId,
+    ]);
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (existing.status !== 'PENDING_CRO') return { outcome: 'conflict', reason: 'not_pending_cro' };
+    if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
+
+    const reason = input.reason ?? null;
+    const updateResult = await client.query<PermitRow>(
+      `UPDATE permits
+          SET status = 'PENDING_CORRECTION', version = version + 1, updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [permitId],
+    );
+    const permit = requireRow(updateResult.rows);
+
+    await client.query(
+      `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [permitId, 'CRO_SENT_BACK_TO_APPLICANT', actorUserId, 'PENDING_CRO', 'PENDING_CORRECTION', reason],
+    );
+
+    return { outcome: 'ok', permit };
+  });
+}
+
 export interface HseApproveInput {
   expectedVersion: number;
 }
@@ -559,6 +715,80 @@ export async function hseApprove(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
        VALUES ($1, $2, $3, $4, $5)`,
       [permitId, 'HSE_APPROVED', actorUserId, 'PENDING_HSE', 'ISSUED'],
+    );
+
+    return { outcome: 'ok', permit };
+  });
+}
+
+export interface HseSendBackInput {
+  expectedVersion: number;
+  reason?: string | undefined;
+}
+
+export type HseSendBackOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_pending_hse' | 'stale_version' }
+  | { outcome: 'ok'; permit: PermitRow };
+
+/**
+ * HSE send-back to CRO: PENDING_HSE -> PENDING_CRO ("HSE may send permit
+ * back to CRO. HSE does NOT send directly to applicant. active 5-minute
+ * HSE timer stops immediately" - this batch's HSE send-back rules).
+ * Clears `hse_review_started_at`/`hse_review_deadline_at` back to NULL
+ * in the same statement as the status change - this IS "the timer
+ * stops immediately" (there is no separate timer/job to cancel; the
+ * timer is purely these two columns, and PENDING_CRO requires them NULL
+ * - permits_hse_window_status_consistent). Old HSE review
+ * attempts/history remain fully auditable via permit_lifecycle_events
+ * (this event, and any prior CRO_FORWARDED_HSE), unaffected by clearing
+ * the live columns. When CRO forwards again later, `forwardToHseReview`
+ * unconditionally sets fresh `now()`/`now() + 5 minutes` regardless of
+ * this permit's history, so a re-forward always starts a completely new
+ * window - never a reused/continued deadline - with no change needed
+ * here to guarantee that.
+ *
+ * Deliberately has no time-based gate on when HSE may send back, for
+ * the same reason `hseApprove` doesn't: whether HSE may still act after
+ * the window has expired is explicitly UNRESOLVED (DECISIONS.md open
+ * decision #1); restricting it here would be answering that open
+ * question. Authorized by `permit.hse_review` - the same capability
+ * that gates `hseApprove` - since both are HSE's two possible verdicts
+ * on a pending review, not two separately-grantable authorities.
+ */
+export async function hseSendBackToCro(
+  actorUserId: string,
+  permitId: string,
+  input: HseSendBackInput,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<HseSendBackOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
+      permitId,
+    ]);
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (existing.status !== 'PENDING_HSE') return { outcome: 'conflict', reason: 'not_pending_hse' };
+    if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
+
+    const reason = input.reason ?? null;
+    const updateResult = await client.query<PermitRow>(
+      `UPDATE permits
+          SET status = 'PENDING_CRO',
+              hse_review_started_at = NULL,
+              hse_review_deadline_at = NULL,
+              version = version + 1,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [permitId],
+    );
+    const permit = requireRow(updateResult.rows);
+
+    await client.query(
+      `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [permitId, 'HSE_SENT_BACK_TO_CRO', actorUserId, 'PENDING_HSE', 'PENDING_CRO', reason],
     );
 
     return { outcome: 'ok', permit };
@@ -629,6 +859,203 @@ export async function croFallbackApprove(
   });
 }
 
+export interface HoldInput {
+  expectedVersion: number;
+  /** Mandatory - "HOLD REASON IS MANDATORY" (this batch's Hold rules); enforced again at the database level (permits_hold_consistent), not just here. */
+  reason: string;
+}
+
+export type HoldOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_issued' | 'stale_version' }
+  | { outcome: 'ok'; permit: PermitRow };
+
+/**
+ * CRO Hold: ISSUED -> HELD ("Only CRO may HOLD an ISSUED permit" - this
+ * batch's Hold rules; only ISSUED, not any mid-review state, resolving
+ * DECISIONS.md's previously-open decision #2). Same numbering/no-
+ * ownership-scoping pattern as `closePermit` below. `held_by`/`held_at`
+ * are always the authenticated actor and the database's own time - the
+ * caller has no way to supply either (see `HoldInput`, which only
+ * accepts the expected version and the reason).
+ */
+export async function holdPermit(
+  actorUserId: string,
+  permitId: string,
+  input: HoldInput,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<HoldOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
+      permitId,
+    ]);
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (existing.status !== 'ISSUED') return { outcome: 'conflict', reason: 'not_issued' };
+    if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
+
+    const updateResult = await client.query<PermitRow>(
+      `UPDATE permits
+          SET status = 'HELD', held_by = $2, held_at = now(), hold_reason = $3, version = version + 1, updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [permitId, actorUserId, input.reason],
+    );
+    const permit = requireRow(updateResult.rows);
+
+    await client.query(
+      `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [permitId, 'HELD', actorUserId, 'ISSUED', 'HELD', input.reason],
+    );
+
+    return { outcome: 'ok', permit };
+  });
+}
+
+export interface ResumeInput {
+  expectedVersion: number;
+}
+
+export type ResumeOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_held' | 'stale_version' }
+  | { outcome: 'expired' }
+  | { outcome: 'ok'; permit: PermitRow };
+
+/**
+ * CRO Resume: HELD -> ISSUED, but only strictly before the permit's
+ * ORIGINAL midnight expiry ("Resume is allowed only BEFORE the existing
+ * permit midnight expiry... At or after midnight: resume must fail" -
+ * this batch's Resume rules). `issued_at` is never touched by Hold or
+ * Resume, so the expiry boundary (`computeNextMidnightUtc(issued_at,
+ * site_timezone)`, via `isPermitValid`) is exactly the SAME boundary the
+ * permit had before it was ever held - resume cannot extend validity,
+ * restart it, or create a new HSE timer, because nothing about
+ * `issued_at`/`hse_review_*` is ever written here.
+ *
+ * Uses DATABASE-authoritative time (`now()`, selected as `db_now` in the
+ * same `FOR UPDATE` statement that locks the permit row - one round
+ * trip, one consistent instant) for the expiry decision - never the
+ * application server's own clock (`new Date()`/`Date.now()`). The
+ * backend process's clock can skew from the database's; only the
+ * database's `now()` is what "authoritative time" means for a
+ * midnight-sensitive authorization decision (SECURITY.md "Time and
+ * Enforcement Integrity"). This mirrors exactly how
+ * `croFallbackApprove` below already computes its own time-gated
+ * eligibility (`now() >= hse_review_deadline_at`) inside the query
+ * itself rather than in application code.
+ */
+export async function resumePermit(
+  actorUserId: string,
+  permitId: string,
+  input: ResumeInput,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<ResumeOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow & { db_now: string }>(
+      'SELECT p.*, now() AS db_now FROM permits p WHERE p.id = $1 FOR UPDATE',
+      [permitId],
+    );
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (existing.status !== 'HELD') return { outcome: 'conflict', reason: 'not_held' };
+    if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
+
+    // permits_issued_at_consistent guarantees issued_at is set for HELD.
+    if (!isPermitValid(new Date(existing.issued_at as string), existing.site_timezone, new Date(existing.db_now))) {
+      return { outcome: 'expired' };
+    }
+
+    const updateResult = await client.query<PermitRow>(
+      `UPDATE permits
+          SET status = 'ISSUED', held_by = NULL, held_at = NULL, hold_reason = NULL, version = version + 1, updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [permitId],
+    );
+    const permit = requireRow(updateResult.rows);
+
+    await client.query(
+      `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [permitId, 'RESUMED', actorUserId, 'HELD', 'ISSUED'],
+    );
+
+    return { outcome: 'ok', permit };
+  });
+}
+
+export interface CancelInput {
+  expectedVersion: number;
+  reason?: string | undefined;
+}
+
+export type CancelOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_cancellable' | 'stale_version' }
+  | { outcome: 'ok'; permit: PermitRow };
+
+const CANCELLABLE_STATUSES: readonly PermitStatus[] = ['ISSUED', 'HELD'];
+
+/**
+ * CRO Cancel: ISSUED or HELD -> CANCELLED, permanently ("Only CRO may
+ * cancel AFTER issuance. Allowed source states: ISSUED, HELD" - this
+ * batch's Cancel rules, resolving DECISIONS.md's previously-open
+ * decision #3). Every other permit-mutating function in this file only
+ * applies to one specific non-CANCELLED status and rejects anything
+ * else as a conflict, so a CANCELLED permit is already unreachable
+ * through every one of those paths, including a second call to this
+ * one - immutability falls directly out of those existing per-function
+ * status checks, the same way CLOSED's immutability already does
+ * (see `closePermit`'s doc comment), without any additional mechanism.
+ * `cancel_reason` is optional - not documented as mandatory.
+ */
+export async function cancelPermit(
+  actorUserId: string,
+  permitId: string,
+  input: CancelInput,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<CancelOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
+      permitId,
+    ]);
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (!CANCELLABLE_STATUSES.includes(existing.status)) return { outcome: 'conflict', reason: 'not_cancellable' };
+    if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
+
+    const fromStatus = existing.status;
+    const reason = input.reason ?? null;
+
+    const updateResult = await client.query<PermitRow>(
+      `UPDATE permits
+          SET status = 'CANCELLED',
+              cancelled_by = $2,
+              cancelled_at = now(),
+              cancel_reason = $3,
+              held_by = NULL,
+              held_at = NULL,
+              hold_reason = NULL,
+              version = version + 1,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [permitId, actorUserId, reason],
+    );
+    const permit = requireRow(updateResult.rows);
+
+    await client.query(
+      `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [permitId, 'CANCELLED', actorUserId, fromStatus, 'CANCELLED', reason],
+    );
+
+    return { outcome: 'ok', permit };
+  });
+}
+
 /**
  * The lifecycle event type recorded for the ISSUED -> CLOSED transition.
  * Named as its own constant, rather than an inline literal in
@@ -646,34 +1073,43 @@ export interface CloseInput {
 
 export type CloseOutcome =
   | { outcome: 'not_found' }
-  | { outcome: 'conflict'; reason: 'not_issued' | 'stale_version' }
+  | { outcome: 'conflict'; reason: 'not_closable' | 'stale_version' }
   | { outcome: 'ok'; permit: PermitRow };
 
+const CLOSABLE_STATUSES: readonly PermitStatus[] = ['ISSUED', 'HELD'];
+
 /**
- * The only implemented closure transition: ISSUED -> CLOSED ("Only CRO
- * closes a permit" - WORKFLOW.md; there is no creator closure request or
- * creator final closure step, and no two-stage closure workflow). Same
- * no-ownership-scoping as the other CRO/HSE review actions above (CRO
- * closes permits it did not create); `permit.close` (already-seeded
- * capability) is the sole authorization gate, backed by the row lock +
- * status/version check.
+ * Closure: ISSUED -> CLOSED, or HELD -> CLOSED ("CRO may close a HELD
+ * permit. Allowed: before midnight, after midnight" - this batch's
+ * Close-HELD rule, added alongside the original ISSUED -> CLOSED path;
+ * "Only CRO closes a permit" - WORKFLOW.md; there is no creator closure
+ * request or creator final closure step, and no two-stage closure
+ * workflow). Same no-ownership-scoping as the other CRO/HSE review
+ * actions above (CRO closes permits it did not create); `permit.close`
+ * (already-seeded capability) is the sole authorization gate, backed by
+ * the row lock + status/version check. No time-of-day gate at all -
+ * closing a HELD permit is allowed both before and after its midnight
+ * expiry, unlike Resume, which is time-gated.
  *
  * `closed_by` is always `actorUserId` (the authenticated actor) and
  * `closed_at` is always the database's own `now()` - the caller has no
  * way to supply either (see `CloseInput`, which only accepts the
  * expected version and optional remarks); this is what makes spoofing
- * either one impossible, not any extra validation.
+ * either one impossible, not any extra validation. Closing FROM held
+ * also clears `held_by`/`held_at`/`hold_reason` (permits_hold_consistent
+ * requires them NULL once status is no longer HELD) - the full hold
+ * history remains in permit_lifecycle_events regardless.
  *
  * Whether closure remarks must be mandatory is unresolved (DECISIONS.md);
  * `closureRemarks` is stored as-is when provided and left NULL
  * otherwise - no rule here requires it to be non-empty.
  *
  * Every other permit-mutating function above already only applies to one
- * specific `status` value (DRAFT/PENDING_CRO/PENDING_HSE) and rejects
- * anything else as a conflict, so a CLOSED permit is already unreachable
- * through every one of those paths, including a second call to this
- * function - immutability of a closed permit falls directly out of that
- * existing per-function status check, without any additional mechanism.
+ * or two specific source `status` values and rejects anything else as a
+ * conflict, so a CLOSED permit is already unreachable through every one
+ * of those paths, including a second call to this function -
+ * immutability of a closed permit falls directly out of that existing
+ * per-function status check, without any additional mechanism.
  */
 export async function closePermit(
   actorUserId: string,
@@ -687,9 +1123,10 @@ export async function closePermit(
     ]);
     const existing = existingResult.rows[0];
     if (!existing) return { outcome: 'not_found' };
-    if (existing.status !== 'ISSUED') return { outcome: 'conflict', reason: 'not_issued' };
+    if (!CLOSABLE_STATUSES.includes(existing.status)) return { outcome: 'conflict', reason: 'not_closable' };
     if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
 
+    const fromStatus = existing.status;
     const closureRemarks = input.closureRemarks ?? null;
 
     const updateResult = await client.query<PermitRow>(
@@ -698,6 +1135,9 @@ export async function closePermit(
               closed_by = $2,
               closed_at = now(),
               closure_remarks = $3,
+              held_by = NULL,
+              held_at = NULL,
+              hold_reason = NULL,
               version = version + 1,
               updated_at = now()
         WHERE id = $1
@@ -709,9 +1149,105 @@ export async function closePermit(
     await client.query(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [permitId, PERMIT_CLOSED_EVENT_TYPE, actorUserId, 'ISSUED', 'CLOSED', closureRemarks],
+      [permitId, PERMIT_CLOSED_EVENT_TYPE, actorUserId, fromStatus, 'CLOSED', closureRemarks],
     );
 
     return { outcome: 'ok', permit };
+  });
+}
+
+export type RenewOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_closed' | 'not_yet_expired' | 'already_renewed' }
+  | { outcome: 'ok'; permit: PermitRow; jsa: JsaRow };
+
+/**
+ * Renewal: creates a brand-new permit record linked to (not a mutation
+ * of) the given, already-CLOSED permit ("Previous permit MUST be CLOSED
+ * first... Renewal creates a NEW permit record" - this batch's Renewal
+ * rules, resolving DECISIONS.md's previously-open decision #7). Requires
+ * the OLD permit's own midnight expiry to have genuinely passed
+ * (`isPermitValid` on ITS `issued_at`/`site_timezone`, using
+ * DATABASE-authoritative time - see `resumePermit`'s doc comment for why
+ * this must never be the application server's own clock) - regardless
+ * of when it happened to be closed, since closing before vs. after
+ * midnight doesn't change when renewal becomes allowed ("If a held
+ * permit reaches midnight and work must continue: CRO closes it first,
+ * then renews it").
+ *
+ * The new permit: gets a brand-new Permit Number (via the same
+ * `permit_number_seq` DEFAULT every other permit insert uses - atomic/
+ * unique/concurrency-safe, nothing new here); reuses the SAME `jsa_id`
+ * (same JSA row, same JSA Number - never a new JSA, never a JSA edit);
+ * carries over `created_by`/`company`/`company_other`/`site_timezone`
+ * from the old permit (the same underlying applicant/work/site
+ * continuing, not a new submission); is created directly as `ISSUED`
+ * with a fresh `issued_at = now()` (its own new midnight boundary); and
+ * has NO HSE review window at all (`hse_review_started_at`/
+ * `hse_review_deadline_at` both NULL - "NO CRO review, NO HSE review, NO
+ * 5-minute timer for renewal", allowed by
+ * `permits_hse_window_status_consistent`'s renewal carve-out). The OLD
+ * permit is never written to by this function at all - not even its
+ * `version` - it stays exactly as it was ("Old permit remains CLOSED and
+ * immutable").
+ *
+ * Concurrency: two concurrent renewal attempts on the SAME old permit
+ * cannot both succeed. The `FOR UPDATE` lock on the old permit
+ * serializes the two attempts, but - because the old row is never
+ * written to - the lock alone can't tell the second attempt "this was
+ * already renewed"; that guarantee comes from
+ * `permits_previous_permit_id_unique` (a partial unique index on
+ * `previous_permit_id`, migration 0012): the second transaction's INSERT
+ * violates it and is caught here as `{ outcome: 'conflict', reason:
+ * 'already_renewed' }`, never an uncaught 500.
+ */
+export async function renewPermit(
+  actorUserId: string,
+  oldPermitId: string,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<RenewOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow & { db_now: string }>(
+      'SELECT p.*, now() AS db_now FROM permits p WHERE p.id = $1 FOR UPDATE',
+      [oldPermitId],
+    );
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (existing.status !== 'CLOSED') return { outcome: 'conflict', reason: 'not_closed' };
+
+    // permits_issued_at_consistent guarantees issued_at is set for CLOSED.
+    if (isPermitValid(new Date(existing.issued_at as string), existing.site_timezone, new Date(existing.db_now))) {
+      return { outcome: 'conflict', reason: 'not_yet_expired' };
+    }
+
+    let permit: PermitRow;
+    try {
+      const insertResult = await client.query<PermitRow>(
+        `INSERT INTO permits (
+           jsa_id, created_by, previous_permit_id, site_timezone, company, company_other,
+           status, issued_at, hse_review_started_at, hse_review_deadline_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, 'ISSUED', now(), NULL, NULL)
+         RETURNING *`,
+        [existing.jsa_id, existing.created_by, existing.id, existing.site_timezone, existing.company, existing.company_other],
+      );
+      permit = requireRow(insertResult.rows);
+    } catch (err) {
+      if (isUniqueViolation(err, 'permits_previous_permit_id_unique')) {
+        return { outcome: 'conflict', reason: 'already_renewed' };
+      }
+      throw err;
+    }
+
+    await client.query(
+      `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [permit.id, 'RENEWED', actorUserId, null, 'ISSUED'],
+    );
+
+    const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
+    const jsa = requireRow(jsaResult.rows);
+
+    return { outcome: 'ok', permit, jsa };
   });
 }

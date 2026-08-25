@@ -32,24 +32,44 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   and migration runner).
 - Frontend: React + Vite + TypeScript PWA scaffold with Supabase Auth;
   no permit-workflow UI has been built yet.
-- Database: migrations `0001`-`0011` exist under `database/migrations/`
-  and are already applied to the live Supabase project
-  (`yfxnigovfmngypbgcnaw`) - Supabase security hardening; Team + Position
-  -> Capabilities authorization; privileged-access [CEO/Site Manager]
-  data-model foundation; Permit/JSA schema; CRO review and HSE review
-  with 5-minute fallback approval; CRO-only permit closure; and the
-  permit-status read-performance index.
-  Migration `0011_permit_status_index.sql` has been applied and
-  live-verified successfully. See `database/migrations/README.md`.
+- Database: migrations `0001`-`0012` are applied and live-verified
+  against the live Supabase project (`yfxnigovfmngypbgcnaw`) - Supabase
+  security hardening; Team + Position -> Capabilities authorization;
+  privileged-access [CEO/Site Manager] data-model foundation; Permit/JSA
+  schema; CRO review and HSE review with 5-minute fallback approval;
+  CRO-only permit closure; the permit-status read-performance index; and
+  the Permit workflow completion schema (adds the
+  `PENDING_CORRECTION`/`HELD`/`CANCELLED` statuses, hold/cancellation
+  columns and CHECK constraints, the renewal-uniqueness index, and every
+  new lifecycle event type - see `database/migrations/README.md`).
+  Migration `0012_permit_workflow_completion.sql` has been applied and
+  live-verified successfully: migration recorded, new workflow statuses/
+  constraints live, hold/cancel invariants valid, renewal uniqueness
+  active, lifecycle append-only protections intact, RLS/default-deny
+  intact, no anon/authenticated direct grants, no new policies, no
+  data-integrity violations found.
 - Backend permit domain (`backend/src/domain/permits/`,
-  `backend/src/routes/permits.ts`, `backend/src/routes/auth.ts`): draft
-  creation/update/submission, CRO forward-to-HSE, HSE approval, CRO
-  fallback approval, and CRO closure are implemented, plus read APIs for
-  frontend integration - the caller's own effective capabilities
-  (`GET /auth/me`), the caller's own permit list (`GET /permits/mine`),
-  a capability-gated status queue (`GET /permits/queue?status=...`),
-  permit detail with its JSA/computed validity/available-actions hint
-  (`GET /permits/:id`), and lifecycle history (`GET /permits/:id/history`).
+  `backend/src/routes/permits.ts`, `backend/src/routes/auth.ts`): the
+  full agreed Permit workflow is now implemented - draft creation/
+  update/submission; CRO review (forward-to-HSE, send-back to applicant,
+  `permit.send_back`); applicant correction/resubmission
+  (`PENDING_CORRECTION -> PENDING_CRO`, `permit.submit`); HSE review
+  (approval, send-back to CRO - never directly to the applicant -
+  `permit.hse_review`, both with no time gate, matching the still-open
+  HSE-window-gap decision); CRO fallback approval; Hold/Resume of an
+  `ISSUED` permit (`permit.hold`/`permit.resume`, mandatory hold reason,
+  Resume time-gated to strictly before the permit's original midnight
+  expiry); Cancel of an `ISSUED`/`HELD` permit, permanently
+  (`permit.cancel`); Close from `ISSUED` or `HELD` (`permit.close`); and
+  Renewal of a `CLOSED`, midnight-expired permit into a brand-new
+  `ISSUED` permit with a new Permit Number, the same JSA, and no
+  re-review (`permit.renew`, database-uniqueness-enforced against double
+  renewal) - plus the full set of read APIs for frontend integration:
+  the caller's own effective capabilities (`GET /auth/me`), the caller's
+  own permit list (`GET /permits/mine`), a capability-gated status queue
+  (`GET /permits/queue?status=...`), permit detail with its JSA/computed
+  validity/available-actions hint (`GET /permits/:id`), and lifecycle
+  history (`GET /permits/:id/history`).
   `GET /permits/mine` and `GET /permits/queue` are paginated
   (`page`/`pageSize`, safe defaults, hard maximum page size of 100, and
   a hard maximum on the COMPUTED offset - `(page - 1) * pageSize` may
@@ -57,11 +77,10 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   since `pageSize` alone can turn an innocuous-looking `page` into a
   pathological offset - see
   `domain/permits/validation.ts::{paginationQuerySchema,MAX_PAGINATION_OFFSET}`).
-  Send-back,
-  Hold, Resume, Cancel, Renewal, PDF generation, and WhatsApp
-  notifications are not implemented - each is blocked on a specific
-  unresolved business rule, not merely unscheduled; see `DECISIONS.md`'s
-  Open Decisions (items 1-3, 6-7) for exactly what is undecided.
+  PDF generation and WhatsApp notifications remain not implemented -
+  see `DECISIONS.md`'s Open Decisions for what's still genuinely
+  unresolved (the HSE-window gap, the WhatsApp integration method, and
+  whether closure remarks are mandatory).
 - Production hardening: backend-wide rate limiting (global + a stricter,
   identity-keyed limit on mutation endpoints - `middleware/rateLimit.ts`),
   security headers (`helmet`), a bounded JSON body limit with sanitized

@@ -86,18 +86,122 @@ confirmed.
 - Backend concurrency protection is required regardless of the
   single-active-CRO assumption.
 
-### Hold / Resume / Cancel / Closure / Renewal
-- Hold and Resume preserve Permit Number and JSA Number, and create
-  append-only lifecycle/audit events with actor, timestamp, and
-  reason/remarks where applicable.
-- Cancellation never deletes a permit; it preserves history and creates
-  an audit event.
+### Send-Back / Correction (resolves former Open Decision #6)
+- CRO may send a `PENDING_CRO` permit back to the original applicant for
+  correction. The resulting persisted status is `PENDING_CORRECTION` - a
+  distinct, explicitly-named state, not a reuse of `DRAFT` (reusing
+  `DRAFT` would conflate "never submitted" with "sent back after CRO
+  review" and lose the review history that produced it).
+- Only the original applicant (`created_by`) may edit a
+  `PENDING_CORRECTION` permit (the same edit authority/capability,
+  `permit.create`, as editing a `DRAFT`) or resubmit it
+  (`permit.submit` - the same capability as the original submission,
+  since resubmission is the same "finalize and send to CRO" authority).
+  Resubmission returns the permit to `PENDING_CRO`.
+- HSE may send a `PENDING_HSE` permit back to CRO - never directly to
+  the applicant. The resulting status is `PENDING_CRO` (not a new
+  status): CRO then reviews it like any other `PENDING_CRO` permit,
+  including being able to send it on to the applicant per the rule
+  above. Authorized by `permit.hse_review` - the same capability that
+  gates HSE's approval - since both are HSE's two possible verdicts on
+  one pending review, not two separately-grantable authorities.
+- HSE send-back immediately clears the HSE review window
+  (`hse_review_started_at`/`hse_review_deadline_at` both `NULL`) - "the
+  timer stops immediately." When CRO forwards the permit to HSE again
+  (after any correction cycle), the existing forward-to-HSE transition
+  unconditionally opens a fresh window from the current time - it never
+  reuses or extends a prior deadline, and this required no change to
+  that transition to be true.
+- Both send-back directions, and resubmission, preserve the Permit
+  Number and JSA Number, and are fully auditable: every step remains in
+  the append-only lifecycle history, including every prior send-back/
+  resubmit/forward cycle a permit has been through.
+
+### Hold / Resume (resolves former Open Decision #2)
+- Only CRO (`permit.hold`) may place a permit on Hold, and only from
+  `ISSUED` - no mid-review state may be held. `HELD -> ISSUED` (Resume)
+  is the only path back; there is no other transition out of `HELD`
+  except Resume, Cancel, or Close.
+- A Hold reason is mandatory (non-empty), recorded with the
+  authenticated actor and DB-authoritative timestamp - enforced both at
+  the API validation layer and, as defense in depth, by a database CHECK
+  constraint.
+- A `HELD` permit is never valid for work (`isValid` is always `false`
+  while held, regardless of time of day) and cannot be edited, forwarded,
+  or HSE-approved - only CRO Hold-related actions (Resume, Cancel, Close)
+  apply to it.
+- Only CRO (`permit.resume`) may Resume, and only strictly before the
+  permit's ORIGINAL midnight expiry (computed from its unchanged
+  `issued_at`/site timezone, using authoritative backend time - never
+  client-supplied). At or after that expiry, Resume fails; the permit
+  must be Closed (see below) instead. Resume never creates a new permit,
+  never restarts or extends validity, and never opens a new HSE review
+  window - it changes only `status` (back to `ISSUED`) and clears the
+  hold metadata; `issued_at` is untouched.
+- Hold and Resume preserve the same Permit Number and JSA Number, and
+  each creates its own append-only lifecycle/audit event (actor,
+  authoritative timestamp, and the reason for Hold).
+
+### Cancel (resolves former Open Decision #3)
+- Only CRO (`permit.cancel`) may cancel, and only from `ISSUED` or
+  `HELD` - not `DRAFT`, `PENDING_CRO`, `PENDING_HSE`, `PENDING_CORRECTION`,
+  `CLOSED`, or (already) `CANCELLED`. Cancellation is permanent: a
+  `CANCELLED` permit cannot resume, be edited, submitted, forwarded,
+  approved, closed, or mutated through any other normal workflow action
+  - every other mutating function already only applies to one or two
+    specific source statuses and rejects anything else, so this
+    immutability requires no separate mechanism.
+- A cancellation reason is optional (not mandated by any current
+  documented rule, unlike Hold's) - free-text remarks are accepted when
+  given.
+- Cancellation never deletes a permit; it preserves the Permit Number,
+  JSA Number, and full history, and creates an audit event recording the
+  actor, authoritative timestamp, and (if given) the reason.
+
+### Closure
 - Closure is performed only by CRO — there is no creator closure request
-  or creator final closure. Closed permits are immutable historical
-  records through ordinary operations.
-- Renewal occurs after midnight expiry, is performed by CRO, issues a
-  new Permit Number, keeps the same JSA Number, and preserves/links the
-  previous permit's history without overwriting or deleting it.
+  or creator final closure. `ISSUED -> CLOSED` and, since Hold was
+  resolved above, `HELD -> CLOSED` are both allowed (CRO may close a
+  Held permit directly, whether before or after its midnight expiry -
+  useful specifically so a Held permit that reaches midnight can be
+  Closed and then Renewed, per the Renewal rule below). Closed permits
+  are immutable historical records through ordinary operations.
+
+### Renewal (resolves former Open Decision #7)
+- Renewal is CRO-only (`permit.renew`). The permit being renewed MUST
+  already be `CLOSED`, and renewal is allowed only after THAT permit's
+  own midnight expiry has passed (using its unchanged `issued_at`/site
+  timezone and authoritative backend time) - regardless of when it
+  happened to be closed, since closing before vs. after midnight doesn't
+  change when renewal becomes allowed.
+- Renewal creates a brand-new permit record - it is not a status
+  transition of the old one, which is never written to and remains
+  `CLOSED` and untouched. The new permit: gets a new Permit Number (the
+  same atomic/concurrency-safe sequence every permit uses); reuses the
+  SAME JSA (same `jsa_id`, same JSA Number - never a new or copied JSA,
+  never an edit to historical JSA data); links back via
+  `previous_permit_id`; is created directly as `ISSUED` with a fresh
+  `issued_at` (its own new midnight boundary); and carries over
+  `created_by`, `company`, `company_other`, and `site_timezone` from the
+  old permit (the same underlying applicant/work/site continuing, not a
+  new submission). It goes through NO CRO review, NO HSE review, and has
+  NO 5-minute HSE timer - both HSE-window columns are `NULL` on a
+  renewed permit, a carve-out in `permits_hse_window_status_consistent`
+  that applies only when `previous_permit_id` is set.
+- At most one renewal may ever exist for a given old permit - enforced
+  by a database-level uniqueness constraint on the new permit's
+  `previous_permit_id` (not merely an application-level check), so a
+  race between two concurrent renewal attempts on the same old permit
+  can never both succeed.
+- Renewal is recorded as its own lifecycle event on the NEW permit only
+  (`RENEWED`, `NULL -> ISSUED`, directly analogous to how `CREATED`
+  records `NULL -> DRAFT`) - the link back to the source permit is the
+  new row's real foreign key (`previous_permit_id`), not a lifecycle
+  event field, so the OLD permit's own event history is never touched by
+  a later renewal, consistent with it remaining genuinely immutable.
+- A plain "new permit" (via `POST /permits`, unrelated to renewal) is
+  unaffected by any of this: it always gets a NEW Permit Number AND a
+  NEW JSA Number, exactly as before.
 
 ### Forms / UI
 - Permit UI reflects the official permit form layout; the eventual
@@ -185,27 +289,20 @@ confirmed. Do not invent behavior for these.
    5-minute window has expired but before CRO has actually performed
    fallback approval? (E.g.: can HSE still act during this gap? Is there
    a distinct intermediate state? Is there a time limit on how long a
-   permit can sit in this gap?) See `WORKFLOW.md` → "HSE Five-Minute
-   Window."
+   permit can sit in this gap?) Note: this batch's HSE send-back is
+   still deliberately NOT time-gated either, for the same reason
+   (`hseApprove`/`hseSendBackToCro` both have no deadline check) - that
+   is consistent with this remaining unresolved, not a resolution of it.
+   See `WORKFLOW.md` → "HSE Five-Minute Window."
 
-2. **Allowed states for Hold.**
-   The exact set of permit states from which CRO may place a permit on
-   Hold is not finalized (e.g. only `ISSUED`, or also mid-review
-   states?). See `WORKFLOW.md` → "Hold / Resume."
-
-3. **Allowed states for Cancel.**
-   The exact set of permit states from which CRO may cancel a permit is
-   not finalized and must be explicitly defined before implementation.
-   See `WORKFLOW.md` → "Cancel."
-
-4. **WhatsApp integration method.**
+2. **WhatsApp integration method.**
    The final mechanism for WhatsApp group/agent integration (which
    provider/API, how the CRO PC agent is installed, how it authenticates
    to the WhatsApp group) is not decided and requires research/
    verification before implementation. See `ARCHITECTURE.md` →
    "Notifications (Future)."
 
-5. **Whether closure remarks are mandatory.**
+3. **Whether closure remarks are mandatory.**
    WORKFLOW.md requires CRO closure to record "the authoritative actor,
    timestamp, and any closure information/remarks required by the
    finalized closure form," but whether remarks must be non-empty (vs.
@@ -215,22 +312,10 @@ confirmed. Do not invent behavior for these.
    validation can be tightened later without a data migration. See
    `WORKFLOW.md` → "Closure."
 
-6. **CRO/HSE send-back target state.**
-   WORKFLOW.md/DECISIONS.md describe the *action* ("CRO may... send back
-   for correction"; "HSE may approve or send back to the original
-   creator for correction") and confirm it preserves the Permit/JSA
-   numbers, but never name the resulting persisted `status` - unlike
-   `PENDING_CRO`/`PENDING_HSE`/`ISSUED`/`CLOSED`, which are all
-   explicitly named. Not implemented pending that decision. See
-   `WORKFLOW.md` → "Core Review Lifecycle" / "HSE Five-Minute Window."
-
-7. **Status of a renewed permit.**
-   WORKFLOW.md's Renewal section confirms the *numbering* rule (new
-   Permit Number, same JSA Number, previous permit preserved/linked) but
-   does not state what `status` the newly-created permit starts in -
-   e.g. whether it is issued directly by CRO (continuing the same
-   authorization) or must re-enter CRO/HSE review. Not implemented
-   pending that decision. See `WORKFLOW.md` → "Renewal."
+Former items #2 (allowed states for Hold), #3 (allowed states for
+Cancel), #6 (CRO/HSE send-back target state), and #7 (status of a
+renewed permit) are now RESOLVED - see "Send-Back / Correction", "Hold /
+Resume", "Cancel", and "Renewal" under Accepted Decisions above.
 
 Additional open questions may be appended here as they are identified
 during future sections; each new entry should record enough context to
