@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { env } from '../config/env.js';
 import { toDisplayNumber } from '../domain/permits/numbering.js';
 import {
+  closePermit,
   createDraftPermit,
   croFallbackApprove,
   forwardToHseReview,
@@ -13,6 +14,7 @@ import {
   type PermitRow,
 } from '../domain/permits/service.js';
 import {
+  closePermitBodySchema,
   createPermitBodySchema,
   fallbackApproveBodySchema,
   forwardToHseBodySchema,
@@ -287,6 +289,49 @@ permitsRouter.post(
         message: 'The HSE review window has not expired yet',
         reason: 'window_not_expired',
       });
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+// Closure: "Only CRO closes a permit" (WORKFLOW.md) - no creator
+// closure request/final-closure step, so this follows the same
+// no-ownership-scoping pattern as forward-hse/hse-approve/
+// fallback-approve above. closed_by/closed_at are never read from the
+// request body (closePermitBodySchema only accepts version/
+// closureRemarks) - they are always the authenticated actor and the
+// database's own time.
+permitsRouter.post(
+  '/permits/:id/close',
+  requireAuth,
+  requireCapability('permit.close'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = closePermitBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await closePermit(userId, params.data.id, {
+      expectedVersion: body.data.version,
+      closureRemarks: body.data.closureRemarks,
+    });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
       return;
     }
     res.status(200).json({ permit: serializePermit(result.permit) });

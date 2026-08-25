@@ -171,6 +171,16 @@ confirmed. Do not invent behavior for these.
    verification before implementation. See `ARCHITECTURE.md` →
    "Notifications (Future)."
 
+5. **Whether closure remarks are mandatory.**
+   WORKFLOW.md requires CRO closure to record "the authoritative actor,
+   timestamp, and any closure information/remarks required by the
+   finalized closure form," but whether remarks must be non-empty (vs.
+   optional) is not finalized. Migration `0010` /
+   `backend/src/domain/permits/service.ts::closePermit` store closure
+   remarks as optional - supported, never required - specifically so
+   validation can be tightened later without a data migration. See
+   `WORKFLOW.md` → "Closure."
+
 Additional open questions may be appended here as they are identified
 during future sections; each new entry should record enough context to
 be actionable later (what's undecided, why it matters, where it's

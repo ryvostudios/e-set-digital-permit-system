@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  closePermit,
   createDraftPermit,
   croFallbackApprove,
   forwardToHseReview,
   getOwnPermit,
   hseApprove,
+  PERMIT_CLOSED_EVENT_TYPE,
   submitPermit,
   updateDraftPermit,
   type JsaRow,
@@ -16,13 +18,15 @@ import {
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 
 const PRE_HSE_STATUSES = new Set(['DRAFT', 'PENDING_CRO']);
-const HSE_WINDOW_STATUSES = new Set(['PENDING_HSE', 'ISSUED']);
+const HSE_WINDOW_STATUSES = new Set(['PENDING_HSE', 'ISSUED', 'CLOSED']);
+const ISSUED_OR_LATER_STATUSES = new Set(['ISSUED', 'CLOSED']);
 
 /**
- * Mirrors migration 0008's three permits CHECK constraints
+ * Mirrors migration 0008/0010's permits CHECK constraints
  * (permits_hse_window_status_consistent, permits_hse_deadline_exact,
- * permits_issued_at_consistent), so a service.ts bug that would violate
- * them fails the same way it would against the real database.
+ * permits_issued_at_consistent, permits_closure_consistent), so a
+ * service.ts bug that would violate them fails the same way it would
+ * against the real database.
  */
 function assertPermitInvariants(permit: PermitRow): void {
   const hasWindow = permit.hse_review_started_at !== null && permit.hse_review_deadline_at !== null;
@@ -43,9 +47,20 @@ function assertPermitInvariants(permit: PermitRow): void {
       );
     }
   }
-  if ((permit.status === 'ISSUED') !== (permit.issued_at !== null)) {
+  if (ISSUED_OR_LATER_STATUSES.has(permit.status) !== (permit.issued_at !== null)) {
     throw new Error(
       `simulated CHECK constraint violation: permits_issued_at_consistent (status=${permit.status}, issued_at=${permit.issued_at})`,
+    );
+  }
+  const closureOk =
+    (permit.status === 'CLOSED' && permit.closed_by !== null && permit.closed_at !== null) ||
+    (permit.status !== 'CLOSED' &&
+      permit.closed_by === null &&
+      permit.closed_at === null &&
+      permit.closure_remarks === null);
+  if (!closureOk) {
+    throw new Error(
+      `simulated CHECK constraint violation: permits_closure_consistent (status=${permit.status}, closed_by=${permit.closed_by}, closed_at=${permit.closed_at}, closure_remarks=${permit.closure_remarks})`,
     );
   }
 }
@@ -59,11 +74,29 @@ function assertPermitInvariants(permit: PermitRow): void {
  * simulate time passing for the 5-minute HSE review window, instead of
  * relying on wall-clock time or any client-supplied value.
  */
+interface FakeLifecycleEvent {
+  permit_id: string;
+  event_type: string;
+  actor_user_id: string;
+  from_status: string | null;
+  to_status: string;
+  reason: string | null;
+}
+
 class FakeDb {
   permits = new Map<string, PermitRow>();
   jsas = new Map<string, JsaRow>();
+  // Only rows that actually "committed" - unlike `queries` below, which
+  // logs every attempted query regardless of outcome, this is emptied
+  // back out on a simulated rollback (see `withTransaction`), so it's
+  // what a later read would actually see.
+  lifecycleEvents: FakeLifecycleEvent[] = [];
   queries: Array<{ sql: string; params: unknown[] }> = [];
   now = new Date();
+  // Test-only failure injection: when set, the next matching INSERT INTO
+  // permit_lifecycle_events throws instead of succeeding, simulating a
+  // mid-transaction database failure so tests can verify rollback.
+  failNextLifecycleEventInsert: { eventType: string } | null = null;
   private permitSeq = 0;
   private jsaSeq = 0;
   private permitCounter = 0;
@@ -112,14 +145,28 @@ class FakeDb {
         hse_review_started_at: null,
         hse_review_deadline_at: null,
         issued_at: null,
+        closed_by: null,
+        closed_at: null,
+        closure_remarks: null,
         created_at: this.now.toISOString(),
         updated_at: this.now.toISOString(),
       };
       return { rows: [this.setPermit(permit)] };
     }
     if (sql.startsWith('INSERT INTO permit_lifecycle_events')) {
-      const [, eventType, , fromStatus, toStatus] = params as [string, string, string, string | null, string];
-      // Mirrors migration 0006/0008's permit_lifecycle_events_event_status_consistent
+      const [permitId, eventType, actorUserId, fromStatus, toStatus, reason] = params as [
+        string,
+        string,
+        string,
+        string | null,
+        string,
+        string | null,
+      ];
+      if (this.failNextLifecycleEventInsert?.eventType === eventType) {
+        this.failNextLifecycleEventInsert = null;
+        throw new Error(`simulated database failure inserting ${eventType} lifecycle event`);
+      }
+      // Mirrors migration 0006/0008/0010's permit_lifecycle_events_event_status_consistent
       // CHECK constraint, so a violation here fails the same way it would
       // against the real database.
       const allowed =
@@ -127,12 +174,21 @@ class FakeDb {
         (eventType === 'SUBMITTED' && fromStatus === 'DRAFT' && toStatus === 'PENDING_CRO') ||
         (eventType === 'CRO_FORWARDED_HSE' && fromStatus === 'PENDING_CRO' && toStatus === 'PENDING_HSE') ||
         (eventType === 'HSE_APPROVED' && fromStatus === 'PENDING_HSE' && toStatus === 'ISSUED') ||
-        (eventType === 'CRO_FALLBACK_APPROVED' && fromStatus === 'PENDING_HSE' && toStatus === 'ISSUED');
+        (eventType === 'CRO_FALLBACK_APPROVED' && fromStatus === 'PENDING_HSE' && toStatus === 'ISSUED') ||
+        (eventType === PERMIT_CLOSED_EVENT_TYPE && fromStatus === 'ISSUED' && toStatus === 'CLOSED');
       if (!allowed) {
         throw new Error(
           `simulated CHECK constraint violation: permit_lifecycle_events_event_status_consistent (event_type=${eventType}, from_status=${fromStatus}, to_status=${toStatus})`,
         );
       }
+      this.lifecycleEvents.push({
+        permit_id: permitId,
+        event_type: eventType,
+        actor_user_id: actorUserId,
+        from_status: fromStatus,
+        to_status: toStatus,
+        reason: reason ?? null,
+      });
       return { rows: [] };
     }
     if (sql.includes('fallback_eligible')) {
@@ -207,6 +263,21 @@ class FakeDb {
       };
       return { rows: [this.setPermit(updated)] };
     }
+    if (sql.startsWith('UPDATE permits') && sql.includes("SET status = 'CLOSED'")) {
+      const [id, closedBy, closureRemarks] = params as [string, string, string | null];
+      const existing = this.permits.get(id);
+      if (!existing) return { rows: [] };
+      const updated: PermitRow = {
+        ...existing,
+        status: 'CLOSED',
+        closed_by: closedBy,
+        closed_at: this.now.toISOString(),
+        closure_remarks: closureRemarks,
+        version: existing.version + 1,
+        updated_at: this.now.toISOString(),
+      };
+      return { rows: [this.setPermit(updated)] };
+    }
 
     throw new Error(`FakeDb: unhandled query: ${sql}`);
   };
@@ -228,8 +299,18 @@ class FakeDb {
         release = resolve;
       });
       await previous;
+      // Minimal rollback simulation: snapshot both mutable stores before
+      // running the transaction body, and restore them if it throws -
+      // just enough to prove nothing a failed transaction wrote survives,
+      // without building a general transaction log.
+      const permitsSnapshot = new Map(this.permits);
+      const lifecycleEventsSnapshot = [...this.lifecycleEvents];
       try {
         return await fn({ query });
+      } catch (err) {
+        this.permits = permitsSnapshot;
+        this.lifecycleEvents = lifecycleEventsSnapshot;
+        throw err;
       } finally {
         release();
       }
@@ -263,6 +344,14 @@ async function createPendingHsePermit(db: FakeDb, actorUserId = 'owner'): Promis
   );
   if (forwarded.outcome !== 'ok') throw new Error('setup failed: forwardToHseReview');
   return forwarded.permit;
+}
+
+/** Drives a fresh permit all the way through to ISSUED for tests that start from ISSUED. */
+async function createIssuedPermit(db: FakeDb, actorUserId = 'owner'): Promise<PermitRow> {
+  const pending = await createPendingHsePermit(db, actorUserId);
+  const approved = await hseApprove('hse-1', pending.id, { expectedVersion: pending.version }, db.deps());
+  if (approved.outcome !== 'ok') throw new Error('setup failed: hseApprove');
+  return approved.permit;
 }
 
 test('createDraftPermit generates unique permit/JSA numbers per call and records a CREATED event', async () => {
@@ -647,4 +736,293 @@ test('CRO/HSE lifecycle events remain insert-only through the full forward/appro
       `expected only INSERTs against permit_lifecycle_events, got: ${q.sql}`,
     );
   }
+});
+
+// --- Permit closure: ISSUED -> CRO CLOSE -> CLOSED ---
+
+test('closePermit transitions ISSUED -> CLOSED, recording the actor and DB-authoritative time', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+
+  const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'CLOSED');
+  // Actor recorded as closed_by - the authenticated caller, not anything
+  // client-supplied (closePermit's own input type has no such field).
+  assert.equal(result.permit.closed_by, 'cro-2');
+  // closed_at set, from the fake DB's authoritative clock.
+  assert.equal(result.permit.closed_at, db.now.toISOString());
+});
+
+test('closePermit persists optional closure remarks when provided, and leaves them null when omitted', async () => {
+  const db = new FakeDb();
+
+  const withRemarks = await createIssuedPermit(db, 'owner-1');
+  const closedWithRemarks = await closePermit(
+    'cro-2',
+    withRemarks.id,
+    { expectedVersion: withRemarks.version, closureRemarks: 'Area inspected, all clear.' },
+    db.deps(),
+  );
+  assert.equal(closedWithRemarks.outcome, 'ok');
+  if (closedWithRemarks.outcome === 'ok') {
+    assert.equal(closedWithRemarks.permit.closure_remarks, 'Area inspected, all clear.');
+  }
+
+  const withoutRemarks = await createIssuedPermit(db, 'owner-2');
+  const closedWithoutRemarks = await closePermit(
+    'cro-2',
+    withoutRemarks.id,
+    { expectedVersion: withoutRemarks.version },
+    db.deps(),
+  );
+  assert.equal(closedWithoutRemarks.outcome, 'ok');
+  if (closedWithoutRemarks.outcome === 'ok') {
+    assert.equal(closedWithoutRemarks.permit.closure_remarks, null);
+  }
+});
+
+test('closePermit preserves the Permit Number (permit_sequence) and JSA (jsa_id) unchanged', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+
+  const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
+
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.permit_sequence, permit.permit_sequence);
+  assert.equal(result.permit.jsa_id, permit.jsa_id);
+});
+
+test('closePermit appends a CLOSED lifecycle event atomically with the status transition', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+
+  const result = await closePermit(
+    'cro-2',
+    permit.id,
+    { expectedVersion: permit.version, closureRemarks: 'Site secured.' },
+    db.deps(),
+  );
+  assert.equal(result.outcome, 'ok');
+
+  const events = db.queries.filter((q) => q.sql.startsWith('INSERT INTO permit_lifecycle_events'));
+  const closedEvent = events.at(-1);
+  assert.deepEqual(closedEvent?.params, [
+    permit.id,
+    PERMIT_CLOSED_EVENT_TYPE,
+    'cro-2',
+    'ISSUED',
+    'CLOSED',
+    'Site secured.',
+  ]);
+  // Atomic: both the status-changing UPDATE and the event INSERT happen
+  // together - see the next test for the failure/rollback side of this.
+  const closeUpdate = db.queries.find((q) => q.sql.startsWith('UPDATE permits') && q.sql.includes("SET status = 'CLOSED'"));
+  assert.ok(closeUpdate, 'expected the CLOSED status UPDATE to have run alongside the lifecycle event INSERT');
+});
+
+test('closePermit rolls back entirely if the CLOSED lifecycle event insert fails - the permit stays exactly as it was', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+  db.failNextLifecycleEventInsert = { eventType: PERMIT_CLOSED_EVENT_TYPE };
+
+  await assert.rejects(
+    () => closePermit('cro-2', permit.id, { expectedVersion: permit.version, closureRemarks: 'Site secured.' }, db.deps()),
+    /simulated database failure inserting CLOSED lifecycle event/,
+  );
+
+  // Nothing from the failed transaction survives: the permit UPDATE that
+  // ran before the failing INSERT was rolled back along with it.
+  const afterFailure = await getOwnPermit('owner', permit.id, db.deps());
+  assert.equal(afterFailure?.status, 'ISSUED');
+  assert.equal(afterFailure?.version, permit.version);
+  assert.equal(afterFailure?.closed_by, null);
+  assert.equal(afterFailure?.closed_at, null);
+  assert.equal(afterFailure?.closure_remarks, null);
+
+  const survivingClosedEvents = db.lifecycleEvents.filter((e) => e.event_type === PERMIT_CLOSED_EVENT_TYPE);
+  assert.equal(survivingClosedEvents.length, 0, 'expected no CLOSED lifecycle event to survive the rollback');
+
+  // The failure injection is one-shot - closing should succeed normally
+  // afterwards, proving the permit really was left closeable (i.e. still
+  // ISSUED at its original version), not stuck in a half-updated state.
+  const retried = await closePermit(
+    'cro-2',
+    permit.id,
+    { expectedVersion: permit.version, closureRemarks: 'Site secured.' },
+    db.deps(),
+  );
+  assert.equal(retried.outcome, 'ok');
+});
+
+test('closePermit rejects a DRAFT permit (wrong state rejected)', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+
+  const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
+
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_issued' });
+});
+
+test('closePermit rejects a PENDING_CRO permit (wrong state rejected)', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const updated = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: permit.version, company: 'ESET' },
+    db.deps(),
+  );
+  assert.equal(updated.outcome, 'ok');
+  if (updated.outcome !== 'ok') return;
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
+  assert.equal(submitted.outcome, 'ok');
+  if (submitted.outcome !== 'ok') return;
+
+  const result = await closePermit('cro-2', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
+
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_issued' });
+});
+
+test('closePermit rejects a PENDING_HSE permit (wrong state rejected)', async () => {
+  const db = new FakeDb();
+  const permit = await createPendingHsePermit(db);
+
+  const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
+
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'not_issued' });
+});
+
+test('closePermit rejects an already-CLOSED permit (cannot close again)', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+  const firstClose = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.equal(firstClose.outcome, 'ok');
+  if (firstClose.outcome !== 'ok') return;
+
+  const secondClose = await closePermit(
+    'cro-3',
+    permit.id,
+    { expectedVersion: firstClose.permit.version },
+    db.deps(),
+  );
+
+  assert.deepEqual(secondClose, { outcome: 'conflict', reason: 'not_issued' });
+});
+
+test('closePermit rejects a stale version instead of silently overwriting', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+
+  const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
+});
+
+test('a simulated concurrent double-close race has exactly one winner', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+
+  const [first, second] = await Promise.all([
+    closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps()),
+    closePermit('cro-3', permit.id, { expectedVersion: permit.version }, db.deps()),
+  ]);
+
+  const outcomes = [first.outcome, second.outcome];
+  assert.equal(outcomes.filter((o) => o === 'ok').length, 1, `expected exactly one winner, got: ${outcomes.join(', ')}`);
+  assert.ok(outcomes.includes('conflict'), `expected the loser to see a conflict, got: ${outcomes.join(', ')}`);
+
+  const final = await getOwnPermit('owner', permit.id, db.deps());
+  assert.equal(final?.status, 'CLOSED');
+  assert.equal(final?.version, permit.version + 1);
+});
+
+test('every other permit-mutating path already rejects a CLOSED permit (immutability falls out of existing status checks)', async () => {
+  const db = new FakeDb();
+  const permit = await createIssuedPermit(db);
+  const closed = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.equal(closed.outcome, 'ok');
+  if (closed.outcome !== 'ok') return;
+
+  const updateAttempt = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: closed.permit.version, company: 'SGRE' },
+    db.deps(),
+  );
+  assert.deepEqual(updateAttempt, { outcome: 'conflict', reason: 'not_draft' });
+
+  const submitAttempt = await submitPermit('owner', permit.id, { expectedVersion: closed.permit.version }, db.deps());
+  assert.deepEqual(submitAttempt, { outcome: 'conflict', reason: 'not_draft' });
+
+  const forwardAttempt = await forwardToHseReview(
+    'cro-1',
+    permit.id,
+    { expectedVersion: closed.permit.version },
+    db.deps(),
+  );
+  assert.deepEqual(forwardAttempt, { outcome: 'conflict', reason: 'not_pending_cro' });
+
+  const hseAttempt = await hseApprove('hse-1', permit.id, { expectedVersion: closed.permit.version }, db.deps());
+  assert.deepEqual(hseAttempt, { outcome: 'conflict', reason: 'not_pending_hse' });
+});
+
+test('assertPermitInvariants (mirroring permits_closure_consistent/permits_issued_at_consistent) rejects invalid closure states', () => {
+  const base: PermitRow = {
+    id: 'permit-x',
+    permit_sequence: '1',
+    jsa_id: 'jsa-x',
+    status: 'ISSUED',
+    version: 3,
+    created_by: 'owner',
+    previous_permit_id: null,
+    site_timezone: 'UTC',
+    company: 'ESET',
+    company_other: null,
+    submitted_at: '2026-01-01T00:00:00.000Z',
+    hse_review_started_at: '2026-01-01T00:00:00.000Z',
+    hse_review_deadline_at: '2026-01-01T00:05:00.000Z',
+    issued_at: '2026-01-01T00:05:00.000Z',
+    closed_by: null,
+    closed_at: null,
+    closure_remarks: null,
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:05:00.000Z',
+  };
+
+  // A valid ISSUED row and a valid CLOSED row both pass.
+  assert.doesNotThrow(() => assertPermitInvariants(base));
+  assert.doesNotThrow(() =>
+    assertPermitInvariants({
+      ...base,
+      status: 'CLOSED',
+      closed_by: 'cro-2',
+      closed_at: '2026-01-01T01:00:00.000Z',
+    }),
+  );
+
+  // CLOSED without closed_by/closed_at violates permits_closure_consistent.
+  assert.throws(() => assertPermitInvariants({ ...base, status: 'CLOSED' }), /permits_closure_consistent/);
+  // Closure metadata present on a non-CLOSED permit also violates it.
+  assert.throws(
+    () => assertPermitInvariants({ ...base, closed_by: 'cro-2', closed_at: '2026-01-01T01:00:00.000Z' }),
+    /permits_closure_consistent/,
+  );
+  assert.throws(() => assertPermitInvariants({ ...base, closure_remarks: 'leftover' }), /permits_closure_consistent/);
+  // CLOSED without issued_at violates permits_issued_at_consistent (a
+  // permit must have been issued before it can be closed).
+  assert.throws(
+    () =>
+      assertPermitInvariants({
+        ...base,
+        status: 'CLOSED',
+        closed_by: 'cro-2',
+        closed_at: '2026-01-01T01:00:00.000Z',
+        issued_at: null,
+      }),
+    /permits_issued_at_consistent/,
+  );
 });

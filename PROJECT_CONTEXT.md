@@ -22,14 +22,31 @@ built step by step, one verified section at a time.
 
 ## Current State (as of this document)
 
-- Repository initialized; no application code exists yet.
-- No frontend, backend, or database framework has been installed or
-  configured.
-- No database schema, tables, or migrations exist.
-- Only planning documentation exists: this file, `ARCHITECTURE.md`,
-  `WORKFLOW.md`, `SECURITY.md`, `DATABASE.md`, `DECISIONS.md`, `README.md`.
-- Empty `backend/`, `frontend/`, `database/`, `docs/` directories exist as
-  placeholders only.
+Implementation has begun and proceeds section by section, per
+`SECURITY.md`'s development gate. This is a snapshot, not authoritative
+requirements - the other documents in this set (and `DECISIONS.md`'s
+Open Decisions) govern what's actually confirmed or still unresolved.
+
+- Backend: Node.js + Express + TypeScript app (Supabase Auth token
+  verification, CORS, environment validation, PostgreSQL connection pool
+  and migration runner).
+- Frontend: React + Vite + TypeScript PWA scaffold with Supabase Auth;
+  no permit-workflow UI has been built yet.
+- Database: migrations `0001`-`0009` exist under `database/migrations/`
+  and are already applied to the live Supabase project
+  (`yfxnigovfmngypbgcnaw`) - Supabase security hardening; Team + Position
+  -> Capabilities authorization; privileged-access [CEO/Site Manager]
+  data-model foundation; Permit/JSA schema; CRO review and HSE review
+  with 5-minute fallback approval. Migration `0010_permit_closure.sql`
+  (CRO-only closure) exists but has **not** been applied to Supabase yet
+  - it is awaiting code verification and live migration verification; do
+  not treat it as deployed or verified until that happens. See
+  `database/migrations/README.md`.
+- Backend permit domain (`backend/src/domain/permits/`,
+  `backend/src/routes/permits.ts`): draft creation/update/submission,
+  CRO forward-to-HSE, HSE approval, CRO fallback approval, and CRO
+  closure are implemented. Send-back, Hold/Resume, Cancel, Renewal, PDF
+  generation, and WhatsApp notifications are not yet implemented.
 
 ## Core Scope
 

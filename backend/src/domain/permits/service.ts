@@ -1,7 +1,7 @@
 import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import { query, withTransaction } from '../../db/pool.js';
 
-export type PermitStatus = 'DRAFT' | 'PENDING_CRO' | 'PENDING_HSE' | 'ISSUED';
+export type PermitStatus = 'DRAFT' | 'PENDING_CRO' | 'PENDING_HSE' | 'ISSUED' | 'CLOSED';
 export type Company = 'ESET' | 'SGRE' | 'ZPL' | 'OTHER';
 
 export interface PermitRow {
@@ -26,6 +26,11 @@ export interface PermitRow {
   hse_review_started_at: string | null;
   hse_review_deadline_at: string | null;
   issued_at: string | null;
+  // Set together, DB-side, by closePermit - never derived from
+  // client-supplied values (SECURITY.md).
+  closed_by: string | null;
+  closed_at: string | null;
+  closure_remarks: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -404,6 +409,93 @@ export async function croFallbackApprove(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
        VALUES ($1, $2, $3, $4, $5)`,
       [permitId, 'CRO_FALLBACK_APPROVED', actorUserId, 'PENDING_HSE', 'ISSUED'],
+    );
+
+    return { outcome: 'ok', permit };
+  });
+}
+
+/**
+ * The lifecycle event type recorded for the ISSUED -> CLOSED transition.
+ * Named as its own constant, rather than an inline literal in
+ * `closePermit` below, so the event name itself ("CLOSED", per the
+ * currently documented lifecycle naming) can be revised later without
+ * touching the transition/workflow logic that decides *when* a permit is
+ * closed.
+ */
+export const PERMIT_CLOSED_EVENT_TYPE = 'CLOSED';
+
+export interface CloseInput {
+  expectedVersion: number;
+  closureRemarks?: string | undefined;
+}
+
+export type CloseOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_issued' | 'stale_version' }
+  | { outcome: 'ok'; permit: PermitRow };
+
+/**
+ * The only implemented closure transition: ISSUED -> CLOSED ("Only CRO
+ * closes a permit" - WORKFLOW.md; there is no creator closure request or
+ * creator final closure step, and no two-stage closure workflow). Same
+ * no-ownership-scoping as the other CRO/HSE review actions above (CRO
+ * closes permits it did not create); `permit.close` (already-seeded
+ * capability) is the sole authorization gate, backed by the row lock +
+ * status/version check.
+ *
+ * `closed_by` is always `actorUserId` (the authenticated actor) and
+ * `closed_at` is always the database's own `now()` - the caller has no
+ * way to supply either (see `CloseInput`, which only accepts the
+ * expected version and optional remarks); this is what makes spoofing
+ * either one impossible, not any extra validation.
+ *
+ * Whether closure remarks must be mandatory is unresolved (DECISIONS.md);
+ * `closureRemarks` is stored as-is when provided and left NULL
+ * otherwise - no rule here requires it to be non-empty.
+ *
+ * Every other permit-mutating function above already only applies to one
+ * specific `status` value (DRAFT/PENDING_CRO/PENDING_HSE) and rejects
+ * anything else as a conflict, so a CLOSED permit is already unreachable
+ * through every one of those paths, including a second call to this
+ * function - immutability of a closed permit falls directly out of that
+ * existing per-function status check, without any additional mechanism.
+ */
+export async function closePermit(
+  actorUserId: string,
+  permitId: string,
+  input: CloseInput,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<CloseOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
+      permitId,
+    ]);
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (existing.status !== 'ISSUED') return { outcome: 'conflict', reason: 'not_issued' };
+    if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
+
+    const closureRemarks = input.closureRemarks ?? null;
+
+    const updateResult = await client.query<PermitRow>(
+      `UPDATE permits
+          SET status = 'CLOSED',
+              closed_by = $2,
+              closed_at = now(),
+              closure_remarks = $3,
+              version = version + 1,
+              updated_at = now()
+        WHERE id = $1
+        RETURNING *`,
+      [permitId, actorUserId, closureRemarks],
+    );
+    const permit = requireRow(updateResult.rows);
+
+    await client.query(
+      `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [permitId, PERMIT_CLOSED_EVENT_TYPE, actorUserId, 'ISSUED', 'CLOSED', closureRemarks],
     );
 
     return { outcome: 'ok', permit };

@@ -51,3 +51,16 @@ export const fallbackApproveBodySchema = z
     version: z.number().int().positive(),
   })
   .strict();
+
+// Whether closure remarks must be mandatory is not finalized
+// (DECISIONS.md), so `closureRemarks` stays optional - only its shape
+// (trimmed, non-empty when present, length-capped like the project's
+// other free-text field, `companyOther`) is validated here. `.strict()`
+// also means closed_by/closed_at can't be smuggled in via the body -
+// those are always server-derived (see domain/permits/service.ts).
+export const closePermitBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+    closureRemarks: z.string().trim().min(1).max(2000).optional(),
+  })
+  .strict();
