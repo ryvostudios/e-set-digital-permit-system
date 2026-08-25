@@ -181,6 +181,23 @@ confirmed. Do not invent behavior for these.
    validation can be tightened later without a data migration. See
    `WORKFLOW.md` → "Closure."
 
+6. **CRO/HSE send-back target state.**
+   WORKFLOW.md/DECISIONS.md describe the *action* ("CRO may... send back
+   for correction"; "HSE may approve or send back to the original
+   creator for correction") and confirm it preserves the Permit/JSA
+   numbers, but never name the resulting persisted `status` - unlike
+   `PENDING_CRO`/`PENDING_HSE`/`ISSUED`/`CLOSED`, which are all
+   explicitly named. Not implemented pending that decision. See
+   `WORKFLOW.md` → "Core Review Lifecycle" / "HSE Five-Minute Window."
+
+7. **Status of a renewed permit.**
+   WORKFLOW.md's Renewal section confirms the *numbering* rule (new
+   Permit Number, same JSA Number, previous permit preserved/linked) but
+   does not state what `status` the newly-created permit starts in -
+   e.g. whether it is issued directly by CRO (continuing the same
+   authorization) or must re-enter CRO/HSE review. Not implemented
+   pending that decision. See `WORKFLOW.md` → "Renewal."
+
 Additional open questions may be appended here as they are identified
 during future sections; each new entry should record enough context to
 be actionable later (what's undecided, why it matters, where it's

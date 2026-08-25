@@ -32,19 +32,28 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   and migration runner).
 - Frontend: React + Vite + TypeScript PWA scaffold with Supabase Auth;
   no permit-workflow UI has been built yet.
-- Database: migrations `0001`-`0010` exist under `database/migrations/`
+- Database: migrations `0001`-`0011` exist under `database/migrations/`
   and are already applied to the live Supabase project
   (`yfxnigovfmngypbgcnaw`) - Supabase security hardening; Team + Position
   -> Capabilities authorization; privileged-access [CEO/Site Manager]
   data-model foundation; Permit/JSA schema; CRO review and HSE review
-  with 5-minute fallback approval; and CRO-only permit closure.
-  Migration `0010_permit_closure.sql` has been applied and live-verified
-  successfully. See `database/migrations/README.md`.
+  with 5-minute fallback approval; CRO-only permit closure; and the
+  permit-status read-performance index.
+  Migration `0011_permit_status_index.sql` has been applied and
+  live-verified successfully. See `database/migrations/README.md`.
 - Backend permit domain (`backend/src/domain/permits/`,
-  `backend/src/routes/permits.ts`): draft creation/update/submission,
-  CRO forward-to-HSE, HSE approval, CRO fallback approval, and CRO
-  closure are implemented. Send-back, Hold/Resume, Cancel, Renewal, PDF
-  generation, and WhatsApp notifications are not yet implemented.
+  `backend/src/routes/permits.ts`, `backend/src/routes/auth.ts`): draft
+  creation/update/submission, CRO forward-to-HSE, HSE approval, CRO
+  fallback approval, and CRO closure are implemented, plus read APIs for
+  frontend integration - the caller's own effective capabilities
+  (`GET /auth/me`), the caller's own permit list (`GET /permits/mine`),
+  a capability-gated status queue (`GET /permits/queue?status=...`),
+  permit detail with its JSA/computed validity/available-actions hint
+  (`GET /permits/:id`), and lifecycle history (`GET /permits/:id/history`).
+  Send-back, Hold, Resume, Cancel, Renewal, PDF generation, and WhatsApp
+  notifications are not implemented - each is blocked on a specific
+  unresolved business rule, not merely unscheduled; see `DECISIONS.md`'s
+  Open Decisions (items 1-3, 6-7) for exactly what is undecided.
 
 ## Core Scope
 

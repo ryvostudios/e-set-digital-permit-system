@@ -1,16 +1,28 @@
 import { Router, type Request, type Response } from 'express';
+import { resolveUserCapabilities } from '../authz/capabilities.js';
 import { env } from '../config/env.js';
+import {
+  canViewPermit,
+  computeAvailableActions,
+  computePermitValidity,
+  STATUS_VIEW_CAPABILITIES,
+} from '../domain/permits/access.js';
 import { toDisplayNumber } from '../domain/permits/numbering.js';
 import {
   closePermit,
   createDraftPermit,
   croFallbackApprove,
   forwardToHseReview,
-  getOwnPermit,
+  getJsaById,
+  getPermitById,
+  getPermitLifecycleEvents,
   hseApprove,
+  listOwnPermits,
+  listPermitsByStatus,
   submitPermit,
   updateDraftPermit,
   type JsaRow,
+  type LifecycleEventRow,
   type PermitRow,
 } from '../domain/permits/service.js';
 import {
@@ -20,6 +32,7 @@ import {
   forwardToHseBodySchema,
   hseApproveBodySchema,
   permitIdParamsSchema,
+  permitQueueQuerySchema,
   submitPermitBodySchema,
   updatePermitBodySchema,
 } from '../domain/permits/validation.js';
@@ -82,28 +95,142 @@ permitsRouter.post('/permits', requireAuth, requireCapability('permit.create'), 
   res.status(201).json({ permit: serializePermit(permit), jsa: serializeJsa(jsa) });
 });
 
-permitsRouter.get(
-  '/permits/:id',
-  requireAuth,
-  requireCapability('permit.create'),
-  async (req: Request, res: Response) => {
-    const userId = getAuthenticatedUserId(req, res);
-    if (!userId) return;
+// `/permits/mine` and `/permits/queue` are registered before the
+// `/permits/:id` param route below - Express matches path segments in
+// registration order, and both would otherwise be swallowed by `:id`
+// (e.g. a request to /permits/mine would match :id="mine").
 
-    const params = permitIdParamsSchema.safeParse(req.params);
-    if (!params.success) {
-      sendValidationError(res, params.error.issues);
-      return;
-    }
+/**
+ * The caller's own permits (any status) - "current user's permit list".
+ * Ownership-based, not capability-gated: access is `created_by = me`,
+ * enforced entirely by `listOwnPermits`'s query. Deliberately requires
+ * no specific capability beyond being authenticated - a user who once
+ * held `permit.create` (and so has historical permits) but has since
+ * lost it must still be able to see their own history; requiring
+ * `permit.create` here would incorrectly couple "can list what I already
+ * created" to "can create new ones".
+ */
+permitsRouter.get('/permits/mine', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  if (!userId) return;
 
-    const permit = await getOwnPermit(userId, params.data.id);
-    if (!permit) {
-      sendNotFound(res);
-      return;
-    }
-    res.status(200).json({ permit: serializePermit(permit) });
-  },
-);
+  const permits = await listOwnPermits(userId);
+  res.status(200).json({ permits: permits.map(serializePermit) });
+});
+
+/**
+ * The capability-gated work queue for one status - WORKFLOW.md's "common
+ * queue" (not scoped by ownership). Which capability a given `status`
+ * requires is data-dependent (the query param), so - unlike every other
+ * route here - the capability check happens inside the handler rather
+ * than via a fixed `requireCapability(...)` middleware; it uses the same
+ * default-deny resolver (`resolveUserCapabilities`) and the same
+ * status->capability mapping that governs read access to a single permit
+ * (`domain/permits/access.ts`), so it can't drift from that.
+ */
+permitsRouter.get('/permits/queue', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  if (!userId) return;
+
+  const query = permitQueueQuerySchema.safeParse(req.query);
+  if (!query.success) {
+    sendValidationError(res, query.error.issues);
+    return;
+  }
+
+  const capabilities = await resolveUserCapabilities(userId);
+  const requiredCapabilities = STATUS_VIEW_CAPABILITIES[query.data.status];
+  const authorized = requiredCapabilities.some((capability) => capabilities.has(capability));
+  if (!authorized) {
+    res.status(403).json({ error: 'forbidden', message: 'Insufficient capability' });
+    return;
+  }
+
+  const permits = await listPermitsByStatus(query.data.status);
+  res.status(200).json({ permits: permits.map(serializePermit) });
+});
+
+/**
+ * Permit detail, together with its JSA, computed validity (once issued),
+ * and a display-only `availableActions` hint. Access is granted to the
+ * creator (any status) or to anyone holding a capability applicable to
+ * the permit's current status (`canViewPermit`) - broader than plain
+ * ownership, matching CRO/HSE's non-ownership access to the same permits
+ * they can already act on via the mutation endpoints below. A permit
+ * that exists but the caller isn't authorized to see responds exactly
+ * like a nonexistent one (404), never 403 - the same
+ * existence-hiding IDOR precaution the rest of this file already follows.
+ *
+ * The permit is fetched and authorized FIRST (`getPermitById` +
+ * `canViewPermit`); the JSA is only fetched afterward, via `getJsaById`,
+ * so an unauthorized caller's request never causes the JSA row to be
+ * read at all.
+ */
+permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  if (!userId) return;
+
+  const params = permitIdParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    sendValidationError(res, params.error.issues);
+    return;
+  }
+
+  const permit = await getPermitById(params.data.id);
+  if (!permit) {
+    sendNotFound(res);
+    return;
+  }
+
+  const capabilities = await resolveUserCapabilities(userId);
+  if (!canViewPermit(permit, userId, capabilities)) {
+    sendNotFound(res);
+    return;
+  }
+
+  const jsa = await getJsaById(permit.jsa_id);
+  const validity = computePermitValidity(permit, new Date());
+  const availableActions = computeAvailableActions(permit, userId, capabilities, Date.now());
+
+  res.status(200).json({
+    permit: serializePermit(permit),
+    jsa: serializeJsa(jsa),
+    validity,
+    availableActions,
+  });
+});
+
+/**
+ * A permit's append-only lifecycle history. Same view-authorization as
+ * permit detail (permit fetched/authorized first, via `getPermitById` +
+ * `canViewPermit`, before anything else is read) - but this endpoint has
+ * no use for the JSA at all, so it never fetches one.
+ */
+permitsRouter.get('/permits/:id/history', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  if (!userId) return;
+
+  const params = permitIdParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    sendValidationError(res, params.error.issues);
+    return;
+  }
+
+  const permit = await getPermitById(params.data.id);
+  if (!permit) {
+    sendNotFound(res);
+    return;
+  }
+
+  const capabilities = await resolveUserCapabilities(userId);
+  if (!canViewPermit(permit, userId, capabilities)) {
+    sendNotFound(res);
+    return;
+  }
+
+  const events: LifecycleEventRow[] = await getPermitLifecycleEvents(params.data.id);
+  res.status(200).json({ events });
+});
 
 permitsRouter.patch(
   '/permits/:id',

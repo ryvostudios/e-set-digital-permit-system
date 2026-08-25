@@ -5,8 +5,14 @@ import {
   createDraftPermit,
   croFallbackApprove,
   forwardToHseReview,
+  getJsaById,
   getOwnPermit,
+  getPermitById,
+  getPermitLifecycleEvents,
+  getPermitWithJsa,
   hseApprove,
+  listOwnPermits,
+  listPermitsByStatus,
   PERMIT_CLOSED_EVENT_TYPE,
   submitPermit,
   updateDraftPermit,
@@ -210,6 +216,16 @@ class FakeDb {
       const permit = this.permits.get(id);
       return permit ? { rows: [permit] } : { rows: [] };
     }
+    if (sql === 'SELECT * FROM permits WHERE id = $1') {
+      const [id] = params as [string];
+      const permit = this.permits.get(id);
+      return permit ? { rows: [permit] } : { rows: [] };
+    }
+    if (sql === 'SELECT * FROM jsas WHERE id = $1') {
+      const [id] = params as [string];
+      const jsa = this.jsas.get(id);
+      return jsa ? { rows: [jsa] } : { rows: [] };
+    }
     if (sql.startsWith('UPDATE permits') && sql.includes('SET company')) {
       const [company, companyOther, id] = params as [string | null, string | null, string];
       const existing = this.permits.get(id);
@@ -277,6 +293,45 @@ class FakeDb {
         updated_at: this.now.toISOString(),
       };
       return { rows: [this.setPermit(updated)] };
+    }
+    if (sql.startsWith('SELECT p.*')) {
+      const [id] = params as [string];
+      const permit = this.permits.get(id);
+      if (!permit) return { rows: [] };
+      const jsa = this.jsas.get(permit.jsa_id);
+      if (!jsa) return { rows: [] };
+      return {
+        rows: [
+          {
+            ...permit,
+            jsa_row_id: jsa.id,
+            jsa_sequence: jsa.jsa_sequence,
+            jsa_created_by: jsa.created_by,
+            jsa_created_at: jsa.created_at,
+          },
+        ],
+      };
+    }
+    if (sql.startsWith('SELECT * FROM permits WHERE created_by = $1')) {
+      const [createdBy] = params as [string];
+      const rows = [...this.permits.values()]
+        .filter((p) => p.created_by === createdBy)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return { rows };
+    }
+    if (sql.startsWith('SELECT * FROM permits WHERE status = $1')) {
+      const [status] = params as [PermitRow['status']];
+      const rows = [...this.permits.values()]
+        .filter((p) => p.status === status)
+        .sort((a, b) => a.created_at.localeCompare(b.created_at));
+      return { rows };
+    }
+    if (sql.startsWith('SELECT * FROM permit_lifecycle_events WHERE permit_id = $1')) {
+      const [permitId] = params as [string];
+      const rows = this.lifecycleEvents
+        .filter((e) => e.permit_id === permitId)
+        .map((e, index) => ({ id: `event-${permitId}-${index}`, ordinal: String(index + 1), occurred_at: this.now.toISOString(), ...e }));
+      return { rows };
     }
 
     throw new Error(`FakeDb: unhandled query: ${sql}`);
@@ -1025,4 +1080,127 @@ test('assertPermitInvariants (mirroring permits_closure_consistent/permits_issue
       }),
     /permits_issued_at_consistent/,
   );
+});
+
+// --- Read APIs: permit detail+JSA, own/queue lists, lifecycle history ---
+
+test('getPermitWithJsa returns the permit joined with its JSA, for any permit id (no ownership filter)', async () => {
+  const db = new FakeDb();
+  const { permit, jsa } = await createDraftPermit('owner', 'UTC', db.deps());
+
+  const found = await getPermitWithJsa(permit.id, db.deps());
+
+  assert.ok(found);
+  assert.equal(found?.permit.id, permit.id);
+  assert.equal(found?.jsa.id, jsa.id);
+  assert.equal(found?.jsa.jsa_sequence, jsa.jsa_sequence);
+});
+
+test('getPermitWithJsa returns null for a nonexistent permit', async () => {
+  const db = new FakeDb();
+  const found = await getPermitWithJsa('no-such-permit', db.deps());
+  assert.equal(found, null);
+});
+
+test('getPermitById returns the permit only - no JSA join, no ownership filter', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+
+  const found = await getPermitById(permit.id, db.deps());
+
+  assert.deepEqual(found, permit);
+});
+
+test('getPermitById returns null for a nonexistent permit', async () => {
+  const db = new FakeDb();
+  const found = await getPermitById('no-such-permit', db.deps());
+  assert.equal(found, null);
+});
+
+test('getPermitById never queries the jsas table (proves detail/history can authorize before any JSA read)', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  db.queries = [];
+
+  await getPermitById(permit.id, db.deps());
+
+  assert.equal(
+    db.queries.some((q) => q.sql.includes('jsas')),
+    false,
+  );
+});
+
+test('getJsaById returns the JSA for a permit\'s jsa_id', async () => {
+  const db = new FakeDb();
+  const { permit, jsa } = await createDraftPermit('owner', 'UTC', db.deps());
+
+  const found = await getJsaById(permit.jsa_id, db.deps());
+
+  assert.deepEqual(found, jsa);
+});
+
+test('getJsaById throws for an id with no matching row (FK-guaranteed invariant, not a normal not-found)', async () => {
+  const db = new FakeDb();
+  await assert.rejects(() => getJsaById('no-such-jsa', db.deps()));
+});
+
+test('listOwnPermits returns only the given user\'s permits, most recent first', async () => {
+  const db = new FakeDb();
+  const first = await createDraftPermit('owner-a', 'UTC', db.deps());
+  const second = await createDraftPermit('owner-a', 'UTC', db.deps());
+  await createDraftPermit('owner-b', 'UTC', db.deps());
+
+  const results = await listOwnPermits('owner-a', db.deps());
+
+  assert.equal(results.length, 2);
+  assert.ok(results.every((p) => p.created_by === 'owner-a'));
+  assert.deepEqual(
+    results.map((p) => p.id).sort(),
+    [first.permit.id, second.permit.id].sort(),
+  );
+});
+
+test('listPermitsByStatus returns only permits currently in that status, regardless of who created them', async () => {
+  const db = new FakeDb();
+  const pendingHse = await createPendingHsePermit(db, 'owner-a');
+  await createDraftPermit('owner-b', 'UTC', db.deps());
+
+  const results = await listPermitsByStatus('PENDING_HSE', db.deps());
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.id, pendingHse.id);
+});
+
+test('getPermitLifecycleEvents returns the append-only history for a permit, in order', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+
+  const events = await getPermitLifecycleEvents(permit.id, db.deps());
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0]?.event_type, 'CREATED');
+  assert.equal(events[1]?.event_type, 'SUBMITTED');
+});
+
+test('JSA data is never modified through the full permit lifecycle (no JSA mutation code path exists)', async () => {
+  const db = new FakeDb();
+  const pendingHse = await createPendingHsePermit(db);
+  const jsaBefore = await getPermitWithJsa(pendingHse.id, db.deps());
+  assert.ok(jsaBefore);
+
+  const approved = await hseApprove('hse-1', pendingHse.id, { expectedVersion: pendingHse.version }, db.deps());
+  assert.equal(approved.outcome, 'ok');
+  if (approved.outcome !== 'ok') return;
+  const closed = await closePermit('cro-2', pendingHse.id, { expectedVersion: approved.permit.version }, db.deps());
+  assert.equal(closed.outcome, 'ok');
+
+  // The JSA belonging to the permit that just went through the full
+  // lifecycle - fetched fresh, after closure - is byte-identical to what
+  // it was before HSE approval/closure. There is no JSA update function
+  // anywhere in this module that could have changed it.
+  const jsaAfter = await getPermitWithJsa(pendingHse.id, db.deps());
+  assert.ok(jsaAfter);
+  assert.deepEqual(jsaAfter?.jsa, jsaBefore?.jsa);
 });

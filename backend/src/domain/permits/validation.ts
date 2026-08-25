@@ -9,6 +9,14 @@ export const permitIdParamsSchema = z.object({
   id: z.string().uuid('id must be a UUID'),
 });
 
+// The only statuses with a defined "who may view this queue" capability
+// (see domain/permits/access.ts::STATUS_VIEW_CAPABILITIES) - DRAFT is
+// never queue-able (creator-only, never a capability-gated queue), and
+// CLOSED has no queue use case yet, so neither is accepted here.
+export const permitQueueQuerySchema = z.object({
+  status: z.enum(['PENDING_CRO', 'PENDING_HSE', 'ISSUED']),
+});
+
 export const createPermitBodySchema = z.object({}).strict();
 
 export const updatePermitBodySchema = z

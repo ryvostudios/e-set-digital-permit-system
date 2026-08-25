@@ -44,6 +44,20 @@ export interface JsaRow {
   created_at: string;
 }
 
+export interface LifecycleEventRow {
+  id: string;
+  // Raw ordering value (BIGSERIAL, returned by pg as a string) - see the
+  // note on PermitRow.permit_sequence for why bigints come back as text.
+  ordinal: string;
+  permit_id: string;
+  event_type: string;
+  actor_user_id: string;
+  from_status: string | null;
+  to_status: string;
+  reason: string | null;
+  occurred_at: string;
+}
+
 type QueryFn = <T extends QueryResultRow = QueryResultRow>(
   text: string,
   params?: unknown[],
@@ -122,6 +136,120 @@ export async function getOwnPermit(
     actorUserId,
   ]);
   return result.rows[0] ?? null;
+}
+
+/**
+ * Fetches a permit only - no JSA join, no ownership/capability filter.
+ * Deliberately separate from `getPermitWithJsa`: callers that must
+ * authorize the caller against the permit (`domain/permits/access.ts::canViewPermit`)
+ * before touching any related/child data (the JSA, lifecycle history)
+ * use this first, so an unauthorized request never causes a second
+ * table to be read.
+ */
+export async function getPermitById(
+  permitId: string,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<PermitRow | null> {
+  const result = await deps.query<PermitRow>('SELECT * FROM permits WHERE id = $1', [permitId]);
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Fetches a JSA by its own id - the row referenced by a permit's
+ * `jsa_id`. `permits.jsa_id` is `NOT NULL REFERENCES jsas (id) ON DELETE
+ * RESTRICT` (migration 0006), so this always resolves for a real
+ * permit's `jsa_id`; a missing row here would mean that invariant was
+ * violated, not a normal "not found", so - like the RETURNING-row reads
+ * above - it throws via `requireRow` rather than returning null.
+ */
+export async function getJsaById(jsaId: string, deps: PermitsServiceDeps = defaultDeps): Promise<JsaRow> {
+  const result = await deps.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [jsaId]);
+  return requireRow(result.rows);
+}
+
+interface PermitWithJsaRow extends PermitRow {
+  jsa_row_id: string;
+  jsa_sequence: string;
+  jsa_created_by: string;
+  jsa_created_at: string;
+}
+
+function splitPermitJsaRow(row: PermitWithJsaRow): { permit: PermitRow; jsa: JsaRow } {
+  const { jsa_row_id, jsa_sequence, jsa_created_by, jsa_created_at, ...permit } = row;
+  return {
+    permit,
+    jsa: { id: jsa_row_id, jsa_sequence, created_by: jsa_created_by, created_at: jsa_created_at },
+  };
+}
+
+/**
+ * Fetches a permit together with its JSA by ID alone - no ownership or
+ * capability filter. This is a raw lookup only; callers (route handlers)
+ * are responsible for authorizing the result before returning it to a
+ * client (see `domain/permits/access.ts::canViewPermit`) - mirroring how
+ * `forwardToHseReview`/`hseApprove`/etc. above look up by ID and leave
+ * authorization to the capability check around them, since CRO/HSE read
+ * access is not ownership-based either.
+ *
+ * Because this always reads the JSA too, callers that need to authorize
+ * the caller BEFORE any child-table read happens (permit detail,
+ * history) should use `getPermitById` + `canViewPermit` first, and only
+ * call `getJsaById` afterward - not this. This function remains for
+ * cases (tests, and any future caller) that legitimately want both
+ * unconditionally in one round trip.
+ */
+export async function getPermitWithJsa(
+  permitId: string,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<{ permit: PermitRow; jsa: JsaRow } | null> {
+  const result = await deps.query<PermitWithJsaRow>(
+    `SELECT p.*, j.id AS jsa_row_id, j.jsa_sequence, j.created_by AS jsa_created_by, j.created_at AS jsa_created_at
+       FROM permits p
+       JOIN jsas j ON j.id = p.jsa_id
+      WHERE p.id = $1`,
+    [permitId],
+  );
+  const row = result.rows[0];
+  return row ? splitPermitJsaRow(row) : null;
+}
+
+/** Every permit `actorUserId` created, most recent first - the creator's own list/dashboard view. */
+export async function listOwnPermits(
+  actorUserId: string,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<PermitRow[]> {
+  const result = await deps.query<PermitRow>('SELECT * FROM permits WHERE created_by = $1 ORDER BY created_at DESC', [
+    actorUserId,
+  ]);
+  return result.rows;
+}
+
+/**
+ * Every permit currently in `status`, oldest first (FIFO work queue) -
+ * not scoped by ownership. Callers authorize which `status` a given
+ * caller may request (see `domain/permits/access.ts::STATUS_VIEW_CAPABILITIES`)
+ * before calling this.
+ */
+export async function listPermitsByStatus(
+  status: PermitStatus,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<PermitRow[]> {
+  const result = await deps.query<PermitRow>('SELECT * FROM permits WHERE status = $1 ORDER BY created_at ASC', [
+    status,
+  ]);
+  return result.rows;
+}
+
+/** A permit's full append-only lifecycle history, in the order it happened. */
+export async function getPermitLifecycleEvents(
+  permitId: string,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<LifecycleEventRow[]> {
+  const result = await deps.query<LifecycleEventRow>(
+    'SELECT * FROM permit_lifecycle_events WHERE permit_id = $1 ORDER BY ordinal ASC',
+    [permitId],
+  );
+  return result.rows;
 }
 
 export interface UpdateDraftInput {
