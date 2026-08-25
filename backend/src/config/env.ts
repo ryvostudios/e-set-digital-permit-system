@@ -11,6 +11,16 @@ function isPostgresConnectionString(value: string): boolean {
   }
 }
 
+function isValidTimeZone(value: string): boolean {
+  try {
+    // Constructing is the validation; it throws RangeError for an unknown zone.
+    void new Intl.DateTimeFormat(undefined, { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const booleanFlag = z
   .enum(['true', 'false'])
   .transform((value) => value === 'true');
@@ -37,6 +47,14 @@ const envSchema = z
 
     SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
     SUPABASE_PUBLISHABLE_KEY: z.string().min(1, 'SUPABASE_PUBLISHABLE_KEY is required'),
+
+    // The IANA time zone permit validity is evaluated in (next-midnight
+    // expiry). No default - the site's actual timezone must be configured
+    // explicitly rather than assumed.
+    SITE_TIMEZONE: z
+      .string()
+      .min(1, 'SITE_TIMEZONE is required')
+      .refine(isValidTimeZone, { message: 'SITE_TIMEZONE must be a valid IANA time zone name' }),
 
     // Comma-separated list of allowed frontend origins for CORS (e.g.
     // "https://permits.example.com"). Required in production; in

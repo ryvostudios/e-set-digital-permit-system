@@ -1,0 +1,30 @@
+import { z } from 'zod';
+
+// The one permit form field DECISIONS.md documents concretely: "Company
+// field includes ESET, SGRE, ZPL, Other; choosing Other allows free-text
+// entry." The rest of the official form layout is not yet defined.
+export const companySchema = z.enum(['ESET', 'SGRE', 'ZPL', 'OTHER']);
+
+export const permitIdParamsSchema = z.object({
+  id: z.string().uuid('id must be a UUID'),
+});
+
+export const createPermitBodySchema = z.object({}).strict();
+
+export const updatePermitBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+    company: companySchema.optional(),
+    companyOther: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict()
+  .refine((body) => body.company !== 'OTHER' || Boolean(body.companyOther), {
+    message: 'companyOther is required when company is OTHER',
+    path: ['companyOther'],
+  });
+
+export const submitPermitBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+  })
+  .strict();

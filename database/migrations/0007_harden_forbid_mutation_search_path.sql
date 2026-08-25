@@ -1,0 +1,11 @@
+-- Hardening: pin public.forbid_mutation()'s search_path.
+--
+-- Without an explicit search_path, a SECURITY DEFINER/INVOKER function
+-- resolves unqualified identifiers using the caller's current
+-- search_path, which Supabase's linter flags
+-- (function_search_path_mutable) as a risk - a caller could otherwise
+-- influence name resolution inside the function. forbid_mutation() has
+-- no unqualified references (it only reads TG_OP/TG_TABLE_SCHEMA/
+-- TG_TABLE_NAME and calls RAISE EXCEPTION), so this changes no behavior;
+-- it only removes the warning by making the resolution path explicit.
+ALTER FUNCTION public.forbid_mutation() SET search_path = pg_catalog;
