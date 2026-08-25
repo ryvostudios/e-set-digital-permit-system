@@ -3,7 +3,10 @@ import { env } from '../config/env.js';
 import { toDisplayNumber } from '../domain/permits/numbering.js';
 import {
   createDraftPermit,
+  croFallbackApprove,
+  forwardToHseReview,
   getOwnPermit,
+  hseApprove,
   submitPermit,
   updateDraftPermit,
   type JsaRow,
@@ -11,6 +14,9 @@ import {
 } from '../domain/permits/service.js';
 import {
   createPermitBodySchema,
+  fallbackApproveBodySchema,
+  forwardToHseBodySchema,
+  hseApproveBodySchema,
   permitIdParamsSchema,
   submitPermitBodySchema,
   updatePermitBodySchema,
@@ -41,7 +47,7 @@ function sendNotFound(res: Response): void {
 }
 
 function sendConflict(res: Response, reason: string): void {
-  res.status(409).json({ error: 'conflict', message: 'Permit has changed or is no longer a draft', reason });
+  res.status(409).json({ error: 'conflict', message: 'Permit has changed or is not in the required state', reason });
 }
 
 /** Guards handler bodies against a missing `req.auth` even though `requireAuth`/`requireCapability` already ran. */
@@ -167,6 +173,120 @@ permitsRouter.post(
       res
         .status(422)
         .json({ error: 'invalid_state', message: 'Permit is missing required fields for submission', reason: result.reason });
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+// CRO forward-to-HSE, HSE approve, and CRO fallback approve act on any
+// permit in the relevant state, not just permits the caller created
+// (WORKFLOW.md's "common queue") - so, unlike the draft endpoints above,
+// there is no ownership check; the service layer already enforces
+// row-locked status/version checks, and capability is the only
+// authorization gate here (SECURITY.md default-deny).
+
+permitsRouter.post(
+  '/permits/:id/forward-hse',
+  requireAuth,
+  requireCapability('permit.forward_hse'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = forwardToHseBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await forwardToHseReview(userId, params.data.id, { expectedVersion: body.data.version });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+permitsRouter.post(
+  '/permits/:id/hse-approve',
+  requireAuth,
+  requireCapability('permit.hse_review'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = hseApproveBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await hseApprove(userId, params.data.id, { expectedVersion: body.data.version });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+permitsRouter.post(
+  '/permits/:id/fallback-approve',
+  requireAuth,
+  requireCapability('permit.fallback_approve'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = fallbackApproveBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await croFallbackApprove(userId, params.data.id, { expectedVersion: body.data.version });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    if (result.outcome === 'too_early') {
+      res.status(409).json({
+        error: 'conflict',
+        message: 'The HSE review window has not expired yet',
+        reason: 'window_not_expired',
+      });
       return;
     }
     res.status(200).json({ permit: serializePermit(result.permit) });

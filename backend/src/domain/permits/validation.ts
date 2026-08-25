@@ -28,3 +28,26 @@ export const submitPermitBodySchema = z
     version: z.number().int().positive(),
   })
   .strict();
+
+// CRO forward-to-HSE, HSE approve, and CRO fallback approve all take the
+// same shape - only the expected current version, for the optimistic
+// concurrency check. Kept as separate schemas (one per endpoint,
+// matching the rest of this file) since each represents a distinct API
+// contract that could diverge later.
+export const forwardToHseBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+export const hseApproveBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+  })
+  .strict();
+
+export const fallbackApproveBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+  })
+  .strict();
