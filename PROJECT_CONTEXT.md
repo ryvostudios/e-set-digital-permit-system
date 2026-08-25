@@ -32,16 +32,14 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   and migration runner).
 - Frontend: React + Vite + TypeScript PWA scaffold with Supabase Auth;
   no permit-workflow UI has been built yet.
-- Database: migrations `0001`-`0009` exist under `database/migrations/`
+- Database: migrations `0001`-`0010` exist under `database/migrations/`
   and are already applied to the live Supabase project
   (`yfxnigovfmngypbgcnaw`) - Supabase security hardening; Team + Position
   -> Capabilities authorization; privileged-access [CEO/Site Manager]
   data-model foundation; Permit/JSA schema; CRO review and HSE review
-  with 5-minute fallback approval. Migration `0010_permit_closure.sql`
-  (CRO-only closure) exists but has **not** been applied to Supabase yet
-  - it is awaiting code verification and live migration verification; do
-  not treat it as deployed or verified until that happens. See
-  `database/migrations/README.md`.
+  with 5-minute fallback approval; and CRO-only permit closure.
+  Migration `0010_permit_closure.sql` has been applied and live-verified
+  successfully. See `database/migrations/README.md`.
 - Backend permit domain (`backend/src/domain/permits/`,
   `backend/src/routes/permits.ts`): draft creation/update/submission,
   CRO forward-to-HSE, HSE approval, CRO fallback approval, and CRO
