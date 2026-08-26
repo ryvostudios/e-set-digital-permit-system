@@ -4,6 +4,20 @@ import { MAX_PAGE_SIZE, MAX_PAGINATION_OFFSET } from './validation.js';
 import { isPermitValid } from './validity.js';
 import type { IssuanceEventMetadata } from './documents.js';
 import {
+  derivePermitFormProjection,
+  deriveJsaFormProjection,
+  JSA_FORM_VERSION,
+  parseJsaForm,
+  parsePermitForm,
+  PERMIT_FORM_VERSIONS,
+  type JsaForm,
+  type JsaFormVersion,
+  type PermitForm,
+  type PermitFormVersion,
+  type PermitType,
+} from './forms.js';
+import { recordPermitSignature, SigningIdentityUnavailableError } from './signatures.js';
+import {
   onCroSentBackToApplicant,
   onForwardedToHse,
   onHseSentBackToCro,
@@ -80,8 +94,72 @@ export interface PermitRow {
   cancelled_by: string | null;
   cancelled_at: string | null;
   cancel_reason: string | null;
+  // Which of the four confirmed V1 permit templates this permit is, and
+  // the exact schema version that validated `form_payload` (migration
+  // 0016). Nullable only while the permit is still a DRAFT - a permit
+  // can never leave DRAFT without all three
+  // (permits_form_required_after_draft).
+  permit_type: PermitType | null;
+  form_version: PermitFormVersion | null;
+  form_payload: PermitForm | null;
+  // Server-DERIVED relational projections of `form_payload`, written in
+  // the same statement as the payload they came from, so they can never
+  // drift from it. Present for workflow/search queries that must not
+  // have to open the JSONB; the payload remains authoritative.
+  wind_farm: string | null;
+  wtg_number: string | null;
+  work_description: string | null;
+  loto_number: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** A permit as returned by the LIST/SEARCH endpoints - every column except the potentially large `form_payload`, which those responses deliberately never carry (it is fetched only by permit detail). */
+export type PermitSummaryRow = Omit<PermitRow, 'form_payload'>;
+
+/**
+ * The explicit list-endpoint column projection behind `PermitSummaryRow`.
+ * Written out rather than `SELECT *` specifically so `form_payload` is
+ * never even transferred from the database for a list of permits.
+ */
+export const PERMIT_SUMMARY_COLUMNS = [
+  'id',
+  'permit_sequence',
+  'jsa_id',
+  'status',
+  'version',
+  'created_by',
+  'previous_permit_id',
+  'site_timezone',
+  'company',
+  'company_other',
+  'submitted_at',
+  'hse_review_started_at',
+  'hse_review_deadline_at',
+  'issued_at',
+  'closed_by',
+  'closed_at',
+  'closure_remarks',
+  'held_by',
+  'held_at',
+  'hold_reason',
+  'cancelled_by',
+  'cancelled_at',
+  'cancel_reason',
+  'permit_type',
+  'form_version',
+  'wind_farm',
+  'wtg_number',
+  'work_description',
+  'loto_number',
+  'created_at',
+  'updated_at',
+] as const;
+
+/** `PERMIT_SUMMARY_COLUMNS` rendered for a SELECT list, optionally table-qualified (e.g. `permitSummaryColumns('p')` for a join). */
+export function permitSummaryColumns(alias?: string): string {
+  const prefix = alias ? `${alias}.` : '';
+  return PERMIT_SUMMARY_COLUMNS.map((column) => `${prefix}${column}`).join(', ');
 }
 
 export interface JsaRow {
@@ -90,7 +168,15 @@ export interface JsaRow {
   // column DEFAULT) - see the note on PermitRow.permit_sequence.
   jsa_sequence: string;
   created_by: string;
+  // The one shared JSA_V1 form (migration 0016), NULL until the JSA has
+  // actually been completed. A permit cannot leave DRAFT while its
+  // linked JSA payload is still NULL (permits_require_completed_jsa).
+  form_version: JsaFormVersion | null;
+  form_payload: JsaForm | null;
+  site_or_wtg: string | null;
+  job_description: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface LifecycleEventRow {
@@ -126,15 +212,37 @@ type MissingResponsibilityRecipientOutcome = {
   responsibility: 'CRO' | 'HSE';
 };
 
-async function runResponsibilityHandoff<T>(
+/**
+ * A signing action was attempted by someone with no authoritative
+ * workforce signing identity (no `workforce_profiles` row, or a primary
+ * Team + Position they do not actually hold). The whole transaction has
+ * already rolled back by the time this outcome is produced - the permit
+ * did not move, no event was recorded, and no signature with a guessed
+ * name was ever created.
+ */
+type MissingSigningIdentityOutcome = {
+  outcome: 'conflict';
+  reason: 'missing_signing_identity';
+};
+
+/**
+ * Runs a workflow transition transaction, translating the two
+ * fail-closed domain errors it can legitimately raise into ordinary
+ * conflict outcomes. Anything else still propagates: this never
+ * converts an unexpected failure into a "handled" result.
+ */
+async function runWorkflowTransaction<T>(
   deps: PermitsServiceDeps,
   work: (client: PoolClient) => Promise<T>,
-): Promise<T | MissingResponsibilityRecipientOutcome> {
+): Promise<T | MissingResponsibilityRecipientOutcome | MissingSigningIdentityOutcome> {
   try {
     return await deps.withTransaction(work);
   } catch (err) {
     if (err instanceof ResponsibilityRecipientUnavailableError) {
       return { outcome: 'conflict', reason: 'no_responsible_recipient', responsibility: err.responsibility };
+    }
+    if (err instanceof SigningIdentityUnavailableError) {
+      return { outcome: 'conflict', reason: 'missing_signing_identity' };
     }
     throw err;
   }
@@ -163,6 +271,7 @@ function requireRow<T>(rows: T[]): T {
 export async function createDraftPermit(
   actorUserId: string,
   siteTimezone: string,
+  permitType: PermitType,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<{ permit: PermitRow; jsa: JsaRow }> {
   return deps.withTransaction(async (client) => {
@@ -171,11 +280,15 @@ export async function createDraftPermit(
     ]);
     const jsa = requireRow(jsaResult.rows);
 
+    // The permit template is fixed at creation and its `form_version` is
+    // derived from it here, never taken from the request - the database
+    // additionally refuses any type/version pair that disagrees
+    // (permits_form_version_matches_type).
     const permitResult = await client.query<PermitRow>(
-      `INSERT INTO permits (jsa_id, created_by, site_timezone, status)
-       VALUES ($1, $2, $3, 'DRAFT')
+      `INSERT INTO permits (jsa_id, created_by, site_timezone, status, permit_type, form_version)
+       VALUES ($1, $2, $3, 'DRAFT', $4, $5)
        RETURNING *`,
-      [jsa.id, actorUserId, siteTimezone],
+      [jsa.id, actorUserId, siteTimezone, permitType, PERMIT_FORM_VERSIONS[permitType]],
     );
     const permit = requireRow(permitResult.rows);
 
@@ -241,13 +354,39 @@ interface PermitWithJsaRow extends PermitRow {
   jsa_sequence: string;
   jsa_created_by: string;
   jsa_created_at: string;
+  jsa_updated_at: string;
+  jsa_form_version: JsaFormVersion | null;
+  jsa_form_payload: JsaForm | null;
+  jsa_site_or_wtg: string | null;
+  jsa_job_description: string | null;
 }
 
 function splitPermitJsaRow(row: PermitWithJsaRow): { permit: PermitRow; jsa: JsaRow } {
-  const { jsa_row_id, jsa_sequence, jsa_created_by, jsa_created_at, ...permit } = row;
+  const {
+    jsa_row_id,
+    jsa_sequence,
+    jsa_created_by,
+    jsa_created_at,
+    jsa_updated_at,
+    jsa_form_version,
+    jsa_form_payload,
+    jsa_site_or_wtg,
+    jsa_job_description,
+    ...permit
+  } = row;
   return {
     permit,
-    jsa: { id: jsa_row_id, jsa_sequence, created_by: jsa_created_by, created_at: jsa_created_at },
+    jsa: {
+      id: jsa_row_id,
+      jsa_sequence,
+      created_by: jsa_created_by,
+      form_version: jsa_form_version,
+      form_payload: jsa_form_payload,
+      site_or_wtg: jsa_site_or_wtg,
+      job_description: jsa_job_description,
+      created_at: jsa_created_at,
+      updated_at: jsa_updated_at,
+    },
   };
 }
 
@@ -272,7 +411,10 @@ export async function getPermitWithJsa(
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<{ permit: PermitRow; jsa: JsaRow } | null> {
   const result = await deps.query<PermitWithJsaRow>(
-    `SELECT p.*, j.id AS jsa_row_id, j.jsa_sequence, j.created_by AS jsa_created_by, j.created_at AS jsa_created_at
+    `SELECT p.*, j.id AS jsa_row_id, j.jsa_sequence, j.created_by AS jsa_created_by,
+            j.created_at AS jsa_created_at, j.updated_at AS jsa_updated_at,
+            j.form_version AS jsa_form_version, j.form_payload AS jsa_form_payload,
+            j.site_or_wtg AS jsa_site_or_wtg, j.job_description AS jsa_job_description
        FROM permits p
        JOIN jsas j ON j.id = p.jsa_id
       WHERE p.id = $1`,
@@ -357,10 +499,10 @@ export async function listOwnPermits(
   actorUserId: string,
   pageParams: PageParams,
   deps: PermitsServiceDeps = defaultDeps,
-): Promise<Page<PermitRow>> {
+): Promise<Page<PermitSummaryRow>> {
   const [rowsResult, countResult] = await Promise.all([
-    deps.query<PermitRow>(
-      'SELECT * FROM permits WHERE created_by = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3',
+    deps.query<PermitSummaryRow>(
+      `SELECT ${permitSummaryColumns()} FROM permits WHERE created_by = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`,
       [actorUserId, pageParams.pageSize, pageOffset(pageParams)],
     ),
     deps.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM permits WHERE created_by = $1', [
@@ -383,10 +525,10 @@ export async function listPermitsByStatus(
   status: PermitStatus,
   pageParams: PageParams,
   deps: PermitsServiceDeps = defaultDeps,
-): Promise<Page<PermitRow>> {
+): Promise<Page<PermitSummaryRow>> {
   const [rowsResult, countResult] = await Promise.all([
-    deps.query<PermitRow>(
-      'SELECT * FROM permits WHERE status = $1 ORDER BY created_at ASC, id ASC LIMIT $2 OFFSET $3',
+    deps.query<PermitSummaryRow>(
+      `SELECT ${permitSummaryColumns()} FROM permits WHERE status = $1 ORDER BY created_at ASC, id ASC LIMIT $2 OFFSET $3`,
       [status, pageParams.pageSize, pageOffset(pageParams)],
     ),
     deps.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM permits WHERE status = $1', [status]),
@@ -410,12 +552,23 @@ export interface UpdateDraftInput {
   expectedVersion: number;
   company?: Company | undefined;
   companyOther?: string | undefined;
+  /**
+   * The permit-type-specific form content, still UNVALIDATED here on
+   * purpose: which schema may validate it is decided by the permit's own
+   * stored `permit_type`, read under the row lock below - never by
+   * anything the client declared. Omitted entirely to leave the stored
+   * form untouched.
+   */
+  form?: unknown;
 }
 
 export type UpdateDraftOutcome =
   | { outcome: 'not_found' }
   | { outcome: 'conflict'; reason: 'not_editable' | 'stale_version' }
   | { outcome: 'invalid'; reason: 'invalid_company_fields' }
+  | { outcome: 'invalid'; reason: 'form_too_large' }
+  | { outcome: 'invalid'; reason: 'missing_permit_type' }
+  | { outcome: 'invalid'; reason: 'invalid_form_payload'; issues: unknown }
   | { outcome: 'ok'; permit: PermitRow };
 
 // A permit is editable by its creator in exactly two statuses: DRAFT
@@ -460,14 +613,124 @@ export async function updateDraftPermit(
       (nextCompany !== 'OTHER' && nextCompanyOther !== null)
     ) return { outcome: 'invalid', reason: 'invalid_company_fields' };
 
-    const updateResult = await client.query<PermitRow>(
-      `UPDATE permits
-          SET company = $1, company_other = $2, version = version + 1, updated_at = now()
-        WHERE id = $3
-        RETURNING *`,
-      [nextCompany, nextCompanyOther, permitId],
-    );
+    // Form content is validated against the schema for the permit's OWN
+    // stored template. A payload shaped for a different template fails
+    // here (cross-template rejection), and unknown properties are
+    // rejected outright rather than stored - see domain/permits/forms.ts.
+    let nextForm: PermitForm | null = null;
+    let nextProjection = {
+      windFarm: existing.wind_farm,
+      wtgNumber: existing.wtg_number,
+      workDescription: existing.work_description,
+      lotoNumber: existing.loto_number,
+    };
+    if (input.form !== undefined) {
+      if (!existing.permit_type) return { outcome: 'invalid', reason: 'missing_permit_type' };
+      const parsed = parsePermitForm(existing.permit_type, input.form);
+      if (!parsed.ok) {
+        return parsed.reason === 'too_large'
+          ? { outcome: 'invalid', reason: 'form_too_large' }
+          : { outcome: 'invalid', reason: 'invalid_form_payload', issues: parsed.issues };
+      }
+      nextForm = parsed.data;
+      nextProjection = derivePermitFormProjection(existing.permit_type, parsed.data);
+    }
+
+    const updateResult = input.form === undefined
+      ? await client.query<PermitRow>(
+          `UPDATE permits
+              SET company = $1, company_other = $2, version = version + 1, updated_at = now()
+            WHERE id = $3
+            RETURNING *`,
+          [nextCompany, nextCompanyOther, permitId],
+        )
+      : await client.query<PermitRow>(
+          `UPDATE permits
+              SET company = $1, company_other = $2, form_payload = $3::jsonb,
+                  wind_farm = $4, wtg_number = $5, work_description = $6, loto_number = $7,
+                  version = version + 1, updated_at = now()
+            WHERE id = $8
+            RETURNING *`,
+          [
+            nextCompany,
+            nextCompanyOther,
+            JSON.stringify(nextForm),
+            nextProjection.windFarm,
+            nextProjection.wtgNumber,
+            nextProjection.workDescription,
+            nextProjection.lotoNumber,
+            permitId,
+          ],
+        );
     return { outcome: 'ok', permit: requireRow(updateResult.rows) };
+  });
+}
+
+export interface UpdateJsaInput {
+  /** The PERMIT's expected version - a permit and its JSA are edited as one document, under one optimistic-concurrency token and one row lock. */
+  expectedVersion: number;
+  /** Unvalidated here; parsed by the single shared JSA_V1 schema below. */
+  form: unknown;
+}
+
+export type UpdateJsaOutcome =
+  | { outcome: 'not_found' }
+  | { outcome: 'conflict'; reason: 'not_editable' | 'stale_version' }
+  | { outcome: 'invalid'; reason: 'form_too_large' }
+  | { outcome: 'invalid'; reason: 'invalid_form_payload'; issues: unknown }
+  | { outcome: 'ok'; permit: PermitRow; jsa: JsaRow };
+
+/**
+ * Edits the JSA linked to a DRAFT-or-PENDING_CORRECTION permit. Exactly
+ * the same ownership, editable-status and optimistic-version rules as
+ * `updateDraftPermit`, enforced against the PERMIT row under the same
+ * `FOR UPDATE` lock - the permit is what authorizes access to its JSA,
+ * so an unauthorized caller never causes the JSA row to be touched, and
+ * the permit's `version` remains the single concurrency token for the
+ * whole Permit + JSA document.
+ *
+ * A renewed permit reuses the same JSA row and is created directly as
+ * ISSUED, so it is never editable through here - historical JSA content
+ * can never be rewritten by a later renewal.
+ */
+export async function updateLinkedJsa(
+  actorUserId: string,
+  permitId: string,
+  input: UpdateJsaInput,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<UpdateJsaOutcome> {
+  return deps.withTransaction(async (client) => {
+    const existingResult = await client.query<PermitRow>(
+      'SELECT * FROM permits WHERE id = $1 AND created_by = $2 FOR UPDATE',
+      [permitId, actorUserId],
+    );
+    const existing = existingResult.rows[0];
+    if (!existing) return { outcome: 'not_found' };
+    if (!EDITABLE_STATUSES.includes(existing.status)) return { outcome: 'conflict', reason: 'not_editable' };
+    if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
+
+    const parsed = parseJsaForm(input.form);
+    if (!parsed.ok) {
+      return parsed.reason === 'too_large'
+        ? { outcome: 'invalid', reason: 'form_too_large' }
+        : { outcome: 'invalid', reason: 'invalid_form_payload', issues: parsed.issues };
+    }
+    const projection = deriveJsaFormProjection(parsed.data);
+
+    const jsaResult = await client.query<JsaRow>(
+      `UPDATE jsas
+          SET form_version = $1, form_payload = $2::jsonb, site_or_wtg = $3, job_description = $4
+        WHERE id = $5
+        RETURNING *`,
+      [JSA_FORM_VERSION, JSON.stringify(parsed.data), projection.siteOrWtg, projection.jobDescription, existing.jsa_id],
+    );
+    const jsa = requireRow(jsaResult.rows);
+
+    const permitResult = await client.query<PermitRow>(
+      'UPDATE permits SET version = version + 1, updated_at = now() WHERE id = $1 RETURNING *',
+      [permitId],
+    );
+    return { outcome: 'ok', permit: requireRow(permitResult.rows), jsa };
   });
 }
 
@@ -477,15 +740,34 @@ export interface SubmitInput {
 
 export type SubmitOutcome =
   | { outcome: 'not_found' }
+  | MissingSigningIdentityOutcome
   | { outcome: 'conflict'; reason: 'not_draft' | 'stale_version' }
   | MissingResponsibilityRecipientOutcome
   | { outcome: 'invalid'; reason: 'missing_required_fields' }
   | { outcome: 'ok'; permit: PermitRow };
 
+/**
+ * The completeness bar a permit must clear before it may be submitted or
+ * resubmitted: the documented Company/Other contract, plus its own
+ * template and validated form payload (migration 0016). The database
+ * enforces the same floor independently
+ * (permits_form_required_after_draft), so this is a clean 422 rather
+ * than the only thing standing between an incomplete permit and CRO.
+ */
 function isSubmittable(permit: PermitRow): boolean {
   if (!permit.company) return false;
   if (permit.company === 'OTHER' && !permit.company_other) return false;
+  if (!permit.permit_type || !permit.form_version || !permit.form_payload) return false;
   return true;
+}
+
+/** Whether the permit's linked JSA has actually been completed - the application-level counterpart of the `permits_require_completed_jsa` constraint trigger. */
+async function hasCompletedJsa(client: PoolClient, jsaId: string): Promise<boolean> {
+  const result = await client.query<{ form_payload: JsaForm | null }>(
+    'SELECT form_payload FROM jsas WHERE id = $1',
+    [jsaId],
+  );
+  return Boolean(result.rows[0]?.form_payload);
 }
 
 /**
@@ -502,7 +784,7 @@ export async function submitPermit(
   input: SubmitInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<SubmitOutcome> {
-  return runResponsibilityHandoff(deps, async (client) => {
+  return runWorkflowTransaction(deps, async (client) => {
     const existingResult = await client.query<PermitRow>(
       'SELECT * FROM permits WHERE id = $1 AND created_by = $2 FOR UPDATE',
       [permitId, actorUserId],
@@ -512,6 +794,9 @@ export async function submitPermit(
     if (existing.status !== 'DRAFT') return { outcome: 'conflict', reason: 'not_draft' };
     if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
     if (!isSubmittable(existing)) return { outcome: 'invalid', reason: 'missing_required_fields' };
+    if (!(await hasCompletedJsa(client, existing.jsa_id))) {
+      return { outcome: 'invalid', reason: 'missing_required_fields' };
+    }
 
     const updateResult = await client.query<PermitRow>(
       `UPDATE permits
@@ -529,6 +814,15 @@ export async function submitPermit(
       [permitId, 'SUBMITTED', actorUserId, 'DRAFT', 'PENDING_CRO'],
     );
     const sourceEventId = requireRow(eventResult.rows).id;
+    // The applicant SIGNS by performing this authenticated submission -
+    // their authoritative name/designation is resolved server-side and
+    // frozen now. No profile, no submission (the transaction rolls back).
+    await recordPermitSignature(client.query.bind(client), {
+      permitId,
+      sourceEventId,
+      role: 'APPLICANT',
+      actorUserId,
+    });
     await onPermitSubmittedOrResubmitted(client.query.bind(client), { permit, sourceEventId, resubmitted: false });
 
     return { outcome: 'ok', permit };
@@ -541,6 +835,7 @@ export interface ResubmitInput {
 
 export type ResubmitOutcome =
   | { outcome: 'not_found' }
+  | MissingSigningIdentityOutcome
   | { outcome: 'conflict'; reason: 'not_pending_correction' | 'stale_version' }
   | MissingResponsibilityRecipientOutcome
   | { outcome: 'invalid'; reason: 'missing_required_fields' }
@@ -566,7 +861,7 @@ export async function resubmitPermit(
   input: ResubmitInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<ResubmitOutcome> {
-  return runResponsibilityHandoff(deps, async (client) => {
+  return runWorkflowTransaction(deps, async (client) => {
     const existingResult = await client.query<PermitRow>(
       'SELECT * FROM permits WHERE id = $1 AND created_by = $2 FOR UPDATE',
       [permitId, actorUserId],
@@ -576,6 +871,9 @@ export async function resubmitPermit(
     if (existing.status !== 'PENDING_CORRECTION') return { outcome: 'conflict', reason: 'not_pending_correction' };
     if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
     if (!isSubmittable(existing)) return { outcome: 'invalid', reason: 'missing_required_fields' };
+    if (!(await hasCompletedJsa(client, existing.jsa_id))) {
+      return { outcome: 'invalid', reason: 'missing_required_fields' };
+    }
 
     const updateResult = await client.query<PermitRow>(
       `UPDATE permits
@@ -593,6 +891,16 @@ export async function resubmitPermit(
       [permitId, 'APPLICANT_RESUBMITTED', actorUserId, 'PENDING_CORRECTION', 'PENDING_CRO'],
     );
     const sourceEventId = requireRow(eventResult.rows).id;
+    // Resubmission is a fresh authenticated submission, so it produces a
+    // fresh applicant signature; the issued document carries the last one
+    // made before issuance, with every earlier one still in the
+    // append-only signature/lifecycle history.
+    await recordPermitSignature(client.query.bind(client), {
+      permitId,
+      sourceEventId,
+      role: 'APPLICANT',
+      actorUserId,
+    });
     await onPermitSubmittedOrResubmitted(client.query.bind(client), { permit, sourceEventId, resubmitted: true });
 
     return { outcome: 'ok', permit };
@@ -611,6 +919,7 @@ export interface ForwardToHseInput {
 
 export type ForwardToHseOutcome =
   | { outcome: 'not_found' }
+  | MissingSigningIdentityOutcome
   | { outcome: 'conflict'; reason: 'not_pending_cro' | 'stale_version' }
   | MissingResponsibilityRecipientOutcome
   | { outcome: 'ok'; permit: PermitRow };
@@ -630,7 +939,7 @@ export async function forwardToHseReview(
   input: ForwardToHseInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<ForwardToHseOutcome> {
-  return runResponsibilityHandoff(deps, async (client) => {
+  return runWorkflowTransaction(deps, async (client) => {
     const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
       permitId,
     ]);
@@ -659,6 +968,13 @@ export async function forwardToHseReview(
       [permitId, 'CRO_FORWARDED_HSE', actorUserId, 'PENDING_CRO', 'PENDING_HSE'],
     );
     const sourceEventId = requireRow(eventResult.rows).id;
+    // CRO authorization is signed by the authenticated CRO performing it.
+    await recordPermitSignature(client.query.bind(client), {
+      permitId,
+      sourceEventId,
+      role: 'CRO',
+      actorUserId,
+    });
     await onForwardedToHse(client.query.bind(client), { permit, sourceEventId });
 
     return { outcome: 'ok', permit };
@@ -728,7 +1044,9 @@ export interface HseApproveInput {
 
 export type HseApproveOutcome =
   | { outcome: 'not_found' }
+  | MissingResponsibilityRecipientOutcome
   | { outcome: 'conflict'; reason: 'not_pending_hse' | 'stale_version' }
+  | MissingSigningIdentityOutcome
   | { outcome: 'ok'; permit: PermitRow };
 
 /**
@@ -749,7 +1067,7 @@ export async function hseApprove(
   input: HseApproveInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<HseApproveOutcome> {
-  return deps.withTransaction(async (client) => {
+  return runWorkflowTransaction(deps, async (client) => {
     const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
       permitId,
     ]);
@@ -774,6 +1092,13 @@ export async function hseApprove(
       [permitId, 'HSE_APPROVED', actorUserId, 'PENDING_HSE', 'ISSUED'],
     );
     const issuanceEvent = requireRow(eventResult.rows);
+    // HSE approval is signed by the authenticated HSE approver.
+    await recordPermitSignature(client.query.bind(client), {
+      permitId,
+      sourceEventId: issuanceEvent.id,
+      role: 'HSE',
+      actorUserId,
+    });
     const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
     const jsa = requireRow(jsaResult.rows);
     await onPermitIssued(client.query.bind(client), { permit, jsa, issuanceEvent });
@@ -789,6 +1114,7 @@ export interface HseSendBackInput {
 
 export type HseSendBackOutcome =
   | { outcome: 'not_found' }
+  | MissingSigningIdentityOutcome
   | { outcome: 'conflict'; reason: 'not_pending_hse' | 'stale_version' }
   | MissingResponsibilityRecipientOutcome
   | { outcome: 'ok'; permit: PermitRow };
@@ -824,7 +1150,7 @@ export async function hseSendBackToCro(
   input: HseSendBackInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<HseSendBackOutcome> {
-  return runResponsibilityHandoff(deps, async (client) => {
+  return runWorkflowTransaction(deps, async (client) => {
     const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
       permitId,
     ]);
@@ -866,7 +1192,9 @@ export interface FallbackApproveInput {
 
 export type FallbackApproveOutcome =
   | { outcome: 'not_found' }
+  | MissingResponsibilityRecipientOutcome
   | { outcome: 'conflict'; reason: 'not_pending_hse' | 'stale_version' }
+  | MissingSigningIdentityOutcome
   | { outcome: 'too_early' }
   | { outcome: 'ok'; permit: PermitRow };
 
@@ -891,7 +1219,7 @@ export async function croFallbackApprove(
   input: FallbackApproveInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<FallbackApproveOutcome> {
-  return deps.withTransaction(async (client) => {
+  return runWorkflowTransaction(deps, async (client) => {
     const existingResult = await client.query<PermitRow & { fallback_eligible: boolean | null }>(
       `SELECT *, (now() >= hse_review_deadline_at) AS fallback_eligible
          FROM permits
@@ -921,6 +1249,16 @@ export async function croFallbackApprove(
       [permitId, 'CRO_FALLBACK_APPROVED', actorUserId, 'PENDING_HSE', 'ISSUED'],
     );
     const issuanceEvent = requireRow(eventResult.rows);
+    // The actual CRO signs, in the CRO_FALLBACK role. No HSE signature is
+    // created here - not an empty one, not a placeholder, not the
+    // absent HSE reviewer's name - and migration 0016's authenticity
+    // guard makes that impossible at the database level too.
+    await recordPermitSignature(client.query.bind(client), {
+      permitId,
+      sourceEventId: issuanceEvent.id,
+      role: 'CRO_FALLBACK',
+      actorUserId,
+    });
     const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
     const jsa = requireRow(jsaResult.rows);
     await onPermitIssued(client.query.bind(client), { permit, jsa, issuanceEvent });
@@ -1248,7 +1586,9 @@ export async function closePermit(
 
 export type RenewOutcome =
   | { outcome: 'not_found' }
+  | MissingResponsibilityRecipientOutcome
   | { outcome: 'conflict'; reason: 'not_closed' | 'not_yet_expired' | 'already_renewed' }
+  | MissingSigningIdentityOutcome
   | { outcome: 'ok'; permit: PermitRow; jsa: JsaRow };
 
 /**
@@ -1296,7 +1636,7 @@ export async function renewPermit(
   oldPermitId: string,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<RenewOutcome> {
-  return deps.withTransaction(async (client) => {
+  return runWorkflowTransaction(deps, async (client) => {
     const existingResult = await client.query<PermitRow & { db_now: string }>(
       'SELECT p.*, now() AS db_now FROM permits p WHERE p.id = $1 FOR UPDATE',
       [oldPermitId],
@@ -1315,11 +1655,32 @@ export async function renewPermit(
       const insertResult = await client.query<PermitRow>(
         `INSERT INTO permits (
            jsa_id, created_by, previous_permit_id, site_timezone, company, company_other,
+           permit_type, form_version, form_payload, wind_farm, wtg_number, work_description, loto_number,
            status, issued_at, hse_review_started_at, hse_review_deadline_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, 'ISSUED', now(), NULL, NULL)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, 'ISSUED', now(), NULL, NULL)
          RETURNING *`,
-        [existing.jsa_id, existing.created_by, existing.id, existing.site_timezone, existing.company, existing.company_other],
+        [
+          existing.jsa_id,
+          existing.created_by,
+          existing.id,
+          existing.site_timezone,
+          existing.company,
+          existing.company_other,
+          // The renewed permit is the same work continuing: it carries
+          // over the old permit's template and validated form content
+          // verbatim (and reuses the same JSA row), exactly as it already
+          // carried over applicant/company/site timezone. Nothing is
+          // re-validated or rewritten, and the old permit is still never
+          // written to.
+          existing.permit_type,
+          existing.form_version,
+          JSON.stringify(existing.form_payload),
+          existing.wind_farm,
+          existing.wtg_number,
+          existing.work_description,
+          existing.loto_number,
+        ],
       );
       permit = requireRow(insertResult.rows);
     } catch (err) {
@@ -1336,6 +1697,17 @@ export async function renewPermit(
       [permit.id, 'RENEWED', actorUserId, null, 'ISSUED'],
     );
     const issuanceEvent = requireRow(eventResult.rows);
+    // The authenticated CRO who renewed signs the renewal itself. The
+    // applicant/CRO/HSE signatures on the renewed document are the ones
+    // already frozen on the permit being renewed (see
+    // workflowSideEffects.ts::onPermitRenewed) - never re-resolved from
+    // anyone's current profile, and never fabricated.
+    await recordPermitSignature(client.query.bind(client), {
+      permitId: permit.id,
+      sourceEventId: issuanceEvent.id,
+      role: 'RENEWAL',
+      actorUserId,
+    });
 
     const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
     const jsa = requireRow(jsaResult.rows);

@@ -29,6 +29,22 @@ test('real PostgreSQL transaction rolls back fallback-only CRO forward when no H
       CREATE TABLE capabilities (id uuid PRIMARY KEY, name text NOT NULL UNIQUE);
       CREATE TABLE team_position_capabilities (team_position_id uuid NOT NULL, capability_id uuid NOT NULL REFERENCES capabilities(id));
       CREATE TABLE user_team_positions (user_id uuid NOT NULL, team_position_id uuid NOT NULL);
+      CREATE TABLE teams (id uuid PRIMARY KEY, name text NOT NULL);
+      CREATE TABLE positions (id uuid PRIMARY KEY, name text NOT NULL);
+      CREATE TABLE team_positions (id uuid PRIMARY KEY, team_id uuid NOT NULL REFERENCES teams(id), position_id uuid NOT NULL REFERENCES positions(id));
+      CREATE TABLE workforce_profiles (
+        user_id uuid PRIMARY KEY REFERENCES app_users(id), display_name text NOT NULL,
+        primary_team_position_id uuid NOT NULL REFERENCES team_positions(id)
+      );
+      CREATE TABLE permit_signatures (
+        id uuid PRIMARY KEY DEFAULT '50000000-0000-4000-8000-000000000003',
+        permit_id uuid NOT NULL REFERENCES permits(id),
+        source_event_id uuid NOT NULL REFERENCES permit_lifecycle_events(id),
+        signature_role text NOT NULL, signer_user_id uuid NOT NULL,
+        signer_display_name text NOT NULL, signer_team_position_id uuid NOT NULL,
+        signer_team_name text NOT NULL, signer_position_name text NOT NULL,
+        signed_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
+      );
 
       INSERT INTO app_users VALUES
         ('10000000-0000-4000-8000-000000000001'),
@@ -51,6 +67,16 @@ test('real PostgreSQL transaction rolls back fallback-only CRO forward when no H
       INSERT INTO user_team_positions VALUES
         ('10000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001'),
         ('10000000-0000-4000-8000-000000000002', '40000000-0000-4000-8000-000000000002');
+      INSERT INTO teams VALUES ('70000000-0000-4000-8000-000000000001', 'Operations');
+      INSERT INTO positions VALUES ('80000000-0000-4000-8000-000000000001', 'Control Room Operator');
+      INSERT INTO team_positions VALUES (
+        '40000000-0000-4000-8000-000000000001',
+        '70000000-0000-4000-8000-000000000001',
+        '80000000-0000-4000-8000-000000000001'
+      );
+      INSERT INTO workforce_profiles VALUES (
+        '10000000-0000-4000-8000-000000000001', 'Bilal Ahmed', '40000000-0000-4000-8000-000000000001'
+      );
     `);
 
     const deps: PermitsServiceDeps = {

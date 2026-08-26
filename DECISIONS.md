@@ -324,6 +324,67 @@ confirmed.
   batch. Building the outbox foundation is not the same as resolving that
   decision.
 
+### Permit Templates and Form Content (implemented; migration 0016 unapplied)
+- V1 ships exactly four permit templates - `WTG_WORK`, `COLD_WORK`,
+  `HOT_WORK`, `CONFINED_SPACE_ENTRY` - plus one shared `JSA_V1`. A
+  permit's template is fixed when the draft is created and can never be
+  changed by a client; its `form_version` is derived server-side from
+  the template, and the database refuses any type/version pair that
+  disagrees.
+- Storage is hybrid: workflow/search/lifecycle fields stay relational,
+  while the template-specific and JSA form CONTENT is a versioned JSONB
+  payload validated by a strict Zod schema before it is ever written.
+  Unknown properties are rejected, and a payload shaped for one template
+  can never be stored against another. The promoted relational columns
+  (`wind_farm`, `wtg_number`, `work_description`, `loto_number`,
+  `jsas.site_or_wtg`, `jsas.job_description`) are server-derived
+  projections written in the same statement as the payload, never
+  independently client-supplied.
+- The schemas reproduce the STRUCTURE of the real supplied forms. Where
+  the supplied forms did not give the individual checklist questions (or
+  an option list's exact options), those sections are modelled as
+  repeatable labelled rows rather than guessed - see "Open Decisions"
+  below. Cold Work's Nature of Work and Hazards lists were supplied
+  verbatim and are hard-coded.
+- A permit may be incomplete only while it is still a `DRAFT`. Leaving
+  `DRAFT` requires the template, form version, payload, and a completed
+  linked JSA - enforced by the API and, independently, by database
+  constraints.
+- Opening a record shows Permit, JSA, and History. List/search responses
+  are summaries and never carry a form payload; only permit detail does.
+
+### Digital Signatures and Workforce Identity (implemented; migration 0016 unapplied)
+- A signature is never typed, chosen, or uploaded. The applicant signs by
+  performing the authenticated submission; CRO signs by performing the
+  authenticated CRO authorization (forward to HSE); HSE signs by
+  performing the authenticated approval; CRO fallback approval signs as
+  `CRO FALLBACK APPROVAL` and NEVER produces an HSE signature. No API
+  accepts a signer name, designation, or user id.
+- Signing identity comes from `workforce_profiles` (display name plus a
+  primary Team + Position that is the authoritative SIGNING DESIGNATION).
+  The primary assignment must be one that same user actually holds -
+  enforced by a composite foreign key onto `user_team_positions`, not
+  merely by application code.
+- Authorization is UNCHANGED: capabilities still derive only from
+  Team + Position -> Capabilities. The signing designation grants
+  nothing.
+- FAIL CLOSED: with no profile, or a primary assignment the user does not
+  hold, the signing action is refused and its whole transaction rolls
+  back. There is deliberately no fallback to an email address, Supabase
+  `user_metadata`, a client-supplied name, or a client-supplied position.
+- Every signature's identity is COPIED into the signature row at the
+  moment it is made, and then frozen again into the immutable issued
+  snapshot, so a later rename, re-designation, or account change can
+  never alter a historical document. The database independently enforces
+  that a signature names the authenticated actor of its own lifecycle
+  event, belongs to that event's permit, and matches the exact event type
+  its role can come from.
+- The issued PDF renders Permit page(s) -> JSA page 1 -> JSA page 2 from
+  the immutable snapshot alone, and the same snapshot always renders
+  byte-identical bytes. Renewal reuses the same JSA and inherits the
+  previous permit's frozen signatures, adding the renewing CRO's own
+  renewal signature; nothing is re-resolved from a live profile.
+
 ### Data Integrity
 - No silent overwrite: stale writes (e.g. editing an outdated version)
   must be rejected (e.g. HTTP 409), not silently applied.
@@ -458,6 +519,31 @@ Former items #2 (allowed states for Hold), #3 (allowed states for
 Cancel), #6 (CRO/HSE send-back target state), and #7 (status of a
 renewed permit) are now RESOLVED - see "Send-Back / Correction", "Hold /
 Resume", "Cancel", and "Renewal" under Accepted Decisions above.
+
+4. **The exact checklist questions and option lists on the real forms.**
+   The supplied permit/JSA forms gave their SECTIONS (General Work,
+   Electrical Work, Mechanical Work, Hydraulic Work, Work at Heights,
+   General Requirements, Equipment Condition, PPE, the HSE checklist
+   groups, Hot Work's Nature of Work / Type of Hazard, Confined Space
+   Entry's Nature of Work / Type of Hazard) but not, in every case, the
+   individual printed questions or options. Those were deliberately NOT
+   invented: each such section is modelled as repeatable labelled rows,
+   so the real wording travels with the rendered form.
+   What IS enforced today: every section printed on a form must carry at
+   least one answered item (`NA` counts - an item that does not apply is
+   recorded as answered, never omitted), item text must be non-blank, no
+   item may appear twice within a section, no HSE checklist band may
+   appear twice, answers are restricted to `YES`/`NO`/`NA`, and a
+   Confined Space Entry gas-test band must carry at least one reading
+   with no identical reading recorded twice. A permit or JSA with an
+   empty safety section can therefore no longer be submitted, stored,
+   issued, or rendered.
+   What remains open: WHICH items each section must contain. Confirming
+   the authoritative per-template item catalogue (ideally with stable
+   item IDs) would let these become fixed, server-validated item sets
+   that also reject an unknown or omitted required item; until then two
+   permits of the same template can still carry differently-labelled -
+   though never empty - checklist rows.
 
 Additional open questions may be appended here as they are identified
 during future sections; each new entry should record enough context to

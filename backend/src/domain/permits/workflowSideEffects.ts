@@ -2,9 +2,15 @@ import type { QueryFn } from '../../db/pool.js';
 import { createNotification, notifyRecipients } from '../notifications/service.js';
 import { resolveCroRecipients, resolveHseRecipients } from '../notifications/recipients.js';
 import { buildWhatsappPayload, enqueueWhatsappMessage } from '../notifications/whatsappOutbox.js';
-import { buildIssuedPermitSnapshot, createIssuedDocumentSnapshot, type IssuanceEventMetadata } from './documents.js';
+import {
+  buildIssuedPermitSnapshot,
+  createIssuedDocumentSnapshot,
+  getIssuedSnapshotForPermit,
+  type IssuanceEventMetadata,
+} from './documents.js';
 import { toDisplayNumber } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
+import { buildSnapshotSignatureSet, getPermitSignatures, type SnapshotSignatureSet } from './signatures.js';
 
 /**
  * Every function below is called from INSIDE the same open transaction
@@ -131,7 +137,12 @@ export async function onPermitIssued(
     message: `Permit ${permitNumber} (JSA ${jsaNumber}) has been issued.`,
   });
 
-  const snapshot = buildIssuedPermitSnapshot(input.permit, input.jsa, null, input.issuanceEvent);
+  // The signatures already recorded against this permit - the applicant's
+  // submission, CRO's authorization, and either HSE's approval or CRO's
+  // fallback approval, each frozen when it was actually performed. They
+  // are read back here rather than re-resolved from anyone's profile.
+  const signatures = buildSnapshotSignatureSet(await getPermitSignatures(queryFn, input.permit.id));
+  const snapshot = buildIssuedPermitSnapshot(input.permit, input.jsa, null, input.issuanceEvent, signatures);
   await createIssuedDocumentSnapshot(queryFn, {
     permitId: input.permit.id,
     sourceEventId,
@@ -273,6 +284,34 @@ export async function onPermitClosed(
 }
 
 /**
+ * The signature block a renewed permit inherits from the permit it
+ * renews. Fails closed if that permit somehow has no issued snapshot:
+ * every CLOSED permit was issued, and every issued permit is snapshotted
+ * atomically with its issuance, so a missing one means the renewal
+ * cannot honestly reproduce who authorized the work - which is refused
+ * rather than papered over with an empty signature block.
+ */
+async function inheritedRenewalSignatures(
+  queryFn: QueryFn,
+  oldPermitId: string,
+): Promise<SnapshotSignatureSet> {
+  const previous = await getIssuedSnapshotForPermit(queryFn, oldPermitId);
+  if (!previous) {
+    throw new Error(`Cannot renew permit ${oldPermitId}: it has no immutable issued snapshot to inherit signatures from`);
+  }
+  return {
+    applicant: previous.snapshot.signatures.applicant,
+    cro: previous.snapshot.signatures.cro,
+    hse: previous.snapshot.signatures.hse,
+    croFallback: previous.snapshot.signatures.croFallback,
+    // The previous permit's own renewal signature is not carried forward:
+    // this permit's renewal signature is the one recorded for THIS
+    // renewal action.
+    renewal: null,
+  };
+}
+
+/**
  * Renewal (creates a brand-new ISSUED permit linked to the old, CLOSED
  * one) - notifies the applicant, identifying the NEW Permit Number
  * ("Renewed -> notify applicant and identify the NEW Permit Number"),
@@ -301,7 +340,23 @@ export async function onPermitRenewed(
     message: `Permit ${oldPermitNumber} (JSA ${jsaNumber}) was renewed. The new Permit Number is ${newPermitNumber}.`,
   });
 
-  const snapshot = buildIssuedPermitSnapshot(input.newPermit, input.jsa, input.oldPermit, input.issuanceEvent);
+  // A renewal has no CRO/HSE review of its own, so the applicant/CRO/HSE
+  // signatures on the renewed document are exactly the ones already
+  // frozen on the permit being renewed - copied from that permit's
+  // immutable snapshot, never re-resolved from a live profile and never
+  // fabricated. The renewing CRO's own signature is added on top.
+  const inherited = await inheritedRenewalSignatures(queryFn, input.oldPermit.id);
+  const signatures = buildSnapshotSignatureSet(
+    await getPermitSignatures(queryFn, input.newPermit.id),
+    inherited,
+  );
+  const snapshot = buildIssuedPermitSnapshot(
+    input.newPermit,
+    input.jsa,
+    input.oldPermit,
+    input.issuanceEvent,
+    signatures,
+  );
   await createIssuedDocumentSnapshot(queryFn, {
     permitId: input.newPermit.id,
     sourceEventId,

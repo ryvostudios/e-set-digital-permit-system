@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { QueryFn } from '../../db/pool.js';
 import { searchPermitLifecycleEvents, searchPermits } from './search.js';
-import type { LifecycleEventRow, PermitRow, PermitStatus } from './service.js';
+import type { LifecycleEventRow, PermitStatus, PermitSummaryRow } from './service.js';
 
 /**
  * A permits+jsas fake that interprets the ACTUAL dynamically-built SQL
@@ -19,7 +19,8 @@ function paramAt(sql: string, pattern: RegExp, params: readonly unknown[]): unkn
   return params[Number(match[1]!) - 1];
 }
 
-interface FakePermitJoinRow extends PermitRow {
+/** A search result row: the summary projection `searchPermits` actually selects (no `form_payload`) plus the joined JSA number the fake filters on. */
+interface FakePermitJoinRow extends PermitSummaryRow {
   jsa_sequence: string;
 }
 
@@ -32,6 +33,7 @@ function buildPermitsQuery(rows: FakePermitJoinRow[]): QueryFn {
     const jsaNumber = paramAt(sql, /j\.jsa_sequence = \$(\d+)/, params);
     const status = paramAt(sql, / AND p\.status = \$(\d+)/, params);
     const company = paramAt(sql, /p\.company = \$(\d+)/, params);
+    const permitType = paramAt(sql, /p\.permit_type = \$(\d+)/, params);
     const createdBy = paramAt(sql, / AND p\.created_by = \$(\d+)/, params);
     const createdFrom = paramAt(sql, /p\.created_at >= \$(\d+)/, params);
     const createdTo = paramAt(sql, /p\.created_at <= \$(\d+)/, params);
@@ -42,13 +44,14 @@ function buildPermitsQuery(rows: FakePermitJoinRow[]): QueryFn {
       if (jsaNumber !== undefined && row.jsa_sequence !== jsaNumber) return false;
       if (status !== undefined && row.status !== status) return false;
       if (company !== undefined && row.company !== company) return false;
+      if (permitType !== undefined && row.permit_type !== permitType) return false;
       if (createdBy !== undefined && row.created_by !== createdBy) return false;
       if (createdFrom !== undefined && row.created_at < (createdFrom as string)) return false;
       if (createdTo !== undefined && row.created_at > (createdTo as string)) return false;
       return true;
     });
 
-    if (sql.startsWith('SELECT p.*')) {
+    if (sql.includes('FROM permits p JOIN jsas j') && !sql.startsWith('SELECT COUNT')) {
       const sorted = [...matches].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
       const pageSize = params[params.length - 2] as number;
       const offset = params[params.length - 1] as number;
@@ -87,6 +90,12 @@ function makePermit(overrides: Partial<FakePermitJoinRow>): FakePermitJoinRow {
     cancelled_by: null,
     cancelled_at: null,
     cancel_reason: null,
+    permit_type: 'WTG_WORK',
+    form_version: 'WTG_WORK_V1',
+    wind_farm: 'Jhimpir Wind Farm',
+    wtg_number: 'WTG-07',
+    work_description: 'Replace yaw motor',
+    loto_number: null,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,

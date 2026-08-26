@@ -1,6 +1,8 @@
 import { query, type QueryFn } from '../../db/pool.js';
 import { MAX_PAGE_SIZE, MAX_PAGINATION_OFFSET } from './validation.js';
-import type { Company, LifecycleEventRow, Page, PageParams, PermitRow, PermitStatus } from './service.js';
+import { permitSummaryColumns } from './service.js';
+import type { PermitType } from './forms.js';
+import type { Company, LifecycleEventRow, Page, PageParams, PermitSummaryRow, PermitStatus } from './service.js';
 
 /** Mirrors `domain/permits/service.ts::toPage` - see that file's doc comment on why this is duplicated rather than shared. */
 function toPage<T>(items: T[], pageParams: PageParams, totalCount: number): Page<T> {
@@ -46,6 +48,7 @@ export interface PermitSearchFilters {
   jsaNumber?: number | undefined;
   status?: PermitStatus | undefined;
   company?: Company | undefined;
+  permitType?: PermitType | undefined;
   createdBy?: string | undefined;
   createdFrom?: Date | undefined;
   createdTo?: Date | undefined;
@@ -81,6 +84,10 @@ function buildSearchWhere(access: PermitSearchAccess, filters: PermitSearchFilte
     params.push(filters.company);
     clause += ` AND p.company = $${params.length}`;
   }
+  if (filters.permitType !== undefined) {
+    params.push(filters.permitType);
+    clause += ` AND p.permit_type = $${params.length}`;
+  }
   if (filters.createdBy !== undefined) {
     params.push(filters.createdBy);
     clause += ` AND p.created_by = $${params.length}`;
@@ -115,12 +122,15 @@ export async function searchPermits(
   filters: PermitSearchFilters,
   pageParams: PageParams,
   deps: { query: QueryFn } = { query },
-): Promise<Page<PermitRow>> {
+): Promise<Page<PermitSummaryRow>> {
   const offset = pageOffset(pageParams);
   const { clause, params } = buildSearchWhere(access, filters);
 
-  const rowsResult = await deps.query<PermitRow>(
-    `SELECT p.* FROM permits p JOIN jsas j ON j.id = p.jsa_id
+  // Search results are summaries: the permit-type-specific `form_payload`
+  // is deliberately never selected here, so a search response can never
+  // carry a full form payload per row (only permit detail does).
+  const rowsResult = await deps.query<PermitSummaryRow>(
+    `SELECT ${permitSummaryColumns('p')} FROM permits p JOIN jsas j ON j.id = p.jsa_id
       WHERE ${clause}
       ORDER BY p.created_at DESC, p.id DESC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,

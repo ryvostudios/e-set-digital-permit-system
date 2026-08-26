@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { permitTypeSchema } from './forms.js';
 
 // The one permit form field DECISIONS.md documents concretely: "Company
 // field includes ESET, SGRE, ZPL, Other; choosing Other allows free-text
@@ -82,13 +83,33 @@ export const permitQueueQuerySchema = z
   })
   .superRefine(rejectExcessivePaginationOffset);
 
-export const createPermitBodySchema = z.object({}).strict();
+/**
+ * Creating a draft now fixes the permit TEMPLATE (migration 0016's
+ * confirmed V1 set). Nothing else is accepted: the form content itself
+ * is supplied by a later edit, and `form_version` is derived server-side
+ * from the type - a client can neither choose a version nor mix a type
+ * with another template's version.
+ */
+export const createPermitBodySchema = z.object({ permitType: permitTypeSchema }).strict();
 
+/**
+ * Draft/correction edit. `form` is intentionally typed as unknown HERE
+ * and validated in the service layer instead, because which schema may
+ * validate it is decided by the permit's own STORED `permit_type` - read
+ * under the row lock, never declared by the client. It is still strictly
+ * validated before anything is written (domain/permits/forms.ts), so a
+ * payload with unknown properties, or one shaped for a different permit
+ * template, is rejected rather than stored.
+ *
+ * There is deliberately no signer/name/designation field anywhere in
+ * this body: `.strict()` rejects any attempt to supply one.
+ */
 export const updatePermitBodySchema = z
   .object({
     version: z.number().int().positive(),
     company: companySchema.optional(),
     companyOther: z.string().trim().min(1).max(200).optional(),
+    form: z.unknown().optional(),
   })
   .strict()
   .superRefine((body, ctx) => {
@@ -97,6 +118,24 @@ export const updatePermitBodySchema = z
     }
     if (body.company !== undefined && body.company !== 'OTHER' && body.companyOther !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'companyOther is only allowed when company is OTHER', path: ['companyOther'] });
+    }
+  });
+
+/**
+ * Editing the JSA linked to a DRAFT/PENDING_CORRECTION permit. `version`
+ * is the PERMIT's version - permit and JSA are one document under one
+ * optimistic-concurrency token. `form` is validated by the single shared
+ * JSA_V1 schema in the service layer, under the permit's row lock.
+ */
+export const updateJsaBodySchema = z
+  .object({
+    version: z.number().int().positive(),
+    form: z.unknown(),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (body.form === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'form is required', path: ['form'] });
     }
   });
 
@@ -257,6 +296,9 @@ export const permitSearchQuerySchema = z
     jsaNumber: z.coerce.number().int().positive().optional(),
     status: permitStatusSchema.optional(),
     company: companySchema.optional(),
+    // A real relational column since migration 0016 - not an invented
+    // field, and not a reach into the JSONB payload.
+    permitType: permitTypeSchema.optional(),
     createdBy: z.string().uuid().optional(),
     createdFrom: z.coerce.date().optional(),
     createdTo: z.coerce.date().optional(),

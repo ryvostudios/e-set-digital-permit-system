@@ -31,10 +31,12 @@ import {
   resumePermit,
   submitPermit,
   updateDraftPermit,
+  updateLinkedJsa,
   type JsaRow,
   type LifecycleEventRow,
   type Page,
   type PermitRow,
+  type PermitSummaryRow,
 } from '../domain/permits/service.js';
 import {
   cancelBodySchema,
@@ -55,8 +57,11 @@ import {
   resumeBodySchema,
   sendBackBodySchema,
   submitPermitBodySchema,
+  updateJsaBodySchema,
   updatePermitBodySchema,
 } from '../domain/permits/validation.js';
+import { getPermitSignatures } from '../domain/permits/signatures.js';
+import { query } from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 import { mutationLimiter } from '../middleware/rateLimit.js';
 import { requireCapability } from '../middleware/requireCapability.js';
@@ -68,6 +73,17 @@ export const permitsRouter = Router();
 // boundary, keeps that an easily-swappable presentation concern rather
 // than something baked into stored data or the service layer.
 function serializePermit(permit: PermitRow) {
+  return { ...permit, permitDisplayNumber: toDisplayNumber(BigInt(permit.permit_sequence)) };
+}
+
+/**
+ * The LIST/SEARCH shape: identical to `serializePermit` except that the
+ * potentially large permit-type form payload is never present - list
+ * endpoints already select only `PERMIT_SUMMARY_COLUMNS`, so this type
+ * simply makes that guarantee visible at the response boundary. Full
+ * form content is available from permit detail alone.
+ */
+function serializePermitSummary(permit: PermitSummaryRow) {
   return { ...permit, permitDisplayNumber: toDisplayNumber(BigInt(permit.permit_sequence)) };
 }
 
@@ -125,7 +141,7 @@ permitsRouter.post('/permits', requireAuth, mutationLimiter, requireCapability('
     return;
   }
 
-  const { permit, jsa } = await createDraftPermit(userId, env.SITE_TIMEZONE);
+  const { permit, jsa } = await createDraftPermit(userId, env.SITE_TIMEZONE, parsed.data.permitType);
   res.status(201).json({ permit: serializePermit(permit), jsa: serializeJsa(jsa) });
 });
 
@@ -161,7 +177,7 @@ permitsRouter.get('/permits/mine', requireAuth, async (req: Request, res: Respon
   }
 
   const page = await listOwnPermits(userId, query.data);
-  res.status(200).json({ permits: page.items.map(serializePermit), pagination: serializePagination(page) });
+  res.status(200).json({ permits: page.items.map(serializePermitSummary), pagination: serializePagination(page) });
 });
 
 /**
@@ -196,7 +212,7 @@ permitsRouter.get('/permits/queue', requireAuth, async (req: Request, res: Respo
   }
 
   const page = await listPermitsByStatus(query.data.status, query.data);
-  res.status(200).json({ permits: page.items.map(serializePermit), pagination: serializePagination(page) });
+  res.status(200).json({ permits: page.items.map(serializePermitSummary), pagination: serializePagination(page) });
 });
 
 /**
@@ -235,6 +251,7 @@ permitsRouter.get('/permits/search', requireAuth, async (req: Request, res: Resp
       jsaNumber: parsed.data.jsaNumber,
       status: parsed.data.status,
       company: parsed.data.company,
+      permitType: parsed.data.permitType,
       createdBy: parsed.data.createdBy,
       createdFrom: parsed.data.createdFrom,
       createdTo: parsed.data.createdTo,
@@ -242,7 +259,7 @@ permitsRouter.get('/permits/search', requireAuth, async (req: Request, res: Resp
     { page: parsed.data.page, pageSize: parsed.data.pageSize },
   );
 
-  res.status(200).json({ permits: page.items.map(serializePermit), pagination: serializePagination(page) });
+  res.status(200).json({ permits: page.items.map(serializePermitSummary), pagination: serializePagination(page) });
 });
 
 /**
@@ -283,15 +300,37 @@ permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Respons
     return;
   }
 
+  // Authorization has already passed, so the record's child data may now
+  // be read: the JSA, the append-only history, the issued document's
+  // status, and the frozen signatures - the three things opening a record
+  // shows (Permit, JSA, History), plus the action hints.
   const jsa = await getJsaById(permit.jsa_id);
   const validity = computePermitValidity(permit, new Date());
   const availableActions = computeAvailableActions(permit, userId, capabilities, Date.now());
+  const history: LifecycleEventRow[] = await getPermitLifecycleEvents(permit.id);
+  const signatures = await getPermitSignatures(query, permit.id);
+  const document = permit.issued_at ? await getDocumentForPermit(permit.id) : null;
 
   res.status(200).json({
     permit: serializePermit(permit),
     jsa: serializeJsa(jsa),
     validity,
     availableActions,
+    history,
+    // The frozen signature identities, never re-resolved from a live
+    // profile - the same values the immutable snapshot and PDF carry.
+    signatures,
+    // Status only: the PDF bytes are served solely by GET /permits/:id/pdf.
+    document: document
+      ? {
+          snapshotId: document.snapshot.id,
+          snapshotHash: document.snapshot.snapshot_hash,
+          hashVersion: document.snapshot.hash_version,
+          status: document.job.status,
+          generatedAt: document.job.generated_at,
+          rendererVersion: document.job.renderer_version,
+        }
+      : null,
   });
 });
 
@@ -481,6 +520,7 @@ permitsRouter.patch(
       expectedVersion: body.data.version,
       company: body.data.company,
       companyOther: body.data.companyOther,
+      ...('form' in body.data ? { form: body.data.form } : {}),
     });
 
     if (result.outcome === 'not_found') {
@@ -492,10 +532,68 @@ permitsRouter.patch(
       return;
     }
     if (result.outcome === 'invalid') {
-      res.status(400).json({ error: 'invalid_request', message: 'Invalid company fields', reason: result.reason });
+      res.status(400).json({
+        error: 'invalid_request',
+        message: 'Invalid permit form content',
+        reason: result.reason,
+        ...(result.reason === 'invalid_form_payload' ? { issues: result.issues } : {}),
+      });
       return;
     }
     res.status(200).json({ permit: serializePermit(result.permit) });
+  },
+);
+
+/**
+ * Edits the JSA linked to a DRAFT/PENDING_CORRECTION permit. Gated on
+ * the same `permit.create` capability that gates editing the permit
+ * itself (drafting the Permit and its JSA is one authority), and scoped
+ * to the caller's own permit at the service layer - capability alone
+ * never grants object access. `version` is the PERMIT's version.
+ */
+permitsRouter.patch(
+  '/permits/:id/jsa',
+  requireAuth,
+  mutationLimiter,
+  requireCapability('permit.create'),
+  async (req: Request, res: Response) => {
+    const userId = getAuthenticatedUserId(req, res);
+    if (!userId) return;
+
+    const params = permitIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = updateJsaBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await updateLinkedJsa(userId, params.data.id, {
+      expectedVersion: body.data.version,
+      form: body.data.form,
+    });
+
+    if (result.outcome === 'not_found') {
+      sendNotFound(res);
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendConflict(res, result.reason);
+      return;
+    }
+    if (result.outcome === 'invalid') {
+      res.status(400).json({
+        error: 'invalid_request',
+        message: 'Invalid JSA form content',
+        reason: result.reason,
+        ...(result.reason === 'invalid_form_payload' ? { issues: result.issues } : {}),
+      });
+      return;
+    }
+    res.status(200).json({ permit: serializePermit(result.permit), jsa: serializeJsa(result.jsa) });
   },
 );
 

@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   closePermitBodySchema,
+  createPermitBodySchema,
   MAX_PAGE_SIZE,
   MAX_PAGINATION_OFFSET,
   paginationQuerySchema,
   permitQueueQuerySchema,
+  permitSearchQuerySchema,
+  updateJsaBodySchema,
   updatePermitBodySchema,
 } from './validation.js';
 
@@ -190,4 +193,86 @@ test('permitQueueQuerySchema: the same offset bound applies when composed with `
 
   const pathological = permitQueueQuerySchema.safeParse({ status: 'ISSUED', page: Number.MAX_SAFE_INTEGER, pageSize: 100 });
   assert.equal(pathological.success, false);
+});
+
+/**
+ * Request-contract tests for the schemas migration 0016 introduced or
+ * extended. These run without HTTP on purpose - the route wiring is
+ * proved in routes/permitFormRoutes.test.ts, and the mutation rate
+ * limiter is a per-process budget that request-level coverage of every
+ * rejection case would exhaust.
+ */
+
+test('createPermitBodySchema accepts exactly the four confirmed templates and nothing else', () => {
+  for (const permitType of ['WTG_WORK', 'COLD_WORK', 'HOT_WORK', 'CONFINED_SPACE_ENTRY']) {
+    assert.equal(createPermitBodySchema.safeParse({ permitType }).success, true);
+  }
+  assert.equal(createPermitBodySchema.safeParse({}).success, false);
+  assert.equal(createPermitBodySchema.safeParse({ permitType: 'ELECTRICAL_WORK' }).success, false);
+  assert.equal(createPermitBodySchema.safeParse({ permitType: 'wtg_work' }).success, false);
+});
+
+test('a client can never choose a form version, a status, or an identity at creation', () => {
+  for (const body of [
+    { permitType: 'WTG_WORK', formVersion: 'WTG_WORK_V1' },
+    { permitType: 'WTG_WORK', status: 'ISSUED' },
+    { permitType: 'WTG_WORK', createdBy: 'someone-else' },
+    { permitType: 'WTG_WORK', applicantName: 'Impostor' },
+    { permitType: 'WTG_WORK', permitNumber: 'CW-1045' },
+  ]) {
+    assert.equal(createPermitBodySchema.safeParse(body).success, false, JSON.stringify(body));
+  }
+});
+
+test('updatePermitBodySchema carries an opaque form payload alongside the documented company fields', () => {
+  const withForm = updatePermitBodySchema.safeParse({ version: 3, form: { windFarm: 'Jhimpir' } });
+  assert.equal(withForm.success, true);
+  if (withForm.success) assert.deepEqual(withForm.data.form, { windFarm: 'Jhimpir' });
+
+  // Omitting `form` entirely leaves the stored form untouched, so the
+  // key must be genuinely absent rather than present-and-undefined.
+  const withoutForm = updatePermitBodySchema.safeParse({ version: 3, company: 'ESET' });
+  assert.equal(withoutForm.success, true);
+  if (withoutForm.success) assert.equal('form' in withoutForm.data, false);
+
+  // The pre-existing company/companyOther contract is unchanged.
+  assert.equal(updatePermitBodySchema.safeParse({ version: 1, company: 'OTHER' }).success, false);
+  assert.equal(updatePermitBodySchema.safeParse({ version: 1, company: 'ESET', companyOther: 'x' }).success, false);
+  assert.equal(updatePermitBodySchema.safeParse({ version: 0, form: {} }).success, false);
+  assert.equal(updatePermitBodySchema.safeParse({ form: {} }).success, false);
+});
+
+test('no edit body may smuggle a signer identity, a permit type change, or a raw column write', () => {
+  for (const body of [
+    { version: 1, applicantSignature: 'Impostor' },
+    { version: 1, croName: 'Impostor' },
+    { version: 1, hseApprovedBy: 'Impostor' },
+    { version: 1, permitType: 'HOT_WORK' },
+    { version: 1, form_payload: {} },
+    { version: 1, wind_farm: 'Jhimpir' },
+    { version: 1, status: 'ISSUED' },
+    { version: 1, issued_at: '2026-01-01T00:00:00.000Z' },
+  ]) {
+    assert.equal(updatePermitBodySchema.safeParse(body).success, false, JSON.stringify(body));
+  }
+});
+
+test('updateJsaBodySchema requires the permit version and a form, and rejects anything else', () => {
+  assert.equal(updateJsaBodySchema.safeParse({ version: 2, form: { page1: {}, page2: {} } }).success, true);
+  assert.equal(updateJsaBodySchema.safeParse({ version: 2 }).success, false);
+  assert.equal(updateJsaBodySchema.safeParse({ form: {} }).success, false);
+  assert.equal(updateJsaBodySchema.safeParse({ version: 2, form: {}, completedBy: 'Impostor' }).success, false);
+  assert.equal(updateJsaBodySchema.safeParse({ version: 2, form: {}, jsaNumber: '234' }).success, false);
+});
+
+test('permit search accepts the new permit-type filter and still rejects unknown query keys', () => {
+  const parsed = permitSearchQuerySchema.safeParse({ permitType: 'CONFINED_SPACE_ENTRY' });
+  assert.equal(parsed.success, true);
+  if (parsed.success) assert.equal(parsed.data.permitType, 'CONFINED_SPACE_ENTRY');
+
+  assert.equal(permitSearchQuerySchema.safeParse({ permitType: 'ELECTRICAL_WORK' }).success, false);
+  assert.equal(permitSearchQuerySchema.safeParse({ windFarm: 'Jhimpir' }).success, false);
+  assert.equal(permitSearchQuerySchema.safeParse({ formPayload: '{}' }).success, false);
+  // Existing bounds are untouched.
+  assert.equal(permitSearchQuerySchema.safeParse({ pageSize: '1000' }).success, false);
 });

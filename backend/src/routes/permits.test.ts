@@ -98,13 +98,13 @@ before(() => {
     if (sql.startsWith('SELECT DISTINCT c.name')) {
       return { rows: grantedCapabilities.map((name) => ({ name })) };
     }
-    if (sql.startsWith('SELECT * FROM permits WHERE created_by = $1 ORDER BY')) {
+    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE created_by = $1 ORDER BY')) {
       return { rows: mockOwnPermitRows };
     }
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE created_by')) {
       return { rows: [{ count: String(mockOwnPermitRows.length) }] };
     }
-    if (sql.startsWith('SELECT * FROM permits WHERE status')) {
+    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE status')) {
       return { rows: mockQueuePermitRows };
     }
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE status')) {
@@ -149,7 +149,7 @@ before(() => {
     if (sql.startsWith('SELECT * FROM permit_lifecycle_events')) {
       return { rows: mockHistoryEventRows };
     }
-    if (sql.startsWith('SELECT p.* FROM permits p JOIN jsas j')) {
+    if (sql.includes('FROM permits p JOIN jsas j') && !sql.startsWith('SELECT COUNT')) {
       return { rows: mockSearchPermitRows };
     }
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits p JOIN jsas j')) {
@@ -689,7 +689,7 @@ test('GET /permits/mine never queries by anything other than the authenticated c
   const { url, close } = await startServer();
   try {
     await getRequest(url, '/permits/mine', VALID_TOKEN);
-    const ownPermitsQuery = capturedQueries.find((q) => q.sql.startsWith('SELECT * FROM permits WHERE created_by'));
+    const ownPermitsQuery = capturedQueries.find((q) => !q.sql.startsWith('SELECT COUNT') && q.sql.includes('FROM permits WHERE created_by'));
     assert.ok(ownPermitsQuery, 'expected the own-permits query to have run');
     // The first (identity) param is never anything a client could
     // supply - it's the authenticated actor's own id, from the verified
@@ -833,7 +833,7 @@ test('GET /permits/queue: a pathological offset is rejected (400) even when stat
       (await getRequest(url, '/permits/queue?status=PENDING_CRO&page=1002&pageSize=100', VALID_TOKEN)).status,
       400,
     );
-    const statusQueryBeforeExcessive = capturedQueries.filter((q) => q.sql.startsWith('SELECT * FROM permits WHERE status'));
+    const statusQueryBeforeExcessive = capturedQueries.filter((q) => !q.sql.startsWith('SELECT COUNT') && q.sql.includes('FROM permits WHERE status'));
     // Only the accepted (page=1001) request above should have reached the database.
     assert.equal(statusQueryBeforeExcessive.length, 1);
   } finally {
@@ -1256,7 +1256,7 @@ test('GET /permits/search returns only permits within the caller\'s own access s
     assert.equal(body.pagination.totalCount, 1);
     // The access predicate always includes the caller's own id and the
     // capability-derived allowed-status array, regardless of filters.
-    const searchQuery = capturedQueries.find((q) => q.sql.startsWith('SELECT p.* FROM permits p JOIN jsas j'));
+    const searchQuery = capturedQueries.find((q) => q.sql.includes('FROM permits p JOIN jsas j') && !q.sql.startsWith('SELECT COUNT'));
     assert.ok(searchQuery);
     assert.equal(searchQuery?.params[0], AUTHENTICATED_USER_ID);
   } finally {

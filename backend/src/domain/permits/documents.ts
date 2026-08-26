@@ -3,8 +3,11 @@ import { GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from 
 import PDFDocument from 'pdfkit';
 import { env } from '../../config/env.js';
 import { query, type QueryFn } from '../../db/pool.js';
+import { buildIssuedDocumentPages, type DocumentBlock, type DocumentPage } from './documentLayout.js';
+import type { JsaForm, PermitForm, PermitFormVersion, PermitType } from './forms.js';
 import { toDisplayNumber } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
+import type { SnapshotSignatureSet } from './signatures.js';
 import { computeNextMidnightUtc } from './validity.js';
 
 /**
@@ -19,6 +22,13 @@ import { computeNextMidnightUtc } from './validity.js';
  * potentially-later-changed `permits`/`jsas` rows themselves.
  */
 export interface IssuedPermitSnapshot {
+  /**
+   * The snapshot content contract. `ISSUED_PERMIT_SNAPSHOT_V1` documents
+   * are the pre-form snapshots migration 0013 backfilled; every snapshot
+   * taken from migration 0016 onward is V2 and additionally carries the
+   * permit template, both form payloads, and the frozen signature block.
+   */
+  snapshotVersion: 'ISSUED_PERMIT_SNAPSHOT_V2';
   permitId: string;
   permitNumber: string;
   jsaId: string;
@@ -41,6 +51,22 @@ export interface IssuedPermitSnapshot {
   issuanceOccurredAt: string;
   /** DB-authoritative time at which the immutable snapshot was captured. Distinct from the issuance decision time. */
   snapshotTakenAt: string;
+  /** The permit template and the exact schema version that validated the payload below. */
+  permitType: PermitType;
+  permitFormVersion: PermitFormVersion;
+  /** The full, already-validated permit form content, frozen verbatim. */
+  permitForm: PermitForm;
+  jsaFormVersion: 'JSA_V1';
+  /** The full, already-validated JSA_V1 content, frozen verbatim - the same JSA a renewal reuses, never copied or edited. */
+  jsaForm: JsaForm;
+  /**
+   * The authoritative digital signatures, frozen as text at the instant
+   * each authenticated action was performed. A later change to a
+   * signer's display name, primary Team + Position, or account state can
+   * never alter what this document says - nothing here is ever
+   * re-resolved from a live profile.
+   */
+  signatures: SnapshotSignatureSet;
 }
 
 export interface IssuanceEventMetadata {
@@ -56,24 +82,42 @@ function toIsoTimestamp(value: string | Date): string {
 }
 
 /**
- * Builds the snapshot from the just-issued permit row and its JSA -
- * called from the SAME transaction that just set `status = 'ISSUED'`
- * (see domain/permits/workflowSideEffects.ts), so `permit.issued_at` is
+ * Builds the snapshot from the just-issued permit row, its JSA, and the
+ * signatures already recorded against it - called from the SAME
+ * transaction that just set `status = 'ISSUED'` (see
+ * domain/permits/workflowSideEffects.ts), so `permit.issued_at` is
  * always already set when this runs. `previousPermit` is only passed for
  * a renewal (see `renewPermit` in service.ts); `null` for a normal
  * HSE/fallback issuance.
+ *
+ * Fails closed on missing form content or a missing applicant signature:
+ * an issued permit without them would be a document that cannot honestly
+ * be reproduced, so it is refused rather than snapshotted with holes.
+ * The database independently guarantees the same
+ * (permits_form_required_after_draft, permits_require_completed_jsa).
  */
 export function buildIssuedPermitSnapshot(
   permit: PermitRow,
   jsa: JsaRow,
   previousPermit: PermitRow | null,
   issuanceEvent: IssuanceEventMetadata,
+  signatures: SnapshotSignatureSet,
 ): IssuedPermitSnapshot {
   if (!permit.issued_at) {
     throw new Error('buildIssuedPermitSnapshot requires an already-issued permit (issued_at is null)');
   }
+  if (!permit.permit_type || !permit.form_version || !permit.form_payload) {
+    throw new Error('buildIssuedPermitSnapshot requires a permit with a completed, validated form');
+  }
+  if (!jsa.form_version || !jsa.form_payload) {
+    throw new Error('buildIssuedPermitSnapshot requires a JSA with a completed, validated form');
+  }
+  if (!signatures.applicant) {
+    throw new Error('buildIssuedPermitSnapshot requires a recorded applicant signature');
+  }
   const issuedAt = new Date(permit.issued_at);
   return {
+    snapshotVersion: 'ISSUED_PERMIT_SNAPSHOT_V2',
     permitId: permit.id,
     permitNumber: toDisplayNumber(BigInt(permit.permit_sequence)),
     jsaId: jsa.id,
@@ -95,6 +139,12 @@ export function buildIssuedPermitSnapshot(
     issuanceActorUserId: issuanceEvent.actor_user_id,
     issuanceOccurredAt: toIsoTimestamp(issuanceEvent.occurred_at),
     snapshotTakenAt: toIsoTimestamp(issuanceEvent.snapshot_taken_at),
+    permitType: permit.permit_type,
+    permitFormVersion: permit.form_version,
+    permitForm: permit.form_payload,
+    jsaFormVersion: jsa.form_version,
+    jsaForm: jsa.form_payload,
+    signatures,
   };
 }
 
@@ -226,6 +276,24 @@ export async function createIssuedDocumentSnapshot(
   return { snapshotId, created };
 }
 
+/**
+ * The immutable issued snapshot for one permit, or null if it was never
+ * issued. Used where an already-frozen document must be read rather than
+ * rebuilt - notably renewal, which inherits the previous permit's frozen
+ * signatures instead of re-resolving anyone's current identity.
+ */
+export async function getIssuedSnapshotForPermit(
+  queryFn: QueryFn,
+  permitId: string,
+): Promise<{ id: string; snapshot: IssuedPermitSnapshot; snapshotHash: string } | null> {
+  const result = await queryFn<{ id: string; snapshot: IssuedPermitSnapshot; snapshot_hash: string }>(
+    'SELECT id, snapshot, snapshot_hash FROM issued_document_snapshots WHERE permit_id = $1',
+    [permitId],
+  );
+  const row = result.rows[0];
+  return row ? { id: row.id, snapshot: row.snapshot, snapshotHash: row.snapshot_hash } : null;
+}
+
 export interface PermitDocumentJobRow {
   id: string;
   snapshot_id: string;
@@ -254,21 +322,120 @@ export interface IssuedDocumentSnapshotRow {
   created_at: string;
 }
 
+/** The renderer identity persisted on `permit_document_jobs.renderer_version` (allowlisted by migration 0016). Bumped from PDFKIT_V1 because this renderer produces a different, richer document: Permit page(s), then JSA page 1, then JSA page 2. */
+export const CURRENT_RENDERER_VERSION = 'PDFKIT_V2';
+
+const PAGE_MARGIN = 50;
+
+function renderBlock(doc: PDFKit.PDFDocument, block: DocumentBlock, contentWidth: number): void {
+  switch (block.kind) {
+    case 'fields':
+      doc.fontSize(10).fillColor('black');
+      for (const row of block.rows) {
+        doc.font('Helvetica-Bold').text(`${row.label}: `, { continued: true });
+        doc.font('Helvetica').text(row.value);
+      }
+      break;
+    case 'checklist':
+      doc.font('Helvetica').fontSize(10).fillColor('black');
+      if (block.items.length === 0) {
+        doc.fillColor('gray').text('No entries recorded.').fillColor('black');
+        break;
+      }
+      for (const item of block.items) {
+        doc.text(`[${item.response}] ${item.label}${item.remarks ? ` - ${item.remarks}` : ''}`);
+      }
+      break;
+    case 'selections':
+      doc.font('Helvetica').fontSize(10).fillColor('black');
+      if (block.items.length === 0) {
+        doc.fillColor('gray').text('No entries recorded.').fillColor('black');
+        break;
+      }
+      for (const item of block.items) {
+        doc.text(`[${item.selected ? 'X' : ' '}] ${item.label}${item.remarks ? ` - ${item.remarks}` : ''}`);
+      }
+      break;
+    case 'table': {
+      doc.fontSize(9).fillColor('black');
+      if (block.rows.length === 0) {
+        doc.font('Helvetica').fillColor('gray').text('No entries recorded.').fillColor('black');
+        break;
+      }
+      const columnWidth = contentWidth / block.columns.length;
+      const writeRow = (cells: string[], bold: boolean): void => {
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica');
+        const top = doc.y;
+        let bottom = top;
+        cells.forEach((cell, index) => {
+          doc.text(cell, PAGE_MARGIN + index * columnWidth, top, { width: columnWidth - 6 });
+          bottom = Math.max(bottom, doc.y);
+        });
+        doc.x = PAGE_MARGIN;
+        doc.y = bottom + 2;
+      };
+      writeRow(block.columns, true);
+      for (const row of block.rows) writeRow(row, false);
+      break;
+    }
+    case 'paragraph':
+      doc.font('Helvetica').fontSize(10).fillColor('black').text(block.text, { width: contentWidth });
+      break;
+    case 'signatures':
+      doc.fontSize(10).fillColor('black');
+      if (block.entries.length === 0) {
+        doc.font('Helvetica').fillColor('gray').text('No signatures recorded.').fillColor('black');
+      }
+      for (const entry of block.entries) {
+        doc.font('Helvetica-Bold').text(entry.caption);
+        doc.font('Helvetica').text(`Signed by: ${entry.name}`);
+        doc.text(`Designation: ${entry.designation}`);
+        doc.text(`Signed at: ${entry.signedAt}`);
+        doc.moveDown(0.5);
+      }
+      if (block.note) {
+        doc.font('Helvetica-Oblique').fontSize(9).text(block.note, { width: contentWidth });
+        doc.font('Helvetica').fontSize(10);
+      }
+      break;
+  }
+}
+
+function renderPage(doc: PDFKit.PDFDocument, page: DocumentPage, contentWidth: number): void {
+  doc.font('Helvetica-Bold').fontSize(16).fillColor('black').text(page.title, { align: 'center' });
+  doc.moveDown();
+  for (const section of page.sections) {
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('black').text(section.title);
+    doc.moveDown(0.3);
+    for (const block of section.blocks) {
+      renderBlock(doc, block, contentWidth);
+    }
+    doc.moveDown(0.7);
+  }
+}
+
 /**
- * Renders the combined Permit+JSA PDF from an immutable snapshot only -
+ * Renders the combined Permit + JSA PDF from an immutable snapshot only -
  * "CORE BUSINESS RULE: every ISSUED permit has ONE combined PDF
- * containing PERMIT then JSA (NOT two separate PDFs)". Uses `pdfkit`
- * (a well-supported, mature PDF library - never a hand-rolled PDF
- * writer). Every value rendered comes directly from `snapshot`; nothing
- * here re-reads the live `permits`/`jsas` tables, so a later Hold/
- * Resume/Cancel/Close/Renewal on the same permit can never change what
- * this function produces for an already-taken snapshot.
+ * containing PERMIT then JSA (NOT two separate PDFs)" - in the confirmed
+ * immutable document order: Permit page(s) -> JSA page 1 -> JSA page 2.
+ * Uses `pdfkit` (a mature, well-supported PDF library - never a
+ * hand-rolled PDF writer).
+ *
+ * Every value rendered comes from `snapshot` alone. Nothing here reads
+ * the live `permits`/`jsas`/`workforce_profiles` rows or the clock, so a
+ * later Hold/Resume/Cancel/Close/Renewal, or a later change to a
+ * signer's name or position, can never change what this produces for an
+ * already-taken snapshot - and rendering the same snapshot twice always
+ * produces byte-identical output (the document's own creation/
+ * modification dates come from the snapshot's authoritative issuance
+ * timestamp, not from `Date.now()`).
  */
 export async function generateIssuedPermitPdf(snapshot: IssuedPermitSnapshot): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const authoritativeDate = new Date(snapshot.issuanceOccurredAt);
     const doc = new PDFDocument({
-      margin: 50,
+      margin: PAGE_MARGIN,
       info: { Title: `Permit ${snapshot.permitNumber}`, CreationDate: authoritativeDate, ModDate: authoritativeDate },
     });
     const chunks: Buffer[] = [];
@@ -276,36 +443,19 @@ export async function generateIssuedPermitPdf(snapshot: IssuedPermitSnapshot): P
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    doc.fontSize(18).text('Permit to Work', { align: 'center' });
-    doc.moveDown();
+    const contentWidth = doc.page.width - PAGE_MARGIN * 2;
+    const pages = buildIssuedDocumentPages(snapshot);
+    pages.forEach((page, index) => {
+      if (index > 0) doc.addPage();
+      renderPage(doc, page, contentWidth);
+    });
 
-    doc.fontSize(12);
-    doc.text(`Permit Number: ${snapshot.permitNumber}`);
-    doc.text(`JSA Number: ${snapshot.jsaNumber}`);
-    doc.text(`Status at Issuance: ${snapshot.status}`);
-    doc.text(`Company: ${snapshot.company ?? '-'}${snapshot.companyOther ? ` (${snapshot.companyOther})` : ''}`);
-    if (snapshot.submittedAt) doc.text(`Submitted At: ${snapshot.submittedAt}`);
-    doc.text(`Issued At: ${snapshot.issuedAt}`);
-    doc.text(`Issuance Decision: ${snapshot.issuanceEventType}`);
-    doc.text(`Approved By: ${snapshot.issuanceActorUserId}`);
-    doc.text(`Approval Recorded At: ${snapshot.issuanceOccurredAt}`);
-    doc.text(`Valid Until (next midnight, site time): ${snapshot.expiresAt}`);
-    doc.text(`Site Timezone: ${snapshot.siteTimezone}`);
-    if (snapshot.previousPermitNumber) {
-      doc.text(`Renewed From Permit Number: ${snapshot.previousPermitNumber}`);
-    }
-
-    doc.moveDown();
-    doc.fontSize(14).text('Job Safety Analysis');
-    doc.fontSize(12);
-    doc.text(`JSA Number: ${snapshot.jsaNumber}`);
-    doc.text(`JSA Created At: ${snapshot.jsaCreatedAt}`);
-
-    doc.moveDown();
     doc
-      .fontSize(9)
+      .moveDown()
+      .font('Helvetica')
+      .fontSize(8)
       .fillColor('gray')
-      .text(`Snapshot captured at: ${snapshot.snapshotTakenAt}.`);
+      .text(`Snapshot captured at: ${snapshot.snapshotTakenAt}. Renderer: ${CURRENT_RENDERER_VERSION}.`);
 
     doc.end();
   });
@@ -579,15 +729,20 @@ export async function processPendingDocumentJobs(
       const fileHash = computeFileHash(pdfBuffer);
       const storagePath = `permits/${row.permit_id}/${row.snapshot_id}.pdf`;
 
+      // Establishes (once) the intended renderer identity and file hash
+      // for this job, then refuses to proceed if a DIFFERENT identity was
+      // already established - a job whose intended bytes were pinned by
+      // an earlier renderer version is never silently re-rendered by a
+      // newer one.
       const intended = await deps.query<{ id: string }>(
         `UPDATE permit_document_jobs
-            SET renderer_version = COALESCE(renderer_version, 'PDFKIT_V1'),
+            SET renderer_version = COALESCE(renderer_version, $4),
                 expected_file_hash = COALESCE(expected_file_hash, $3), updated_at = now()
           WHERE id = $1 AND status = 'PROCESSING' AND claim_token = $2
-            AND (renderer_version IS NULL OR renderer_version = 'PDFKIT_V1')
+            AND (renderer_version IS NULL OR renderer_version = $4)
             AND (expected_file_hash IS NULL OR expected_file_hash = $3)
           RETURNING id`,
-        [row.id, claimToken, fileHash],
+        [row.id, claimToken, fileHash, CURRENT_RENDERER_VERSION],
       );
       if (intended.rows.length === 0) throw new Error('document intended identity conflict');
 

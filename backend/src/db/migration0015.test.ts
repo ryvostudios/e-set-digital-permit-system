@@ -8,6 +8,27 @@ import {
   hasValidSnapshotHash,
   type IssuedPermitSnapshot,
 } from '../domain/permits/documents.js';
+import {
+  makeJsaForm,
+  makeSignatureSet,
+  makeWtgWorkForm,
+} from '../domain/permits/formFixtures.test.js';
+
+/** The migration-0016 fields every snapshot now carries - the hash contract itself is unchanged by them. */
+function makeSnapshotFormFixture(): Pick<
+  IssuedPermitSnapshot,
+  'snapshotVersion' | 'permitType' | 'permitFormVersion' | 'permitForm' | 'jsaFormVersion' | 'jsaForm' | 'signatures'
+> {
+  return {
+    snapshotVersion: 'ISSUED_PERMIT_SNAPSHOT_V2',
+    permitType: 'WTG_WORK',
+    permitFormVersion: 'WTG_WORK_V1',
+    permitForm: makeWtgWorkForm(),
+    jsaFormVersion: 'JSA_V1',
+    jsaForm: makeJsaForm(),
+    signatures: makeSignatureSet(),
+  };
+}
 
 const migrationUrl = new URL('../../../database/migrations/0015_backend_integrity_hardening.sql', import.meta.url);
 
@@ -117,6 +138,7 @@ test('0015 enforces access, company, read-receipt, outbox, and lifecycle-linkage
 });
 
 const hashFixture: IssuedPermitSnapshot = {
+  ...makeSnapshotFormFixture(),
   permitId: '20000000-0000-4000-8000-000000000001',
   permitNumber: '1045',
   jsaId: '90000000-0000-4000-8000-000000000001',

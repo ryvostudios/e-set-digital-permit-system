@@ -18,6 +18,7 @@ import {
   type IssuedPermitSnapshot,
 } from './documents.js';
 import type { JsaRow, PermitRow } from './service.js';
+import { makeJsaFormColumns, makePermitFormColumns, makeSignatureSet } from './formFixtures.test.js';
 
 function makeIssuanceEvent(occurredAt = '2026-01-01T09:00:00.000Z') {
   return {
@@ -51,6 +52,7 @@ function makePermit(overrides: Partial<PermitRow> = {}): PermitRow {
     cancelled_by: null,
     cancelled_at: null,
     cancel_reason: null,
+    ...makePermitFormColumns(),
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T09:00:00.000Z',
     ...overrides,
@@ -62,7 +64,9 @@ function makeJsa(overrides: Partial<JsaRow> = {}): JsaRow {
     id: 'jsa-1',
     jsa_sequence: '234',
     created_by: 'applicant-1',
+    ...makeJsaFormColumns(),
     created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,
   };
 }
@@ -210,7 +214,7 @@ class FakeDocumentsDb {
 test('buildIssuedPermitSnapshot captures the Permit Number, JSA Number, and issuance metadata from existing columns only', () => {
   const permit = makePermit();
   const jsa = makeJsa();
-  const snapshot = buildIssuedPermitSnapshot(permit, jsa, null, makeIssuanceEvent('2026-01-01T09:00:01.000Z'));
+  const snapshot = buildIssuedPermitSnapshot(permit, jsa, null, makeIssuanceEvent('2026-01-01T09:00:01.000Z'), makeSignatureSet());
   assert.equal(snapshot.permitNumber, '1045');
   assert.equal(snapshot.jsaNumber, '234');
   assert.equal(snapshot.status, 'ISSUED');
@@ -230,7 +234,7 @@ test('snapshot issuance and capture timestamps ignore a deliberately skewed appl
   Date.now = () => new Date('2099-12-31T23:59:59.999Z').getTime();
   try {
     const event = makeIssuanceEvent('2026-01-01T09:00:01.000Z');
-    const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, event);
+    const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, event, makeSignatureSet());
     assert.equal(snapshot.issuanceOccurredAt, '2026-01-01T09:00:01.000Z');
     assert.equal(snapshot.snapshotTakenAt, '2026-01-01T09:00:02.000Z');
     assert.doesNotMatch(`${snapshot.issuanceOccurredAt} ${snapshot.snapshotTakenAt}`, /2099/);
@@ -241,31 +245,31 @@ test('snapshot issuance and capture timestamps ignore a deliberately skewed appl
 
 test('buildIssuedPermitSnapshot throws if the permit has never been issued', () => {
   const permit = makePermit({ issued_at: null });
-  assert.throws(() => buildIssuedPermitSnapshot(permit, makeJsa(), null, makeIssuanceEvent()));
+  assert.throws(() => buildIssuedPermitSnapshot(permit, makeJsa(), null, makeIssuanceEvent(), makeSignatureSet()));
 });
 
 test('buildIssuedPermitSnapshot records the previous Permit Number for a renewal', () => {
   const oldPermit = makePermit({ id: 'permit-old', permit_sequence: '1045' });
   const newPermit = makePermit({ id: 'permit-new', permit_sequence: '1046', previous_permit_id: 'permit-old' });
-  const snapshot = buildIssuedPermitSnapshot(newPermit, makeJsa(), oldPermit, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(newPermit, makeJsa(), oldPermit, makeIssuanceEvent(), makeSignatureSet());
   assert.equal(snapshot.permitNumber, '1046');
   assert.equal(snapshot.previousPermitNumber, '1045');
 });
 
 test('computeSnapshotHash is deterministic regardless of property insertion order', () => {
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   const reordered = Object.fromEntries(Object.entries(snapshot).reverse()) as unknown as IssuedPermitSnapshot;
   assert.equal(computeSnapshotHash(snapshot), computeSnapshotHash(reordered));
 });
 
 test('computeSnapshotHash differs when the snapshot content differs', () => {
-  const a = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
-  const b = buildIssuedPermitSnapshot(makePermit({ permit_sequence: '1046' }), makeJsa(), null, makeIssuanceEvent());
+  const a = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
+  const b = buildIssuedPermitSnapshot(makePermit({ permit_sequence: '1046' }), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   assert.notEqual(computeSnapshotHash(a), computeSnapshotHash(b));
 });
 
 test('snapshot hash versions verify current and legacy contracts, reject mutation/unknown versions, and canonicalize key order', () => {
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   const reordered = Object.fromEntries(Object.entries(snapshot).reverse()) as unknown as IssuedPermitSnapshot;
   const current = computeVersionedSnapshotHash(snapshot, 'SORTED_JSON_SHA256_V1');
   const legacy = computeVersionedSnapshotHash(snapshot, 'PG_JSONB_SHA256_V1');
@@ -295,7 +299,7 @@ test('download integrity accepts exactly the immutable PDF hash and rejects miss
 
 test('document worker persists only a fixed safe category when an external boundary throws secret-bearing text', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   const hostile = 'DATABASE_URL=postgres://user:password@host/db sb_secret_FAKE_SECRET';
   await processPendingDocumentJobs({ query: db.query }, {
@@ -308,7 +312,7 @@ test('document worker persists only a fixed safe category when an external bound
 
 test('createIssuedDocumentSnapshot creates both the snapshot and its PDF job atomically', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   const result = await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   assert.equal(result.created, true);
   assert.equal(db.snapshots.length, 1);
@@ -318,7 +322,7 @@ test('createIssuedDocumentSnapshot creates both the snapshot and its PDF job ato
 
 test('createIssuedDocumentSnapshot is idempotent - a retried/racing issuance never creates a second snapshot for the same permit', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   const first = await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   const second = await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   assert.equal(first.created, true);
@@ -331,7 +335,7 @@ test('createIssuedDocumentSnapshot is idempotent - a retried/racing issuance nev
 test('snapshot idempotency accepts only exact event/hash/content equivalence', async () => {
   for (const tamper of ['event', 'hash', 'content'] as const) {
     const db = new FakeDocumentsDb();
-    const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+    const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
     await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
     if (tamper === 'event') db.snapshots[0]!.source_event_id = 'wrong-event';
     if (tamper === 'hash') db.snapshots[0]!.snapshot_hash = 'wrong-hash';
@@ -346,14 +350,14 @@ test('snapshot idempotency accepts only exact event/hash/content equivalence', a
 });
 
 test('generateIssuedPermitPdf produces a real PDF buffer containing the Permit Number and JSA Number', async () => {
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   const pdf = await generateIssuedPermitPdf(snapshot);
   assert.ok(pdf.length > 0);
   assert.equal(pdf.subarray(0, 5).toString('utf8'), '%PDF-');
 });
 
 test('two independent PDF renders of one immutable snapshot have identical bytes and SHA-256 identity', async () => {
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   const first = await generateIssuedPermitPdf(snapshot);
   const second = await generateIssuedPermitPdf(snapshot);
   assert.notStrictEqual(first, second);
@@ -369,7 +373,7 @@ test('getDocumentForPermit returns null when no snapshot exists for the permit',
 
 test('getDocumentForPermit returns the snapshot and its (still-pending) job together', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
 
   const result = await getDocumentForPermit('permit-1', { query: db.query });
@@ -387,7 +391,7 @@ test('unconfiguredDocumentStorageAdapter never fakes success', async () => {
 
 test('processPendingDocumentJobs: a working storage adapter marks the job GENERATED with a storage path and file hash', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
 
   const workingAdapter: DocumentStorageAdapter = {
@@ -407,7 +411,7 @@ test('processPendingDocumentJobs: a working storage adapter marks the job GENERA
 
 test('processPendingDocumentJobs: issuance already succeeded (the snapshot exists) even when storage is not configured - the job just stays retryable', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   const created = await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   assert.equal(created.created, true);
 
@@ -421,7 +425,7 @@ test('processPendingDocumentJobs: issuance already succeeded (the snapshot exist
 
 test('processPendingDocumentJobs: retries a previously FAILED job once storage becomes available', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   await processPendingDocumentJobs({ query: db.query }, unconfiguredDocumentStorageAdapter);
   assert.equal(db.jobs[0]?.status, 'FAILED');
@@ -441,7 +445,7 @@ test('processPendingDocumentJobs: retries a previously FAILED job once storage b
 
 test('document job claiming gives concurrent workers only one active owner', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -461,7 +465,7 @@ test('document job claiming gives concurrent workers only one active owner', asy
 
 test('a stale document-job lease is reclaimable, but a foreign claim cannot finalize it', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   db.jobs[0]!.status = 'PROCESSING';
   db.jobs[0]!.claim_token = 'dead-worker';
@@ -477,7 +481,7 @@ test('a stale document-job lease is reclaimable, but a foreign claim cannot fina
 test('upload-crash reconciliation finalizes an existing identical object and rejects a different object', async () => {
   for (const matching of [true, false]) {
     const db = new FakeDocumentsDb();
-    const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+    const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
     await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
     const expected = await generateIssuedPermitPdf(snapshot);
     const storage: DocumentStorageAdapter = {
@@ -493,7 +497,7 @@ test('upload-crash reconciliation finalizes an existing identical object and rej
 
 test('a GENERATED immutable document job is never claimed or regenerated', async () => {
   const db = new FakeDocumentsDb();
-  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet());
   await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
   db.jobs[0]!.status = 'GENERATED';
   let uploads = 0;

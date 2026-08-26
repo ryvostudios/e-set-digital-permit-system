@@ -23,10 +23,19 @@ import {
   resumePermit,
   submitPermit,
   updateDraftPermit,
+  updateLinkedJsa,
   type JsaRow,
   type PermitRow,
   type PermitsServiceDeps,
 } from './service.js';
+import { PERMIT_FORM_VERSIONS, PERMIT_TYPES } from './forms.js';
+import {
+  makeHotWorkForm,
+  makeJsaForm,
+  makeJsaFormColumns,
+  makePermitFormColumns,
+  makeWtgWorkForm,
+} from './formFixtures.test.js';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 
@@ -95,6 +104,11 @@ function assertPermitInvariants(permit: PermitRow): void {
   if (!holdOk) {
     throw new Error(
       `simulated CHECK constraint violation: permits_hold_consistent (status=${permit.status}, held_by=${permit.held_by}, held_at=${permit.held_at}, hold_reason=${permit.hold_reason})`,
+    );
+  }
+  if (permit.status !== 'DRAFT' && (!permit.permit_type || !permit.form_version || !permit.form_payload)) {
+    throw new Error(
+      `simulated CHECK constraint violation: permits_form_required_after_draft (status=${permit.status}, permit_type=${permit.permit_type}, form_version=${permit.form_version})`,
     );
   }
   const cancellationOk =
@@ -206,6 +220,28 @@ class FakeDb {
   capabilityAssignments = new Map<string, Set<string>>();
   zeroRecipientCapabilities = new Set<string>();
   notifications: FakeNotification[] = [];
+  // Workforce signing identities (migration 0016). FIXTURE SHORTCUT:
+  // any actor resolves to a derived default profile unless a test
+  // explicitly overrides it (`setWorkforceProfile`) or explicitly
+  // removes it (`removeWorkforceProfile`), so pre-existing workflow
+  // tests - which are about transitions, not identity - need no setup,
+  // while the fail-closed tests can still express "this user has no
+  // profile" and "this user's primary assignment is not one they hold".
+  workforceProfiles = new Map<string, { display_name: string; primary_team_position_id: string; team_name: string; position_name: string }>();
+  usersWithoutSigningIdentity = new Set<string>();
+  permitSignatures: Array<{
+    id: string;
+    permit_id: string;
+    source_event_id: string;
+    signature_role: string;
+    signer_user_id: string;
+    signer_display_name: string;
+    signer_team_position_id: string;
+    signer_team_name: string;
+    signer_position_name: string;
+    signed_at: string;
+    created_at: string;
+  }> = [];
   whatsappOutbox: FakeWhatsappOutboxMessage[] = [];
   documentSnapshots: FakeIssuedDocumentSnapshot[] = [];
   documentJobs: FakePermitDocumentJob[] = [];
@@ -224,6 +260,42 @@ class FakeDb {
   private whatsappOutboxCounter = 0;
   private documentSnapshotCounter = 0;
   private documentJobCounter = 0;
+  private signatureCounter = 0;
+
+  /** Test fixture setup: gives `userId` an authoritative workforce signing identity. */
+  setWorkforceProfile(
+    userId: string,
+    profile: { display_name: string; primary_team_position_id: string; team_name: string; position_name: string },
+  ): void {
+    this.workforceProfiles.set(userId, profile);
+  }
+
+  /** Test fixture setup: removes a signing identity, so any signing action by that user must fail closed. Covers both "no profile row" and "the profile's primary assignment is not one this user holds" - the resolver's join returns no row either way. */
+  removeWorkforceProfile(userId: string): void {
+    this.workforceProfiles.delete(userId);
+    this.usersWithoutSigningIdentity.add(userId);
+  }
+
+  /** Test fixture setup: undoes the fake's draft-creation form shortcut, restoring the real "draft with no form yet" state. */
+  clearPermitForm(permitId: string): void {
+    const permit = this.permits.get(permitId);
+    if (!permit) throw new Error(`FakeDb: no permit ${permitId}`);
+    this.permits.set(permitId, {
+      ...permit,
+      form_payload: null,
+      wind_farm: null,
+      wtg_number: null,
+      work_description: null,
+      loto_number: null,
+    });
+  }
+
+  /** Test fixture setup: undoes the fake's JSA-creation form shortcut. */
+  clearJsaForm(jsaId: string): void {
+    const jsa = this.jsas.get(jsaId);
+    if (!jsa) throw new Error(`FakeDb: no jsa ${jsaId}`);
+    this.jsas.set(jsaId, { ...jsa, form_version: null, form_payload: null, site_or_wtg: null, job_description: null });
+  }
 
   /** Test fixture setup: grants `userId` a capability, for the notification-recipient-resolution queries `workflowSideEffects.ts` issues (`resolveCroRecipients`/`resolveHseRecipients`). Not a simulation of the real Team + Position -> Capabilities join - just enough surface for these tests. */
   grantCapability(userId: string, capability: string): void {
@@ -255,7 +327,14 @@ class FakeDb {
         id: `jsa-${this.jsaCounter}`,
         jsa_sequence: String(this.jsaSeq),
         created_by: createdBy,
+        // FIXTURE SHORTCUT: the real INSERT leaves the JSA form NULL
+        // (it is filled by a later PATCH /permits/:id/jsa). Pre-filling
+        // it here keeps every pre-existing workflow test - which is about
+        // transitions, not form content - unchanged. Tests that need the
+        // genuinely-incomplete case call `clearJsaForm`.
+        ...makeJsaFormColumns(),
         created_at: this.now.toISOString(),
+        updated_at: this.now.toISOString(),
       };
       this.jsas.set(jsa.id, jsa);
       return { rows: [jsa] };
@@ -265,12 +344,33 @@ class FakeDb {
       // plain draft-creation INSERT below. Checked FIRST/more
       // specifically: both this and the plain-creation INSERT literally
       // start with "INSERT INTO permits", so order matters here.
-      const [jsaId, createdBy, previousPermitId, siteTimezone, company, companyOther] = params as [
+      const [
+        jsaId,
+        createdBy,
+        previousPermitId,
+        siteTimezone,
+        company,
+        companyOther,
+        permitType,
+        formVersion,
+        formPayloadJson,
+        windFarm,
+        wtgNumber,
+        workDescription,
+        lotoNumber,
+      ] = params as [
         string,
         string,
         string,
         string,
         PermitRow['company'],
+        string | null,
+        PermitRow['permit_type'],
+        PermitRow['form_version'],
+        string,
+        string | null,
+        string | null,
+        string | null,
         string | null,
       ];
       // Mirrors permits_previous_permit_id_unique (migration 0012): at
@@ -312,13 +412,26 @@ class FakeDb {
         cancelled_by: null,
         cancelled_at: null,
         cancel_reason: null,
+        permit_type: permitType,
+        form_version: formVersion,
+        form_payload: JSON.parse(formPayloadJson) as PermitRow['form_payload'],
+        wind_farm: windFarm,
+        wtg_number: wtgNumber,
+        work_description: workDescription,
+        loto_number: lotoNumber,
         created_at: createdAt,
         updated_at: createdAt,
       };
       return { rows: [this.setPermit(permit)] };
     }
     if (sql.startsWith('INSERT INTO permits')) {
-      const [jsaId, createdBy, siteTimezone] = params as [string, string, string];
+      const [jsaId, createdBy, siteTimezone, permitType, formVersion] = params as [
+        string,
+        string,
+        string,
+        NonNullable<PermitRow['permit_type']>,
+        NonNullable<PermitRow['form_version']>,
+      ];
       this.permitCounter += 1;
       this.permitSeq += 1;
       // Offsetting each permit's created_at by its insertion order (like
@@ -352,6 +465,11 @@ class FakeDb {
         cancelled_by: null,
         cancelled_at: null,
         cancel_reason: null,
+        // FIXTURE SHORTCUT (see the jsas insert above): the real INSERT
+        // stores only the type/version and leaves `form_payload` NULL.
+        ...makePermitFormColumns(),
+        permit_type: permitType,
+        form_version: formVersion,
         created_at: createdAt,
         updated_at: createdAt,
       };
@@ -453,6 +571,25 @@ class FakeDb {
       const jsa = this.jsas.get(id);
       return jsa ? { rows: [jsa] } : { rows: [] };
     }
+    if (sql.startsWith('UPDATE permits') && sql.includes('SET company') && sql.includes('form_payload')) {
+      const [company, companyOther, formPayloadJson, windFarm, wtgNumber, workDescription, lotoNumber, id] =
+        params as [string | null, string | null, string, string | null, string | null, string | null, string | null, string];
+      const existing = this.permits.get(id);
+      if (!existing) return { rows: [] };
+      const updated: PermitRow = {
+        ...existing,
+        company: company as PermitRow['company'],
+        company_other: companyOther,
+        form_payload: JSON.parse(formPayloadJson) as PermitRow['form_payload'],
+        wind_farm: windFarm,
+        wtg_number: wtgNumber,
+        work_description: workDescription,
+        loto_number: lotoNumber,
+        version: existing.version + 1,
+        updated_at: this.now.toISOString(),
+      };
+      return { rows: [this.setPermit(updated)] };
+    }
     if (sql.startsWith('UPDATE permits') && sql.includes('SET company')) {
       const [company, companyOther, id] = params as [string | null, string | null, string];
       const existing = this.permits.get(id);
@@ -465,6 +602,40 @@ class FakeDb {
         updated_at: this.now.toISOString(),
       };
       return { rows: [this.setPermit(updated)] };
+    }
+    if (sql.startsWith('UPDATE permits SET version = version + 1')) {
+      // updateLinkedJsa's permit-version bump: the Permit + JSA are one
+      // document under one optimistic-concurrency token.
+      const [id] = params as [string];
+      const existing = this.permits.get(id);
+      if (!existing) return { rows: [] };
+      const updated: PermitRow = {
+        ...existing,
+        version: existing.version + 1,
+        updated_at: this.now.toISOString(),
+      };
+      return { rows: [this.setPermit(updated)] };
+    }
+    if (sql.startsWith('UPDATE jsas')) {
+      const [formVersion, formPayloadJson, siteOrWtg, jobDescription, id] =
+        params as [JsaRow['form_version'], string, string, string, string];
+      const existing = this.jsas.get(id);
+      if (!existing) return { rows: [] };
+      const updated: JsaRow = {
+        ...existing,
+        form_version: formVersion,
+        form_payload: JSON.parse(formPayloadJson) as JsaRow['form_payload'],
+        site_or_wtg: siteOrWtg,
+        job_description: jobDescription,
+        updated_at: this.now.toISOString(),
+      };
+      this.jsas.set(id, updated);
+      return { rows: [updated] };
+    }
+    if (sql.startsWith('SELECT form_payload FROM jsas WHERE id = $1')) {
+      const [id] = params as [string];
+      const jsa = this.jsas.get(id);
+      return { rows: jsa ? [{ form_payload: jsa.form_payload }] : [] };
     }
     if (sql.startsWith('UPDATE permits') && sql.includes("SET status = 'PENDING_CRO'") && sql.includes('hse_review_started_at = NULL')) {
       // hseSendBackToCro's UPDATE - distinct from submit/resubmit below:
@@ -626,11 +797,16 @@ class FakeDb {
             jsa_sequence: jsa.jsa_sequence,
             jsa_created_by: jsa.created_by,
             jsa_created_at: jsa.created_at,
+            jsa_updated_at: jsa.updated_at,
+            jsa_form_version: jsa.form_version,
+            jsa_form_payload: jsa.form_payload,
+            jsa_site_or_wtg: jsa.site_or_wtg,
+            jsa_job_description: jsa.job_description,
           },
         ],
       };
     }
-    if (sql.startsWith('SELECT * FROM permits WHERE created_by = $1 ORDER BY')) {
+    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE created_by = $1 ORDER BY')) {
       const [createdBy, limit, offset] = params as [string, number, number];
       const rows = [...this.permits.values()]
         .filter((p) => p.created_by === createdBy)
@@ -643,7 +819,7 @@ class FakeDb {
       const count = [...this.permits.values()].filter((p) => p.created_by === createdBy).length;
       return { rows: [{ count: String(count) }] };
     }
-    if (sql.startsWith('SELECT * FROM permits WHERE status = $1 ORDER BY')) {
+    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE status = $1 ORDER BY')) {
       const [status, limit, offset] = params as [PermitRow['status'], number, number];
       const rows = [...this.permits.values()]
         .filter((p) => p.status === status)
@@ -662,6 +838,67 @@ class FakeDb {
         .filter((e) => e.permit_id === permitId)
         .map((e, index) => ({ ordinal: String(index + 1), ...e }));
       return { rows };
+    }
+
+    // --- Workforce signing identity + digital signatures (migration 0016) ---
+    // Checked BEFORE recipient resolution below: both queries mention
+    // `user_team_positions`, and this one is the more specific shape.
+    if (sql.includes('FROM workforce_profiles')) {
+      const [userId] = params as [string];
+      if (this.usersWithoutSigningIdentity.has(userId)) return { rows: [] };
+      const profile = this.workforceProfiles.get(userId) ?? {
+        display_name: `Display Name of ${userId}`,
+        primary_team_position_id: `tp-${userId}`,
+        team_name: `Team of ${userId}`,
+        position_name: `Position of ${userId}`,
+      };
+      return { rows: [profile] };
+    }
+    if (sql.startsWith('INSERT INTO permit_signatures')) {
+      const [permitId, sourceEventId, role, signerUserId, displayName, teamPositionId, teamName, positionName] =
+        params as [string, string, string, string, string, string, string, string];
+      const event = this.lifecycleEvents.find((e) => e.id === sourceEventId);
+      // Mirrors migration 0016's permit_signature_authenticity_guard: the
+      // signer must BE the authenticated actor of the event, the event
+      // must belong to the same permit, and the role must match the event
+      // type that produced it.
+      const rolePinnedToEvent =
+        (role === 'APPLICANT' && (event?.event_type === 'SUBMITTED' || event?.event_type === 'APPLICANT_RESUBMITTED')) ||
+        (role === 'CRO' && event?.event_type === 'CRO_FORWARDED_HSE') ||
+        (role === 'HSE' && event?.event_type === 'HSE_APPROVED') ||
+        (role === 'CRO_FALLBACK' && event?.event_type === 'CRO_FALLBACK_APPROVED') ||
+        (role === 'RENEWAL' && event?.event_type === 'RENEWED');
+      if (!event || event.permit_id !== permitId || event.actor_user_id !== signerUserId || !rolePinnedToEvent) {
+        throw new Error(
+          `simulated constraint trigger violation: permit_signature_authenticity_guard (role=${role}, event=${event?.event_type}, actor=${event?.actor_user_id}, signer=${signerUserId})`,
+        );
+      }
+      this.signatureCounter += 1;
+      const row = {
+        id: `signature-${this.signatureCounter}`,
+        permit_id: permitId,
+        source_event_id: sourceEventId,
+        signature_role: role,
+        signer_user_id: signerUserId,
+        signer_display_name: displayName,
+        signer_team_position_id: teamPositionId,
+        signer_team_name: teamName,
+        signer_position_name: positionName,
+        signed_at: this.now.toISOString(),
+        created_at: this.now.toISOString(),
+      };
+      this.permitSignatures.push(row);
+      return { rows: [row] };
+    }
+    if (sql.includes('FROM permit_signatures s')) {
+      const [permitId] = params as [string];
+      const rows = this.permitSignatures.filter((r) => r.permit_id === permitId);
+      return { rows };
+    }
+    if (sql.startsWith('SELECT id, snapshot, snapshot_hash FROM issued_document_snapshots')) {
+      const [permitId] = params as [string];
+      const row = this.documentSnapshots.find((sn) => sn.permit_id === permitId);
+      return { rows: row ? [{ id: row.id, snapshot: row.snapshot, snapshot_hash: row.snapshot_hash }] : [] };
     }
 
     // --- Notification-recipient resolution (authz/capabilities.ts::resolveUserIdsWithCapabilities) ---
@@ -938,6 +1175,8 @@ class FakeDb {
       // just enough to prove nothing a failed transaction wrote survives,
       // without building a general transaction log.
       const permitsSnapshot = new Map(this.permits);
+      const jsasSnapshot = new Map(this.jsas);
+      const signaturesSnapshot = [...this.permitSignatures];
       const lifecycleEventsSnapshot = [...this.lifecycleEvents];
       const notificationsSnapshot = [...this.notifications];
       const whatsappOutboxSnapshot = [...this.whatsappOutbox];
@@ -947,6 +1186,8 @@ class FakeDb {
         return await fn({ query });
       } catch (err) {
         this.permits = permitsSnapshot;
+        this.jsas = jsasSnapshot;
+        this.permitSignatures = signaturesSnapshot;
         this.lifecycleEvents = lifecycleEventsSnapshot;
         this.notifications = notificationsSnapshot;
         this.whatsappOutbox = whatsappOutboxSnapshot;
@@ -968,7 +1209,7 @@ class FakeDb {
 
 /** Drives a fresh permit through DRAFT -> PENDING_CRO -> PENDING_HSE for tests that start from PENDING_HSE. */
 async function createPendingHsePermit(db: FakeDb, actorUserId = 'owner'): Promise<PermitRow> {
-  const { permit } = await createDraftPermit(actorUserId, 'UTC', db.deps());
+  const { permit } = await createDraftPermit(actorUserId, 'UTC', 'WTG_WORK', db.deps());
   const updated = await updateDraftPermit(
     actorUserId,
     permit.id,
@@ -998,8 +1239,8 @@ async function createIssuedPermit(db: FakeDb, actorUserId = 'owner'): Promise<Pe
 
 test('createDraftPermit generates unique permit/JSA numbers per call and records a CREATED event', async () => {
   const db = new FakeDb();
-  const first = await createDraftPermit('user-1', 'UTC', db.deps());
-  const second = await createDraftPermit('user-1', 'UTC', db.deps());
+  const first = await createDraftPermit('user-1', 'UTC', 'WTG_WORK', db.deps());
+  const second = await createDraftPermit('user-1', 'UTC', 'WTG_WORK', db.deps());
 
   assert.notEqual(first.permit.permit_sequence, second.permit.permit_sequence);
   assert.notEqual(first.jsa.jsa_sequence, second.jsa.jsa_sequence);
@@ -1013,7 +1254,7 @@ test('createDraftPermit generates unique permit/JSA numbers per call and records
 test('createDraftPermit produces unique numbers under concurrent calls', async () => {
   const db = new FakeDb();
   const results = await Promise.all(
-    Array.from({ length: 10 }, () => createDraftPermit('user-1', 'UTC', db.deps())),
+    Array.from({ length: 10 }, () => createDraftPermit('user-1', 'UTC', 'WTG_WORK', db.deps())),
   );
   const permitSequences = results.map((r) => r.permit.permit_sequence);
   const jsaSequences = results.map((r) => r.jsa.jsa_sequence);
@@ -1023,7 +1264,7 @@ test('createDraftPermit produces unique numbers under concurrent calls', async (
 
 test('getOwnPermit returns null for a permit that exists but belongs to someone else (no existence leak)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const asOwner = await getOwnPermit('owner', permit.id, db.deps());
   const asOther = await getOwnPermit('someone-else', permit.id, db.deps());
@@ -1036,7 +1277,7 @@ test('getOwnPermit returns null for a permit that exists but belongs to someone 
 
 test('updateDraftPermit rejects a stale version instead of silently overwriting', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const result = await updateDraftPermit(
     'owner',
@@ -1053,7 +1294,7 @@ test('updateDraftPermit rejects a stale version instead of silently overwriting'
 
 test('updateDraftPermit rejects updating a permit that is no longer DRAFT', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
   assert.equal(submitted.outcome, 'ok');
@@ -1070,7 +1311,7 @@ test('updateDraftPermit rejects updating a permit that is no longer DRAFT', asyn
 
 test('submitPermit rejects the transition when the required company field is missing', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const result = await submitPermit('owner', permit.id, { expectedVersion: permit.version }, db.deps());
 
@@ -1079,7 +1320,7 @@ test('submitPermit rejects the transition when the required company field is mis
 
 test('submitPermit requires companyOther when company is OTHER before allowing submission', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   const updated = await updateDraftPermit(
     'owner',
     permit.id,
@@ -1096,7 +1337,7 @@ test('submitPermit requires companyOther when company is OTHER before allowing s
 
 test('submitPermit performs the only implemented transition, DRAFT -> PENDING_CRO, once the required field is set', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   const updated = await updateDraftPermit(
     'owner',
     permit.id,
@@ -1116,7 +1357,7 @@ test('submitPermit performs the only implemented transition, DRAFT -> PENDING_CR
 
 test('submitPermit rejects submitting an already-submitted permit (invalid transition rejection)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   const updated = await updateDraftPermit(
     'owner',
     permit.id,
@@ -1141,7 +1382,7 @@ test('submitPermit rejects submitting an already-submitted permit (invalid trans
 
 test('lifecycle events are only ever inserted, never updated or deleted (immutability at the application boundary)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
 
@@ -1161,7 +1402,7 @@ test('createDraftPermit/submitPermit only ever write event/status pairs the data
   // and throws on a disallowed pair - so simply not throwing here is the
   // assertion that both real call sites (CREATED/SUBMITTED) stay compliant.
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
 
@@ -1173,7 +1414,7 @@ test('createDraftPermit/submitPermit only ever write event/status pairs the data
 
 test('an event/status pair outside the allowed set is rejected (simulated DB CHECK constraint)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   await assert.rejects(
     () =>
@@ -1192,7 +1433,7 @@ test('an event/status pair outside the allowed set is rejected (simulated DB CHE
 
 test('forwardToHseReview rejects a permit that is not PENDING_CRO (wrong state rejected)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const result = await forwardToHseReview('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
 
@@ -1201,7 +1442,7 @@ test('forwardToHseReview rejects a permit that is not PENDING_CRO (wrong state r
 
 test('forwardToHseReview rejects a stale version', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   const updated = await updateDraftPermit(
     'owner',
     permit.id,
@@ -1227,7 +1468,7 @@ test('forwardToHseReview rejects a stale version', async () => {
 test('forwardToHseReview atomically opens the HSE review window (exactly 5 minutes) and records CRO_FORWARDED_HSE, using DB-authoritative time', async () => {
   const db = new FakeDb();
   db.now = new Date('2026-01-01T00:00:00.000Z');
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   const updated = await updateDraftPermit(
     'owner',
     permit.id,
@@ -1266,7 +1507,7 @@ test('forwardToHseReview atomically opens the HSE review window (exactly 5 minut
 
 test('hseApprove rejects a permit that is not PENDING_HSE (wrong state rejected)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const result = await hseApprove('hse-1', permit.id, { expectedVersion: permit.version }, db.deps());
 
@@ -1373,9 +1614,15 @@ test('CRO/HSE lifecycle events remain insert-only through the full forward/appro
   const lifecycleQueries = db.queries.filter((q) => q.sql.includes('permit_lifecycle_events'));
   assert.ok(lifecycleQueries.length >= 4);
   for (const q of lifecycleQueries) {
+    // Reads are fine (the signature lookup joins this table); what must
+    // never appear is a mutation of an already-recorded event.
     assert.ok(
-      q.sql.startsWith('INSERT INTO permit_lifecycle_events'),
-      `expected only INSERTs against permit_lifecycle_events, got: ${q.sql}`,
+      q.sql.startsWith('INSERT INTO permit_lifecycle_events') || q.sql.startsWith('SELECT'),
+      `expected only INSERTs/SELECTs against permit_lifecycle_events, got: ${q.sql}`,
+    );
+    assert.ok(
+      !/(UPDATE|DELETE|TRUNCATE)[^a-zA-Z]*permit_lifecycle_events/i.test(q.sql),
+      `expected no mutation of permit_lifecycle_events, got: ${q.sql}`,
     );
   }
 });
@@ -1502,7 +1749,7 @@ test('closePermit rolls back entirely if the CLOSED lifecycle event insert fails
 
 test('closePermit rejects a DRAFT permit (wrong state rejected)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const result = await closePermit('cro-2', permit.id, { expectedVersion: permit.version }, db.deps());
 
@@ -1511,7 +1758,7 @@ test('closePermit rejects a DRAFT permit (wrong state rejected)', async () => {
 
 test('closePermit rejects a PENDING_CRO permit (wrong state rejected)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   const updated = await updateDraftPermit(
     'owner',
     permit.id,
@@ -1660,6 +1907,7 @@ test('every other permit-mutating path already rejects a CLOSED permit (immutabi
 
 test('assertPermitInvariants (mirroring permits_closure_consistent/permits_issued_at_consistent) rejects invalid closure states', () => {
   const base: PermitRow = {
+    ...makePermitFormColumns(),
     id: 'permit-x',
     permit_sequence: '1',
     jsa_id: 'jsa-x',
@@ -1806,7 +2054,7 @@ function backdateIssuedAt(db: FakeDb, permit: PermitRow, issuedAtIso: string): P
 
 test('croSendBackToApplicant: PENDING_CRO -> PENDING_CORRECTION, recording the CRO actor and an optional reason', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -1836,14 +2084,14 @@ test('croSendBackToApplicant: PENDING_CRO -> PENDING_CORRECTION, recording the C
 
 test('croSendBackToApplicant rejects a permit that is not PENDING_CRO (wrong state rejected)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   const result = await croSendBackToApplicant('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
   assert.deepEqual(result, { outcome: 'conflict', reason: 'not_pending_cro' });
 });
 
 test('croSendBackToApplicant rejects a stale version', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
 
@@ -1853,7 +2101,7 @@ test('croSendBackToApplicant rejects a stale version', async () => {
 
 test('the applicant CAN edit a PENDING_CORRECTION permit (updateDraftPermit widened beyond DRAFT)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -1880,7 +2128,7 @@ test('the applicant CAN edit a PENDING_CORRECTION permit (updateDraftPermit wide
 
 test('resubmitPermit: PENDING_CORRECTION -> PENDING_CRO, only by the original applicant', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -1924,14 +2172,14 @@ test('resubmitPermit: PENDING_CORRECTION -> PENDING_CRO, only by the original ap
 
 test('resubmitPermit rejects a permit that is not PENDING_CORRECTION', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   const result = await resubmitPermit('applicant-1', permit.id, { expectedVersion: permit.version }, db.deps());
   assert.deepEqual(result, { outcome: 'conflict', reason: 'not_pending_correction' });
 });
 
 test('resubmitPermit rejects a stale version', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -1943,7 +2191,7 @@ test('resubmitPermit rejects a stale version', async () => {
 
 test('resubmitPermit rejects when required fields are missing (defensive - unreachable via the normal API, since submission already required company, but re-checked here anyway)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -2053,7 +2301,7 @@ test('hseSendBackToCro: PENDING_HSE -> PENDING_CRO, clearing the HSE review wind
 
 test('hseSendBackToCro rejects a permit that is not PENDING_HSE', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   const result = await hseSendBackToCro('hse-1', permit.id, { expectedVersion: permit.version }, db.deps());
   assert.deepEqual(result, { outcome: 'conflict', reason: 'not_pending_hse' });
 });
@@ -2130,7 +2378,7 @@ test('holdPermit: ISSUED -> HELD, recording the actor, DB-authoritative time, an
 
 test('holdPermit only applies from ISSUED (wrong state rejected)', async () => {
   const db = new FakeDb();
-  const { permit: draft } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit: draft } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   const draftResult = await holdPermit('cro-1', draft.id, { expectedVersion: draft.version, reason: 'x' }, db.deps());
   assert.deepEqual(draftResult, { outcome: 'conflict', reason: 'not_issued' });
 
@@ -2314,7 +2562,7 @@ test('cancelPermit: HELD -> CANCELLED also succeeds, and clears the (now-stale) 
 test('cancelPermit rejects every source status except ISSUED/HELD', async () => {
   const db = new FakeDb();
 
-  const { permit: draft } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit: draft } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   assert.deepEqual(
     await cancelPermit('cro-1', draft.id, { expectedVersion: draft.version }, db.deps()),
     { outcome: 'conflict', reason: 'not_cancellable' },
@@ -2686,7 +2934,7 @@ test('croFallbackApprove: eligibility remains DB-authoritative even while the ap
 
 test('getPermitWithJsa returns the permit joined with its JSA, for any permit id (no ownership filter)', async () => {
   const db = new FakeDb();
-  const { permit, jsa } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit, jsa } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const found = await getPermitWithJsa(permit.id, db.deps());
 
@@ -2704,7 +2952,7 @@ test('getPermitWithJsa returns null for a nonexistent permit', async () => {
 
 test('getPermitById returns the permit only - no JSA join, no ownership filter', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const found = await getPermitById(permit.id, db.deps());
 
@@ -2719,7 +2967,7 @@ test('getPermitById returns null for a nonexistent permit', async () => {
 
 test('getPermitById never queries the jsas table (proves detail/history can authorize before any JSA read)', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   db.queries = [];
 
   await getPermitById(permit.id, db.deps());
@@ -2732,7 +2980,7 @@ test('getPermitById never queries the jsas table (proves detail/history can auth
 
 test('getJsaById returns the JSA for a permit\'s jsa_id', async () => {
   const db = new FakeDb();
-  const { permit, jsa } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit, jsa } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const found = await getJsaById(permit.jsa_id, db.deps());
 
@@ -2748,9 +2996,9 @@ const DEFAULT_PAGE = { page: 1, pageSize: 20 };
 
 test('listOwnPermits returns only the given user\'s permits, most recent first', async () => {
   const db = new FakeDb();
-  const first = await createDraftPermit('owner-a', 'UTC', db.deps());
-  const second = await createDraftPermit('owner-a', 'UTC', db.deps());
-  await createDraftPermit('owner-b', 'UTC', db.deps());
+  const first = await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
+  const second = await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
+  await createDraftPermit('owner-b', 'UTC', 'WTG_WORK', db.deps());
 
   const page = await listOwnPermits('owner-a', DEFAULT_PAGE, db.deps());
 
@@ -2767,9 +3015,9 @@ test('listOwnPermits returns only the given user\'s permits, most recent first',
 test('listOwnPermits: pagination metadata is accurate, and a page never includes another user\'s permits (no cross-user leakage under pagination)', async () => {
   const db = new FakeDb();
   for (let i = 0; i < 5; i += 1) {
-    await createDraftPermit('owner-a', 'UTC', db.deps());
+    await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
   }
-  await createDraftPermit('owner-b', 'UTC', db.deps());
+  await createDraftPermit('owner-b', 'UTC', 'WTG_WORK', db.deps());
 
   const firstPage = await listOwnPermits('owner-a', { page: 1, pageSize: 2 }, db.deps());
   const secondPage = await listOwnPermits('owner-a', { page: 2, pageSize: 2 }, db.deps());
@@ -2858,7 +3106,7 @@ test('listPermitsByStatus: the exact maximum allowed offset (100_000) succeeds',
 
 test('listOwnPermits: ordinary valid pagination still succeeds unaffected by the defensive checks', async () => {
   const db = new FakeDb();
-  await createDraftPermit('owner-a', 'UTC', db.deps());
+  await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
   const page = await listOwnPermits('owner-a', { page: 1, pageSize: 20 }, db.deps());
   assert.equal(page.items.length, 1);
 });
@@ -2873,7 +3121,7 @@ test('listPermitsByStatus: ordinary valid pagination still succeeds unaffected b
 test('listPermitsByStatus returns only permits currently in that status, regardless of who created them', async () => {
   const db = new FakeDb();
   const pendingHse = await createPendingHsePermit(db, 'owner-a');
-  await createDraftPermit('owner-b', 'UTC', db.deps());
+  await createDraftPermit('owner-b', 'UTC', 'WTG_WORK', db.deps());
 
   const page = await listPermitsByStatus('PENDING_HSE', DEFAULT_PAGE, db.deps());
 
@@ -2885,7 +3133,7 @@ test('listPermitsByStatus: pagination metadata is accurate and ordering is oldes
   const db = new FakeDb();
   const permits = [];
   for (let i = 0; i < 3; i += 1) {
-    const { permit } = await createDraftPermit('someone', 'UTC', db.deps());
+    const { permit } = await createDraftPermit('someone', 'UTC', 'WTG_WORK', db.deps());
     permits.push(permit);
   }
 
@@ -2903,7 +3151,7 @@ test('listPermitsByStatus: pagination metadata is accurate and ordering is oldes
 
 test('getPermitLifecycleEvents returns the append-only history for a permit, in order', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('owner', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
 
@@ -2951,7 +3199,7 @@ test('submitPermit notifies every CRO-capability holder, de-duplicated across mu
   db.grantCapability('cro-a', 'permit.forward_hse'); // same person, two CRO capabilities
   db.grantCapability('cro-b', 'permit.hold');
 
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
   assert.equal(submitted.outcome, 'ok');
@@ -2964,7 +3212,7 @@ test('submitPermit notifies every CRO-capability holder, de-duplicated across mu
 test('resubmitPermit notifies CRO recipients with a distinct notification type from the original submission', async () => {
   const db = new FakeDb();
   db.grantCapability('cro-a', 'permit.close');
-  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -2983,7 +3231,7 @@ test('forwardToHseReview notifies every HSE-capability holder', async () => {
   const db = new FakeDb();
   db.grantCapability('hse-a', 'permit.hse_review');
   const pendingCro = await (async () => {
-    const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+    const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
     await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
     const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
     if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -3145,7 +3393,7 @@ test('a mid-transaction failure rolls back the notification/outbox/snapshot rows
 test('submitPermit fails closed and rolls back when no CRO recipient exists', async () => {
   const db = new FakeDb();
   db.denyRecipientsFor('permit.cro_review', 'permit.forward_hse', 'permit.send_back', 'permit.close', 'permit.hold', 'permit.cancel');
-  const { permit } = await createDraftPermit('applicant', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, db.deps());
   const beforeEvents = db.lifecycleEvents.length;
   const result = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, db.deps());
@@ -3157,7 +3405,7 @@ test('submitPermit fails closed and rolls back when no CRO recipient exists', as
 
 test('resubmitPermit fails closed and rolls back when no CRO recipient exists', async () => {
   const db = new FakeDb();
-  const { permit } = await createDraftPermit('applicant', 'UTC', db.deps());
+  const { permit } = await createDraftPermit('applicant', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -3174,7 +3422,7 @@ test('resubmitPermit fails closed and rolls back when no CRO recipient exists', 
 test('fallback-only CRO is not an HSE recipient: forward rolls back every field and side effect', async () => {
   const forwardDb = new FakeDb();
   forwardDb.grantCapability('fallback-cro', 'permit.fallback_approve');
-  const { permit } = await createDraftPermit('applicant', 'UTC', forwardDb.deps());
+  const { permit } = await createDraftPermit('applicant', 'UTC', 'WTG_WORK', forwardDb.deps());
   await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, forwardDb.deps());
   const submitted = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, forwardDb.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -3200,4 +3448,463 @@ test('HSE send-back fails closed when no real CRO reviewer exists', async () => 
   assert.deepEqual(sentBack, { outcome: 'conflict', reason: 'no_responsible_recipient', responsibility: 'CRO' });
   assert.equal(sendBackDb.permits.get(pendingHse.id)?.status, 'PENDING_HSE');
   assert.equal(sendBackDb.lifecycleEvents.length, sendBackEvents);
+});
+
+// ---------------------------------------------------------------------
+// Permit/JSA form content and authoritative digital signatures
+// (migration 0016)
+// ---------------------------------------------------------------------
+
+/** Drives a fresh permit to ISSUED via CRO fallback approval instead of HSE approval. */
+async function createFallbackIssuedPermit(db: FakeDb, actorUserId = 'owner'): Promise<PermitRow> {
+  const pending = await createPendingHsePermit(db, actorUserId);
+  db.advanceTime(FIVE_MINUTES_MS);
+  const approved = await croFallbackApprove('cro-1', pending.id, { expectedVersion: pending.version }, db.deps());
+  if (approved.outcome !== 'ok') throw new Error('setup failed: croFallbackApprove');
+  return approved.permit;
+}
+
+test('createDraftPermit fixes the permit template and derives its form version server-side', async () => {
+  const db = new FakeDb();
+  for (const permitType of PERMIT_TYPES) {
+    const { permit, jsa } = await createDraftPermit('owner', 'UTC', permitType, db.deps());
+    assert.equal(permit.permit_type, permitType);
+    assert.equal(permit.form_version, PERMIT_FORM_VERSIONS[permitType]);
+    assert.equal(permit.status, 'DRAFT');
+    assert.ok(jsa.id);
+  }
+  // The version is never taken from a caller - it is looked up from the
+  // type, and the INSERT binds both.
+  const insert = db.queries.find((q) => q.sql.startsWith('INSERT INTO permits'));
+  assert.deepEqual(insert?.params.slice(3), ['WTG_WORK', 'WTG_WORK_V1']);
+});
+
+test('a draft form edit stores the validated payload and its derived relational projection', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  db.clearPermitForm(permit.id);
+
+  const form = makeWtgWorkForm({ windFarm: 'Gharo', wtgNumber: 'WTG-11' });
+  const result = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: permit.version, company: 'ESET', form },
+    db.deps(),
+  );
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.deepEqual(result.permit.form_payload, form);
+  assert.equal(result.permit.wind_farm, 'Gharo');
+  assert.equal(result.permit.wtg_number, 'WTG-11');
+  assert.equal(result.permit.work_description, form.descriptionOfWork);
+  assert.equal(result.permit.version, permit.version + 1);
+});
+
+test('a form payload belonging to another template is rejected for the permit own type', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  const result = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: permit.version, company: 'ESET', form: makeHotWorkForm() },
+    db.deps(),
+  );
+  assert.equal(result.outcome, 'invalid');
+  if (result.outcome === 'invalid') assert.equal(result.reason, 'invalid_form_payload');
+});
+
+test('an unknown form property is rejected rather than stored', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  const result = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: permit.version, form: { ...makeWtgWorkForm(), croSignature: 'Bilal Ahmed' } },
+    db.deps(),
+  );
+  assert.equal(result.outcome, 'invalid');
+});
+
+test('form editing follows the same ownership/status/version rules as every other draft edit', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+
+  const asOther = await updateDraftPermit(
+    'someone-else',
+    permit.id,
+    { expectedVersion: permit.version, form: makeWtgWorkForm() },
+    db.deps(),
+  );
+  assert.deepEqual(asOther, { outcome: 'not_found' });
+
+  const stale = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: permit.version + 5, form: makeWtgWorkForm() },
+    db.deps(),
+  );
+  assert.deepEqual(stale, { outcome: 'conflict', reason: 'stale_version' });
+});
+
+test('an ISSUED permit form and JSA are immutable through the ordinary edit paths', async () => {
+  const db = new FakeDb();
+  const issued = await createIssuedPermit(db);
+
+  const permitEdit = await updateDraftPermit(
+    'owner',
+    issued.id,
+    { expectedVersion: issued.version, form: makeWtgWorkForm({ windFarm: 'Rewritten' }) },
+    db.deps(),
+  );
+  assert.deepEqual(permitEdit, { outcome: 'conflict', reason: 'not_editable' });
+
+  const jsaEdit = await updateLinkedJsa(
+    'owner',
+    issued.id,
+    { expectedVersion: issued.version, form: makeJsaForm() },
+    db.deps(),
+  );
+  assert.deepEqual(jsaEdit, { outcome: 'conflict', reason: 'not_editable' });
+});
+
+test('a permit sent back for correction can be edited again, and its form change is stored', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  if (updated.outcome !== 'ok') throw new Error('setup failed');
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  const sentBack = await croSendBackToApplicant('cro-1', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
+  if (sentBack.outcome !== 'ok') throw new Error('setup failed');
+
+  const corrected = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: sentBack.permit.version, form: makeWtgWorkForm({ windFarm: 'Corrected Farm' }) },
+    db.deps(),
+  );
+  assert.equal(corrected.outcome, 'ok');
+  if (corrected.outcome === 'ok') assert.equal(corrected.permit.wind_farm, 'Corrected Farm');
+});
+
+test('the linked JSA is edited under the permit own lock, ownership, and version token', async () => {
+  const db = new FakeDb();
+  const { permit, jsa } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+
+  const form = makeJsaForm();
+  const result = await updateLinkedJsa('owner', permit.id, { expectedVersion: permit.version, form }, db.deps());
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.jsa.id, jsa.id, 'the same JSA row is edited - never replaced');
+  assert.equal(result.jsa.form_version, 'JSA_V1');
+  assert.deepEqual(result.jsa.form_payload, form);
+  assert.equal(result.jsa.site_or_wtg, form.page1.siteOrWtg);
+  assert.equal(result.jsa.job_description, form.page1.jobOrWork);
+  assert.equal(result.permit.version, permit.version + 1, 'permit + JSA share one concurrency token');
+
+  const stale = await updateLinkedJsa('owner', permit.id, { expectedVersion: permit.version, form }, db.deps());
+  assert.deepEqual(stale, { outcome: 'conflict', reason: 'stale_version' });
+
+  const asOther = await updateLinkedJsa('someone-else', permit.id, { expectedVersion: result.permit.version, form }, db.deps());
+  assert.deepEqual(asOther, { outcome: 'not_found' });
+
+  const invalid = await updateLinkedJsa(
+    'owner',
+    permit.id,
+    { expectedVersion: result.permit.version, form: { ...form, unexpected: true } },
+    db.deps(),
+  );
+  assert.equal(invalid.outcome, 'invalid');
+});
+
+test('a permit cannot be submitted while its own form or its JSA is incomplete', async () => {
+  const db = new FakeDb();
+  const { permit, jsa } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  if (updated.outcome !== 'ok') throw new Error('setup failed');
+
+  db.clearPermitForm(permit.id);
+  const withoutPermitForm = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
+  assert.deepEqual(withoutPermitForm, { outcome: 'invalid', reason: 'missing_required_fields' });
+
+  const restored = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: updated.permit.version, form: makeWtgWorkForm() },
+    db.deps(),
+  );
+  if (restored.outcome !== 'ok') throw new Error('setup failed');
+
+  db.clearJsaForm(jsa.id);
+  const withoutJsa = await submitPermit('owner', permit.id, { expectedVersion: restored.permit.version }, db.deps());
+  assert.deepEqual(withoutJsa, { outcome: 'invalid', reason: 'missing_required_fields' });
+
+  const jsaCompleted = await updateLinkedJsa(
+    'owner',
+    permit.id,
+    { expectedVersion: restored.permit.version, form: makeJsaForm() },
+    db.deps(),
+  );
+  if (jsaCompleted.outcome !== 'ok') throw new Error('setup failed');
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: jsaCompleted.permit.version }, db.deps());
+  assert.equal(submitted.outcome, 'ok');
+});
+
+test('the applicant signs by submitting: the signature is the authenticated actor, never a supplied name', async () => {
+  const db = new FakeDb();
+  db.setWorkforceProfile('owner', {
+    display_name: 'Ayesha Khan',
+    primary_team_position_id: 'tp-1',
+    team_name: 'Maintenance Team A',
+    position_name: 'Technician',
+  });
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  if (updated.outcome !== 'ok') throw new Error('setup failed');
+  await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
+
+  assert.equal(db.permitSignatures.length, 1);
+  const signature = db.permitSignatures[0]!;
+  assert.equal(signature.signature_role, 'APPLICANT');
+  assert.equal(signature.signer_user_id, 'owner');
+  assert.equal(signature.signer_display_name, 'Ayesha Khan');
+  assert.equal(signature.signer_position_name, 'Technician');
+  assert.equal(signature.signer_team_name, 'Maintenance Team A');
+});
+
+test('CRO and HSE signatures are likewise the authenticated actors of their own actions', async () => {
+  const db = new FakeDb();
+  db.setWorkforceProfile('cro-1', {
+    display_name: 'Bilal Ahmed',
+    primary_team_position_id: 'tp-2',
+    team_name: 'Operations',
+    position_name: 'Control Room Operator',
+  });
+  db.setWorkforceProfile('hse-1', {
+    display_name: 'Cara Noor',
+    primary_team_position_id: 'tp-3',
+    team_name: 'HSE',
+    position_name: 'HSE Officer',
+  });
+  await createIssuedPermit(db);
+
+  const roles = db.permitSignatures.map((row) => [row.signature_role, row.signer_user_id, row.signer_display_name]);
+  assert.deepEqual(roles, [
+    ['APPLICANT', 'owner', 'Display Name of owner'],
+    ['CRO', 'cro-1', 'Bilal Ahmed'],
+    ['HSE', 'hse-1', 'Cara Noor'],
+  ]);
+});
+
+test('a signer with no workforce profile FAILS CLOSED: the whole transition rolls back', async () => {
+  const db = new FakeDb();
+  db.removeWorkforceProfile('owner');
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  if (updated.outcome !== 'ok') throw new Error('setup failed');
+
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
+  assert.deepEqual(submitted, { outcome: 'conflict', reason: 'missing_signing_identity' });
+
+  const after = await getPermitById(permit.id, db.deps());
+  assert.equal(after?.status, 'DRAFT', 'the permit never moved');
+  assert.equal(after?.version, updated.permit.version, 'the version never advanced');
+  assert.equal(db.permitSignatures.length, 0);
+  assert.equal(db.lifecycleEvents.filter((e) => e.event_type === 'SUBMITTED').length, 0);
+  assert.equal(db.notifications.length, 0);
+});
+
+test('a CRO with no signing identity cannot forward, and an HSE with none cannot approve', async () => {
+  const forwardDb = new FakeDb();
+  forwardDb.removeWorkforceProfile('cro-1');
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', forwardDb.deps());
+  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, forwardDb.deps());
+  if (updated.outcome !== 'ok') throw new Error('setup failed');
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, forwardDb.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+
+  const forwarded = await forwardToHseReview('cro-1', permit.id, { expectedVersion: submitted.permit.version }, forwardDb.deps());
+  assert.deepEqual(forwarded, { outcome: 'conflict', reason: 'missing_signing_identity' });
+  assert.equal((await getPermitById(permit.id, forwardDb.deps()))?.status, 'PENDING_CRO');
+
+  const approveDb = new FakeDb();
+  approveDb.removeWorkforceProfile('hse-1');
+  const pending = await createPendingHsePermit(approveDb);
+  const approved = await hseApprove('hse-1', pending.id, { expectedVersion: pending.version }, approveDb.deps());
+  assert.deepEqual(approved, { outcome: 'conflict', reason: 'missing_signing_identity' });
+  assert.equal((await getPermitById(pending.id, approveDb.deps()))?.status, 'PENDING_HSE');
+  assert.equal(approveDb.documentSnapshots.length, 0, 'no issued document was created');
+});
+
+test('CRO fallback approval signs as CRO FALLBACK and never fabricates an HSE signature', async () => {
+  const db = new FakeDb();
+  db.setWorkforceProfile('cro-1', {
+    display_name: 'Bilal Ahmed',
+    primary_team_position_id: 'tp-2',
+    team_name: 'Operations',
+    position_name: 'Control Room Operator',
+  });
+  const issued = await createFallbackIssuedPermit(db);
+
+  const roles = db.permitSignatures.map((row) => row.signature_role);
+  assert.deepEqual(roles, ['APPLICANT', 'CRO', 'CRO_FALLBACK']);
+  assert.ok(!roles.includes('HSE'));
+
+  const snapshot = db.documentSnapshots.find((s) => s.permit_id === issued.id)?.snapshot as {
+    signatures: { hse: unknown; croFallback: { displayName: string; role: string } | null };
+    issuanceEventType: string;
+  };
+  assert.equal(snapshot.issuanceEventType, 'CRO_FALLBACK_APPROVED');
+  assert.equal(snapshot.signatures.hse, null);
+  assert.equal(snapshot.signatures.croFallback?.displayName, 'Bilal Ahmed');
+  assert.equal(snapshot.signatures.croFallback?.role, 'CRO_FALLBACK');
+});
+
+test('the issued snapshot freezes the signature identities that existed at issuance', async () => {
+  const db = new FakeDb();
+  db.setWorkforceProfile('owner', {
+    display_name: 'Ayesha Khan',
+    primary_team_position_id: 'tp-1',
+    team_name: 'Maintenance Team A',
+    position_name: 'Technician',
+  });
+  const issued = await createIssuedPermit(db);
+  const snapshot = db.documentSnapshots.find((s) => s.permit_id === issued.id)?.snapshot as {
+    signatures: { applicant: { displayName: string; designation: string } };
+    permitType: string;
+    permitForm: unknown;
+    jsaForm: unknown;
+  };
+  assert.equal(snapshot.signatures.applicant.displayName, 'Ayesha Khan');
+  assert.equal(snapshot.signatures.applicant.designation, 'Technician, Maintenance Team A');
+  assert.equal(snapshot.permitType, 'WTG_WORK');
+  assert.ok(snapshot.permitForm);
+  assert.ok(snapshot.jsaForm);
+
+  // The employee is promoted and renamed AFTER issuance.
+  db.setWorkforceProfile('owner', {
+    display_name: 'A. Khan',
+    primary_team_position_id: 'tp-9',
+    team_name: 'Maintenance Team B',
+    position_name: 'Senior Technician',
+  });
+  const stillFrozen = db.documentSnapshots.find((s) => s.permit_id === issued.id)?.snapshot as {
+    signatures: { applicant: { displayName: string; designation: string } };
+  };
+  assert.equal(stillFrozen.signatures.applicant.displayName, 'Ayesha Khan');
+  assert.equal(stillFrozen.signatures.applicant.designation, 'Technician, Maintenance Team A');
+});
+
+test('a resubmitted permit is issued carrying the LAST applicant signature, with every earlier one retained', async () => {
+  const db = new FakeDb();
+  db.setWorkforceProfile('owner', {
+    display_name: 'Ayesha Khan',
+    primary_team_position_id: 'tp-1',
+    team_name: 'Maintenance Team A',
+    position_name: 'Technician',
+  });
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  if (updated.outcome !== 'ok') throw new Error('setup failed');
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  const sentBack = await croSendBackToApplicant('cro-1', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
+  if (sentBack.outcome !== 'ok') throw new Error('setup failed');
+
+  db.setWorkforceProfile('owner', {
+    display_name: 'Ayesha Khan',
+    primary_team_position_id: 'tp-1',
+    team_name: 'Maintenance Team A',
+    position_name: 'Senior Technician',
+  });
+  const resubmitted = await resubmitPermit('owner', permit.id, { expectedVersion: sentBack.permit.version }, db.deps());
+  if (resubmitted.outcome !== 'ok') throw new Error('setup failed');
+  const forwarded = await forwardToHseReview('cro-1', permit.id, { expectedVersion: resubmitted.permit.version }, db.deps());
+  if (forwarded.outcome !== 'ok') throw new Error('setup failed');
+  const approved = await hseApprove('hse-1', permit.id, { expectedVersion: forwarded.permit.version }, db.deps());
+  if (approved.outcome !== 'ok') throw new Error('setup failed');
+
+  const applicantSignatures = db.permitSignatures.filter((row) => row.signature_role === 'APPLICANT');
+  assert.equal(applicantSignatures.length, 2, 'both signing acts remain recorded');
+
+  const snapshot = db.documentSnapshots[0]?.snapshot as {
+    signatures: { applicant: { designation: string } };
+  };
+  assert.equal(snapshot.signatures.applicant.designation, 'Senior Technician, Maintenance Team A');
+});
+
+test('a renewed permit carries over the form content and inherits the frozen signatures, plus its own renewal signature', async () => {
+  const db = new FakeDb();
+  db.setWorkforceProfile('cro-2', {
+    display_name: 'Dania Iqbal',
+    primary_team_position_id: 'tp-4',
+    team_name: 'Operations',
+    position_name: 'Control Room Operator',
+  });
+  const issued = await createIssuedPermit(db);
+  const closed = await closePermit('cro-1', issued.id, { expectedVersion: issued.version }, db.deps());
+  if (closed.outcome !== 'ok') throw new Error('setup failed: closePermit');
+  db.advanceTime(48 * 60 * 60 * 1000);
+
+  const renewed = await renewPermit('cro-2', issued.id, db.deps());
+  assert.equal(renewed.outcome, 'ok');
+  if (renewed.outcome !== 'ok') return;
+
+  assert.equal(renewed.permit.previous_permit_id, issued.id);
+  assert.equal(renewed.permit.jsa_id, issued.jsa_id, 'the same JSA is reused');
+  assert.notEqual(renewed.permit.permit_sequence, issued.permit_sequence, 'a new Permit Number');
+  assert.equal(renewed.permit.permit_type, issued.permit_type);
+  assert.deepEqual(renewed.permit.form_payload, issued.form_payload);
+  assert.equal(renewed.permit.wind_farm, issued.wind_farm);
+
+  const renewalSignatures = db.permitSignatures.filter((row) => row.permit_id === renewed.permit.id);
+  assert.deepEqual(renewalSignatures.map((row) => row.signature_role), ['RENEWAL']);
+  assert.equal(renewalSignatures[0]?.signer_display_name, 'Dania Iqbal');
+
+  const snapshot = db.documentSnapshots.find((s) => s.permit_id === renewed.permit.id)?.snapshot as {
+    signatures: {
+      applicant: { displayName: string } | null;
+      hse: { displayName: string } | null;
+      renewal: { displayName: string } | null;
+    };
+    previousPermitNumber: string;
+  };
+  assert.equal(snapshot.previousPermitNumber, issued.permit_sequence);
+  assert.equal(snapshot.signatures.applicant?.displayName, 'Display Name of owner');
+  assert.equal(snapshot.signatures.hse?.displayName, 'Display Name of hse-1');
+  assert.equal(snapshot.signatures.renewal?.displayName, 'Dania Iqbal');
+});
+
+test('a renewing CRO with no signing identity cannot renew - and the old permit stays untouched', async () => {
+  const db = new FakeDb();
+  db.removeWorkforceProfile('cro-2');
+  const issued = await createIssuedPermit(db);
+  const closed = await closePermit('cro-1', issued.id, { expectedVersion: issued.version }, db.deps());
+  if (closed.outcome !== 'ok') throw new Error('setup failed');
+  db.advanceTime(48 * 60 * 60 * 1000);
+
+  const renewed = await renewPermit('cro-2', issued.id, db.deps());
+  assert.deepEqual(renewed, { outcome: 'conflict', reason: 'missing_signing_identity' });
+
+  const old = await getPermitById(issued.id, db.deps());
+  assert.equal(old?.status, 'CLOSED');
+  assert.equal(old?.version, closed.permit.version);
+  assert.equal([...db.permits.values()].filter((p) => p.previous_permit_id === issued.id).length, 0);
+});
+
+test('list endpoints return summaries without form payloads; detail keeps the full form', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+
+  const listed = await listOwnPermits('owner', { page: 1, pageSize: 20 }, db.deps());
+  const listQuery = db.queries.find(
+    (q) => !q.sql.startsWith('SELECT COUNT') && q.sql.includes('FROM permits WHERE created_by = $1 ORDER BY'),
+  );
+  assert.ok(listQuery);
+  assert.ok(!listQuery.sql.includes('form_payload'), 'the list query must never select form_payload');
+  assert.ok(listQuery.sql.includes('permit_type'), 'the list still carries the searchable relational fields');
+  assert.equal(listed.items.length, 1);
+
+  const detail = await getPermitById(permit.id, db.deps());
+  assert.ok(detail?.form_payload, 'permit detail carries the full validated form');
 });

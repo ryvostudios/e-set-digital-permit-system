@@ -35,6 +35,24 @@ Versioned, plain SQL migration files, applied in filename order by
   paths, active constraints, clean existing data, and no remaining temporary
   hash helper. `0001`-`0015` are now immutable applied history.
 
+- `0016_permit_jsa_business_forms.sql`: **CREATED / UNAPPLIED / NOT
+  LIVE-VERIFIED**. Adds the workforce signing-identity model
+  (`workforce_profiles`), permit/JSA business form content (permit
+  template + versioned, strictly-validated JSONB payloads plus derived
+  relational projections), authoritative digital signatures
+  (`permit_signatures`), and widens the document renderer allowlist to
+  include `PDFKIT_V2`. It has NOT been run against any environment and
+  no live verification has been performed. Two preconditions apply when
+  it is eventually applied:
+  1. It **aborts** if any permit is already beyond `DRAFT` - those rows
+     predate the form model and their form content cannot be invented.
+     Remove such pre-go-live test records first.
+  2. It seeds **no** workforce profiles. Until a user is provisioned
+     with a profile and a valid primary Team + Position, every action
+     that would produce a signature (submit, resubmit, CRO forward, HSE
+     approve, CRO fallback approve, renew) fails closed. Provisioning is
+     an explicit, separate step performed after this migration.
+
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
 later, scoped implementation sections — not here.
