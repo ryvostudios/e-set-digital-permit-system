@@ -87,15 +87,40 @@ just a storage layer. Design work should plan for:
 - History data is not casually overwritten by ordinary application
   operations, including by privileged management users.
 
-## Notifications (Future)
+## Notifications and issued documents (migration 0013 - applied and live-verified)
 
-- The future WhatsApp notification design implies a durable
-  outbox-style record decoupled from the permit transaction, tracking
-  delivery status (e.g. `SENT`/`FAILED`) without gating the permit
-  action on delivery success.
-- Future message processing requires idempotency/unique event IDs to
-  prevent duplicate sends; schema design should keep this in mind when
-  the notifications module is actually built.
+- In-app notifications are recipient-scoped and deduplicated by
+  `(source_event_id, recipient_user_id)`. Responsibility handoffs abort
+  atomically when authoritative Team + Position capability resolution
+  finds no eligible CRO/HSE recipient.
+- WhatsApp delivery uses a durable outbox. Workers atomically claim rows
+  with a token and lease, retry with bounded backoff, and expose the
+  lifecycle event id as the provider idempotency key. Provider I/O is
+  outside the permit transaction.
+- Issued snapshots are immutable. Migration 0013 refuses corrupt
+  historical issued rows, then idempotently backfills one snapshot and
+  PDF job for every row with authoritative issuance history, including
+  currently ISSUED, HELD, CLOSED, CANCELLED, and renewed permits.
+  `issuanceOccurredAt` preserves the original lifecycle decision time;
+  `snapshotTakenAt` and the snapshot row `created_at` record DB time when
+  0013 actually captured the historical snapshot. They are deliberately
+  not backdated to issuance.
+- PDF jobs use token-owned leases. A retry after upload/crash reconciles
+  an existing private object by SHA-256 and never overwrites a completed
+  or mismatched immutable document.
+- Outbox/document jobs persist only fixed operational error categories;
+  raw provider, Storage, database, URL, header, or credential text is
+  neither stored nor printed by worker entry points.
+- Live verification found every new application table RLS-enabled, no
+  direct `anon`/`authenticated` grants, no new policies, and the immutable
+  snapshot protections active. The live database contained zero already-
+  issued permits, so the historical backfill correctly had zero rows to
+  process.
+- Migration `0014_fix_trigger_function_search_paths.sql` is applied and
+  live-verified. Both affected trigger functions have
+  `search_path=pg_catalog`, remain SECURITY INVOKER, and no longer produce
+  Supabase `function_search_path_mutable` warnings. It did not change
+  their bodies, triggers, permissions, RLS, grants, or policies.
 
 ## What Is Deliberately Not Decided Here
 

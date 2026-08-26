@@ -101,6 +101,22 @@ export function canViewPermit(
   return STATUS_VIEW_CAPABILITIES[permit.status].some((capability) => viewerCapabilities.has(capability));
 }
 
+/**
+ * Every status `viewerCapabilities` grants non-owner read access to,
+ * derived from `STATUS_VIEW_CAPABILITIES` above - used by
+ * `domain/permits/search.ts::searchPermits` to build the "OR" side of
+ * the same access predicate `canViewPermit` already enforces one permit
+ * at a time, but as a SQL-level filter (`status = ANY(...)`) so search
+ * results and their COUNT can never include a permit the caller could
+ * not otherwise open directly. DRAFT is never included (its capability
+ * list is always empty), matching `canViewPermit`'s existing behavior.
+ */
+export function computeViewableStatuses(viewerCapabilities: ReadonlySet<string>): PermitStatus[] {
+  return (Object.keys(STATUS_VIEW_CAPABILITIES) as PermitStatus[]).filter((status) =>
+    STATUS_VIEW_CAPABILITIES[status].some((capability) => viewerCapabilities.has(capability)),
+  );
+}
+
 export type AvailableAction =
   | 'update'
   | 'submit'

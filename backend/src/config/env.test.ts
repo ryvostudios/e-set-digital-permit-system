@@ -275,3 +275,33 @@ test('envSchema RATE_LIMIT_MUTATION_MAX: rejects above the maximum, fractional, 
   assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MUTATION_MAX: '2.5' })).success, false);
   assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MUTATION_MAX: String(Number.MAX_SAFE_INTEGER) })).success, false);
 });
+
+// --- SUPABASE_SERVICE_ROLE_KEY / SUPABASE_STORAGE_BUCKET (CEO bootstrap + PDF storage) ---
+
+test('envSchema: SUPABASE_SERVICE_ROLE_KEY is optional - the backend starts and the permit workflow works without it', () => {
+  const result = envSchema.safeParse(baseEnv());
+  assert.equal(result.success, true);
+  if (result.success) assert.equal(result.data.SUPABASE_SERVICE_ROLE_KEY, undefined);
+});
+
+test('envSchema: SUPABASE_SERVICE_ROLE_KEY accepts a configured value distinct from the publishable key', () => {
+  const result = envSchema.safeParse(baseEnv({ SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_abcdef1234567890' }));
+  assert.equal(result.success, true);
+});
+
+test('envSchema: SUPABASE_SERVICE_ROLE_KEY must not be the same value as SUPABASE_PUBLISHABLE_KEY (copy-paste guard)', () => {
+  const result = envSchema.safeParse(
+    baseEnv({ SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_same', SUPABASE_SERVICE_ROLE_KEY: 'sb_publishable_same' }),
+  );
+  assert.equal(result.success, false);
+});
+
+test('envSchema: SUPABASE_STORAGE_BUCKET defaults when unset and accepts an override', () => {
+  const defaultResult = envSchema.safeParse(baseEnv());
+  assert.equal(defaultResult.success, true);
+  if (defaultResult.success) assert.equal(defaultResult.data.SUPABASE_STORAGE_BUCKET, 'issued-permit-documents');
+
+  const overridden = envSchema.safeParse(baseEnv({ SUPABASE_STORAGE_BUCKET: 'my-custom-bucket' }));
+  assert.equal(overridden.success, true);
+  if (overridden.success) assert.equal(overridden.data.SUPABASE_STORAGE_BUCKET, 'my-custom-bucket');
+});

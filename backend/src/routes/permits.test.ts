@@ -4,6 +4,7 @@ import { after, before, beforeEach, test } from 'node:test';
 import { Pool, type PoolClient } from 'pg';
 import { createApp } from '../app.js';
 import { supabase } from '../lib/supabase.js';
+import { computeFileHash, setDocumentStorageAdapterForTests, type DocumentStorageAdapter } from '../domain/permits/documents.js';
 
 /**
  * Exercises the REAL Express app/router (`createApp`, `permitsRouter`,
@@ -33,6 +34,8 @@ let mockOwnPermitRows: Record<string, unknown>[] = [];
 let mockQueuePermitRows: Record<string, unknown>[] = [];
 let mockPermitDetailRow: Record<string, unknown> | null = null;
 let mockHistoryEventRows: Record<string, unknown>[] = [];
+let mockSearchPermitRows: Record<string, unknown>[] = [];
+let mockDocumentLookupRow: Record<string, unknown> | null = null;
 // Every query issued through the `Pool.prototype.query` stub, in order -
 // lets a test assert *what was actually asked for* (e.g. which user id a
 // query was scoped by), not just the canned response.
@@ -136,8 +139,20 @@ before(() => {
       }
       return { rows: [] };
     }
+    if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permit_lifecycle_events')) {
+      return { rows: [{ count: String(mockHistoryEventRows.length) }] };
+    }
     if (sql.startsWith('SELECT * FROM permit_lifecycle_events')) {
       return { rows: mockHistoryEventRows };
+    }
+    if (sql.startsWith('SELECT p.* FROM permits p JOIN jsas j')) {
+      return { rows: mockSearchPermitRows };
+    }
+    if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits p JOIN jsas j')) {
+      return { rows: [{ count: String(mockSearchPermitRows.length) }] };
+    }
+    if (sql.startsWith('SELECT s.*, j.id AS job_id')) {
+      return { rows: mockDocumentLookupRow ? [mockDocumentLookupRow] : [] };
     }
     return { rows: [] };
   }) as unknown as typeof Pool.prototype.query;
@@ -166,6 +181,9 @@ beforeEach(() => {
   mockQueuePermitRows = [];
   mockPermitDetailRow = null;
   mockHistoryEventRows = [];
+  mockSearchPermitRows = [];
+  mockDocumentLookupRow = null;
+  setDocumentStorageAdapterForTests(null);
   capturedQueries = [];
 });
 
@@ -1160,4 +1178,259 @@ test('GET /permits/:id/history: never queries the JSA at all, even for an author
   } finally {
     await close();
   }
+});
+
+test('GET /permits/:id/history: supplying a filter switches to the paginated path and adds a pagination block, without changing the unfiltered contract', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: AUTHENTICATED_USER_ID });
+  mockHistoryEventRows = [
+    { id: 'e1', ordinal: '1', permit_id: SOME_PERMIT_ID, event_type: 'SUBMITTED', actor_user_id: AUTHENTICATED_USER_ID, from_status: 'DRAFT', to_status: 'PENDING_CRO', reason: null, occurred_at: '2026-01-01T00:00:00.000Z' },
+  ];
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/history?eventType=SUBMITTED`, VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { events: unknown[]; pagination?: unknown };
+    assert.equal(body.events.length, 1);
+    assert.ok(body.pagination, 'filtered/paginated history responses include a pagination block');
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id/history rejects an invalid filter (400) - e.g. an occurredFrom after occurredTo', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: AUTHENTICATED_USER_ID });
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(
+      url,
+      `/permits/${SOME_PERMIT_ID}/history?occurredFrom=2026-02-01T00:00:00.000Z&occurredTo=2026-01-01T00:00:00.000Z`,
+      VALID_TOKEN,
+    );
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+// --- GET /permits/search ---
+
+test('GET /permits/search denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, '/permits/search')).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/search returns only permits within the caller\'s own access scope (own + capability-granted statuses)', async () => {
+  mockSearchPermitRows = [makePermitDetailRow({ status: 'ISSUED', created_by: AUTHENTICATED_USER_ID })];
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, '/permits/search', VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { permits: unknown[]; pagination: { totalCount: number } };
+    assert.equal(body.permits.length, 1);
+    assert.equal(body.pagination.totalCount, 1);
+    // The access predicate always includes the caller's own id and the
+    // capability-derived allowed-status array, regardless of filters.
+    const searchQuery = capturedQueries.find((q) => q.sql.startsWith('SELECT p.* FROM permits p JOIN jsas j'));
+    assert.ok(searchQuery);
+    assert.equal(searchQuery?.params[0], AUTHENTICATED_USER_ID);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/search?permitNumber=... rejects a non-numeric value (400)', async () => {
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, '/permits/search?permitNumber=not-a-number', VALID_TOKEN);
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/search rejects an unknown query parameter (400) - strict schema', async () => {
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, '/permits/search?nonsense=1', VALID_TOKEN);
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/search enforces the same hard pagination bounds as every other list endpoint', async () => {
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, '/permits/search?pageSize=99999', VALID_TOKEN);
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+// --- GET /permits/:id/pdf ---
+
+test('GET /permits/:id/pdf denies an unauthenticated request (401)', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`)).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id/pdf returns 404 (not 403) when the caller may not view the permit - authorization runs before any document lookup', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: 'someone-else', issued_at: '2026-01-01T09:00:00.000Z' });
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN);
+    assert.equal(res.status, 404);
+    assert.equal(
+      capturedQueries.some((q) => q.sql.startsWith('SELECT s.*, j.id AS job_id')),
+      false,
+      'the document must never be looked up for a caller canViewPermit denies',
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id/pdf returns 404 for a permit that was never issued (nothing to generate)', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'DRAFT', created_by: AUTHENTICATED_USER_ID, issued_at: null });
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN);
+    assert.equal(res.status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id/pdf returns an explicit "processing" status (never a fake PDF) when the document has not been generated yet', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: AUTHENTICATED_USER_ID, issued_at: '2026-01-01T09:00:00.000Z' });
+  mockDocumentLookupRow = {
+    id: 'snapshot-1',
+    permit_id: SOME_PERMIT_ID,
+    source_event_id: 'event-1',
+    snapshot: {},
+    snapshot_hash: 'hash',
+    created_at: '2026-01-01T09:00:00.000Z',
+    job_id: 'job-1',
+    job_status: 'PENDING',
+    job_storage_path: null,
+    job_file_hash: null,
+    job_generated_at: null,
+    job_attempt_count: 0,
+    job_last_error: null,
+    job_created_at: '2026-01-01T09:00:00.000Z',
+    job_updated_at: '2026-01-01T09:00:00.000Z',
+  };
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN);
+    assert.equal(res.status, 202);
+    const body = (await res.json()) as { status: string };
+    assert.equal(body.status, 'processing');
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id/pdf: with storage unconfigured (test env), a GENERATED job still fails safely (503) rather than serving a fake file', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: AUTHENTICATED_USER_ID, issued_at: '2026-01-01T09:00:00.000Z' });
+  mockDocumentLookupRow = {
+    id: 'snapshot-1',
+    permit_id: SOME_PERMIT_ID,
+    source_event_id: 'event-1',
+    snapshot: {},
+    snapshot_hash: 'hash',
+    created_at: '2026-01-01T09:00:00.000Z',
+    job_id: 'job-1',
+    job_status: 'GENERATED',
+    job_storage_path: `permits/${SOME_PERMIT_ID}/snapshot-1.pdf`,
+    job_file_hash: 'filehash',
+    job_generated_at: '2026-01-01T09:05:00.000Z',
+    job_attempt_count: 1,
+    job_last_error: null,
+    job_created_at: '2026-01-01T09:00:00.000Z',
+    job_updated_at: '2026-01-01T09:05:00.000Z',
+  };
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN);
+    assert.equal(res.status, 503);
+  } finally {
+    await close();
+  }
+});
+
+function setGeneratedDocument(fileHash: string): void {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: AUTHENTICATED_USER_ID, issued_at: '2026-01-01T09:00:00.000Z' });
+  mockDocumentLookupRow = {
+    id: 'snapshot-1', permit_id: SOME_PERMIT_ID, source_event_id: 'event-1', snapshot: {}, snapshot_hash: 'hash',
+    created_at: '2026-01-01T09:00:00.000Z', job_id: 'job-1', job_status: 'GENERATED',
+    job_storage_path: `permits/${SOME_PERMIT_ID}/snapshot-1.pdf`, job_file_hash: fileHash,
+    job_generated_at: '2026-01-01T09:05:00.000Z', job_attempt_count: 1, job_last_error: null,
+    job_created_at: '2026-01-01T09:00:00.000Z', job_updated_at: '2026-01-01T09:05:00.000Z',
+  };
+}
+
+test('GET /permits/:id/pdf downloads and serves an authorized immutable PDF only when its SHA-256 matches', async () => {
+  const bytes = Buffer.from('%PDF-1.7 immutable route test');
+  setGeneratedDocument(computeFileHash(bytes));
+  let downloads = 0;
+  const storage: DocumentStorageAdapter = {
+    async upload() { return { ok: true }; },
+    async download() { downloads += 1; return { ok: true, data: bytes }; },
+  };
+  setDocumentStorageAdapterForTests(storage);
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/pdf');
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), bytes);
+    assert.equal(downloads, 1);
+  } finally { await close(); }
+});
+
+test('GET /permits/:id/pdf refuses altered Storage bytes without leaking the private path', async () => {
+  setGeneratedDocument(computeFileHash(Buffer.from('expected bytes')));
+  let downloads = 0;
+  setDocumentStorageAdapterForTests({
+    async upload() { return { ok: true }; },
+    async download() { downloads += 1; return { ok: true, data: Buffer.from('tampered bytes') }; },
+  });
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN);
+    assert.equal(res.status, 500);
+    const body = await res.text();
+    assert.doesNotMatch(body, /permits\//);
+    assert.doesNotMatch(body, /snapshot-1/);
+    assert.equal(downloads, 1);
+  } finally { await close(); }
+});
+
+test('GET /permits/:id/pdf performs neither document nor Storage lookup for an unauthorized caller', async () => {
+  mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: 'someone-else', issued_at: '2026-01-01T09:00:00.000Z' });
+  let downloads = 0;
+  setDocumentStorageAdapterForTests({
+    async upload() { return { ok: true }; },
+    async download() { downloads += 1; return { ok: true, data: Buffer.from('secret') }; },
+  });
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN);
+    assert.equal(res.status, 404);
+    assert.equal(capturedQueries.some((q) => q.sql.startsWith('SELECT s.*, j.id AS job_id')), false);
+    assert.equal(downloads, 0);
+  } finally { await close(); }
 });

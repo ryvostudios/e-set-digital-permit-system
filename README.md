@@ -35,19 +35,27 @@ implementing the full agreed Permit workflow: draft creation/submission,
 CRO review (forward-to-HSE, send-back to applicant), applicant
 correction/resubmission, HSE review (approval, send-back to CRO),
 CRO fallback approval, Hold/Resume, Cancel, Close, and Renewal - plus
-paginated read APIs - all under Team + Position -> Capabilities
-authorization with Supabase Auth token verification. Database migrations
-`0001`-`0012` are applied and live-verified against the live Supabase
-project (see `database/migrations/README.md`) - `0012` is the workflow-
-completion schema (Send-Back/Hold/Resume/Cancel/Renewal). Backend production
+paginated read APIs, permit search, filtered lifecycle/audit search,
+in-app notifications, a durable WhatsApp outbox foundation, and
+immutable issued Permit+JSA PDF generation - all under Team + Position ->
+Capabilities authorization with Supabase Auth token verification.
+Database migrations `0001`-`0014` are applied and live-verified against
+the live Supabase project (see `database/migrations/README.md`) - `0012`
+is the workflow-completion schema (Send-Back/Hold/Resume/Cancel/Renewal),
+and `0013` adds notifications, outbox/document support, an atomic
+historical issued-document backfill, leased worker claims, and the
+initial-CEO singleton reservation. Migration `0014` pins the safe search
+path of two `0013` trigger functions without changing their behavior and
+has also been applied and live-verified. Backend production
 hardening (rate limiting, security headers, structured logging,
 environment validation, a `/ready` readiness endpoint) is also in place
 - see `PROJECT_CONTEXT.md` for the precise, current breakdown. `frontend/`
 is a React + Vite + TypeScript PWA scaffold with Supabase Auth wired up;
-no permit-workflow UI exists yet. PDF generation and WhatsApp
-notifications remain not implemented - each is blocked on a specific
-unresolved business rule (`DECISIONS.md`'s Open Decisions), not merely
-unscheduled.
+no permit-workflow UI exists yet. The actual WhatsApp provider
+integration and Supabase Storage/PDF credentials remain unconfigured -
+each is either an unresolved business rule (`DECISIONS.md`'s Open
+Decisions) or a manual production-configuration step (`DEPLOYMENT.md`),
+not merely unscheduled.
 
 ## Technology
 

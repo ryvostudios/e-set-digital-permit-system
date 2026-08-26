@@ -9,6 +9,7 @@ import { globalApiLimiter } from './middleware/rateLimit.js';
 import { requestLog } from './middleware/requestLog.js';
 import { authRouter } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
+import { notificationsRouter } from './routes/notifications.js';
 import { permitsRouter } from './routes/permits.js';
 
 // Request bodies here are small, structured JSON (permit/JSA form
@@ -47,6 +48,7 @@ export function createApp(): Express {
   app.use('/api/v1', healthRouter);
   app.use('/api/v1', authRouter);
   app.use('/api/v1', permitsRouter);
+  app.use('/api/v1', notificationsRouter);
 
   // Any request that reached here matched no route above - an unknown
   // path, or a known path with a method it doesn't support. A generic,

@@ -32,7 +32,7 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   and migration runner).
 - Frontend: React + Vite + TypeScript PWA scaffold with Supabase Auth;
   no permit-workflow UI has been built yet.
-- Database: migrations `0001`-`0012` are applied and live-verified
+- Database: migrations `0001`-`0014` are applied and live-verified
   against the live Supabase project (`yfxnigovfmngypbgcnaw`) - Supabase
   security hardening; Team + Position -> Capabilities authorization;
   privileged-access [CEO/Site Manager] data-model foundation; Permit/JSA
@@ -48,6 +48,70 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   active, lifecycle append-only protections intact, RLS/default-deny
   intact, no anon/authenticated direct grants, no new policies, no
   data-integrity violations found.
+  Migration `0013_notifications_outbox_documents.sql` (notifications,
+  the WhatsApp outbox, immutable issued-document snapshots, their PDF
+  job state, and justified search/audit indexes) is applied and live-
+  verified. All new tables are RLS-enabled, there are no direct `anon`/
+  `authenticated` grants or new policies, and immutable snapshot
+  protections are active. The live database contained zero already-
+  issued permits, so the historical backfill had zero rows to process.
+  Migration `0014_fix_trigger_function_search_paths.sql` is applied and
+  live-verified. Both affected functions now have
+  `search_path=pg_catalog`, remain SECURITY INVOKER, and no longer trigger
+  the Supabase `function_search_path_mutable` warnings. All five support-
+  feature tables remain RLS-enabled, with zero direct `anon`/
+  `authenticated` grants and zero policies added; no security regression
+  was found, and Performance Advisor findings are informational only.
+- Backend notifications/outbox/documents domain
+  (`backend/src/domain/notifications/`,
+  `backend/src/domain/permits/{documents,search,workflowSideEffects}.ts`,
+  `backend/src/routes/notifications.ts`, extensions to
+  `backend/src/routes/permits.ts`): in-app notifications, a durable
+  WhatsApp outbox foundation, immutable issued Permit+JSA PDF generation,
+  permit search, and lifecycle/audit search are now implemented - see
+  `DECISIONS.md`'s "Notifications (in-app - implemented)", "Notifications
+  (WhatsApp outbox - foundation implemented, provider still open)", "PDF
+  (immutable issued Permit+JSA document - implemented this batch)", and
+  "Permit Search / Lifecycle Audit Search" sections for the full,
+  authoritative detail. In summary:
+  - `GET /api/v1/notifications` / `POST /api/v1/notifications/:id/read` -
+    recipient-scoped, paginated, unread-filterable.
+  - `GET /api/v1/permits/search` - Permit Number, JSA Number, status,
+    `createdBy`, company, and date-range filters, scoped by the exact
+    same access model as every other read endpoint.
+  - `GET /api/v1/permits/:id/history` now additionally accepts optional
+    filter/pagination query parameters (event type, actor, from/to
+    status, date range) - unchanged, unfiltered/unpaginated behavior when
+    none are supplied.
+  - `GET /api/v1/permits/:id/pdf` - authorizes permit visibility before
+    any document lookup; serves only the immutable issued PDF once
+    generated and SHA-256 verified; returns an explicit processing/unavailable status
+    otherwise, never a fake file.
+  - A CEO bootstrap CLI (`npm run bootstrap:ceo`,
+    `backend/src/scripts/bootstrapCeo.ts`) provisions the very first CEO
+    via the existing `privileged_access_events` model - never a public
+    endpoint.
+  - Two operator-run background processors, neither invoked
+    automatically (`npm run outbox:whatsapp:process`,
+    `npm run documents:process`).
+  - Migration 0013 refuses incomplete or ambiguous historical issuance
+    history and idempotently creates one immutable snapshot/PDF job for
+    every earlier issued permit. Historical issuance time remains the
+    lifecycle event time, while snapshot capture/row creation use the
+    actual DB backfill time. Responsibility handoffs abort with 409
+    when authoritative CRO/HSE recipient resolution is empty. Both
+    workers use atomic token-owned leases; PDF retries hash-reconcile an
+    already-uploaded immutable object. Worker failures persist/log only
+    fixed safe categories, never raw external exceptions. CEO bootstrap uses a database
+    singleton reservation and safely reuses a matching Auth identity.
+  - **Genuine manual/external blockers, not yet resolved by this batch:**
+    (1) no real WhatsApp provider is selected or configured - the outbox always
+    reports messages as failed/pending until one is (`DECISIONS.md`'s
+    open decision #2); (2) `SUPABASE_SERVICE_ROLE_KEY` /
+    `SUPABASE_STORAGE_BUCKET` are not configured in any environment yet -
+    PDF generation jobs and the CEO bootstrap CLI both stay in their
+    documented safe-pending/refuses-to-run state until an operator
+    configures them (see `DEPLOYMENT.md`).
 - Backend permit domain (`backend/src/domain/permits/`,
   `backend/src/routes/permits.ts`, `backend/src/routes/auth.ts`): the
   full agreed Permit workflow is now implemented - draft creation/
@@ -77,10 +141,12 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   since `pageSize` alone can turn an innocuous-looking `page` into a
   pathological offset - see
   `domain/permits/validation.ts::{paginationQuerySchema,MAX_PAGINATION_OFFSET}`).
-  PDF generation and WhatsApp notifications remain not implemented -
-  see `DECISIONS.md`'s Open Decisions for what's still genuinely
-  unresolved (the HSE-window gap, the WhatsApp integration method, and
-  whether closure remarks are mandatory).
+  In-app notifications, the WhatsApp outbox foundation, immutable issued
+  Permit+JSA PDF generation, permit search, and lifecycle/audit search
+  are now implemented (see above); the actual WhatsApp provider
+  integration is not - see `DECISIONS.md`'s Open Decisions for what's
+  still genuinely unresolved (the HSE-window gap, the WhatsApp
+  integration method, and whether closure remarks are mandatory).
 - Production hardening: backend-wide rate limiting (global + a stricter,
   identity-keyed limit on mutation endpoints - `middleware/rateLimit.ts`),
   security headers (`helmet`), a bounded JSON body limit with sanitized
@@ -113,10 +179,14 @@ Open Decisions) govern what's actually confirmed or still unresolved.
 - Closure by CRO only (no creator-initiated closure).
 - Renewal after midnight expiry, issuing a new Permit Number while
   preserving the same JSA Number and linking to permit history.
-- Read-only PDF generation for issued and closed permits, reflecting the
-  official form layout.
-- Durable, non-blocking WhatsApp lifecycle notifications (future
-  integration; permit actions must never depend on notification delivery).
+- Read-only, immutable PDF generation for issued and closed permits,
+  reflecting the official form layout - implemented (see above); Supabase
+  Storage upload requires a manual, not-yet-configured service-role
+  credential.
+- Durable, non-blocking in-app notifications - implemented. Durable,
+  non-blocking WhatsApp lifecycle notifications via a future provider
+  integration (permit actions never depend on notification delivery) -
+  outbox foundation implemented, provider not yet selected.
 - Capability-based authorization derived from Team + Position, plus a
   separate privileged management tier (CEO, Site Manager).
 

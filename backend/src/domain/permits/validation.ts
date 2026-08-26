@@ -220,3 +220,105 @@ export const cancelBodySchema = z
 // actually prevents a double renewal). `.strict()` with no fields means
 // any body content at all is rejected, not silently ignored.
 export const renewBodySchema = z.object({}).strict();
+
+// The full persisted status domain (migration 0012) - reused here rather
+// than re-declared, since `permitSearchQuerySchema.status` below must
+// accept any status a caller's access might legitimately be scoped to,
+// not just the queue's subset (permitQueueQuerySchema.status).
+export const permitStatusSchema = z.enum([
+  'DRAFT',
+  'PENDING_CRO',
+  'PENDING_HSE',
+  'PENDING_CORRECTION',
+  'ISSUED',
+  'HELD',
+  'CANCELLED',
+  'CLOSED',
+]);
+
+/**
+ * GET /permits/search filters - every field here maps to a genuinely
+ * existing column (permit_sequence, jsas.jsa_sequence, status,
+ * created_by, company, created_at) - "do NOT invent schema fields".
+ * `.strict()` rejects an unknown query key outright rather than silently
+ * ignoring it (the same discipline every body schema in this file
+ * already applies). Authorization (never revealing a permit the caller
+ * cannot otherwise view) is enforced entirely at the query layer
+ * (domain/permits/search.ts), never by this schema - this only shapes
+ * and bounds the filter values themselves.
+ */
+export const permitSearchQuerySchema = z
+  .object({
+    permitNumber: z.coerce.number().int().positive().optional(),
+    jsaNumber: z.coerce.number().int().positive().optional(),
+    status: permitStatusSchema.optional(),
+    company: companySchema.optional(),
+    createdBy: z.string().uuid().optional(),
+    createdFrom: z.coerce.date().optional(),
+    createdTo: z.coerce.date().optional(),
+    ...rawPaginationQuerySchema.shape,
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    rejectExcessivePaginationOffset(value, ctx);
+    if (value.createdFrom && value.createdTo && value.createdFrom.getTime() > value.createdTo.getTime()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'createdFrom must not be after createdTo',
+        path: ['createdFrom'],
+      });
+    }
+  });
+
+/**
+ * GET /permits/:id/history filter/pagination query - all optional; an
+ * empty query preserves the endpoint's original unfiltered/unpaginated
+ * behavior exactly (see routes/permits.ts). `eventType`/`fromStatus`/
+ * `toStatus` are intentionally plain non-empty strings, not re-declared
+ * enums of the exact current lifecycle-event/status domain (migration
+ * 0012's CHECK constraints are the authoritative list, and already
+ * reject anything invalid at the database level for what's actually
+ * stored - a filter value outside that domain here just correctly
+ * matches zero rows, not a security concern, so there is no need for
+ * this schema to duplicate that enum and risk drifting from it).
+ */
+export const lifecycleEventSearchQuerySchema = z
+  .object({
+    eventType: z.string().trim().min(1).max(100).optional(),
+    actorUserId: z.string().uuid().optional(),
+    fromStatus: z.string().trim().min(1).max(100).optional(),
+    toStatus: z.string().trim().min(1).max(100).optional(),
+    occurredFrom: z.coerce.date().optional(),
+    occurredTo: z.coerce.date().optional(),
+    page: z.coerce.number().int().min(1).optional(),
+    pageSize: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.occurredFrom && value.occurredTo && value.occurredFrom.getTime() > value.occurredTo.getTime()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'occurredFrom must not be after occurredTo',
+        path: ['occurredFrom'],
+      });
+    }
+    if (value.page !== undefined || value.pageSize !== undefined) {
+      rejectExcessivePaginationOffset(
+        { page: value.page ?? 1, pageSize: value.pageSize ?? DEFAULT_PAGE_SIZE },
+        ctx,
+      );
+    }
+  });
+
+/** GET /notifications - bounded pagination plus an optional unread-only filter. */
+export const notificationListQuerySchema = z
+  .object({
+    unread: z.enum(['true', 'false']).optional(),
+    ...rawPaginationQuerySchema.shape,
+  })
+  .strict()
+  .superRefine(rejectExcessivePaginationOffset);
+
+export const notificationIdParamsSchema = z.object({
+  id: z.string().uuid('id must be a UUID'),
+});

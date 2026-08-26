@@ -120,12 +120,74 @@ function assertPermitInvariants(permit: PermitRow): void {
  * relying on wall-clock time or any client-supplied value.
  */
 interface FakeLifecycleEvent {
+  id: string;
   permit_id: string;
   event_type: string;
   actor_user_id: string;
   from_status: string | null;
   to_status: string;
   reason: string | null;
+  occurred_at: string;
+}
+
+/**
+ * The four new tables this batch adds (migration 0013), simulated just
+ * enough for `service.ts`'s workflow-side-effect wiring
+ * (`domain/permits/workflowSideEffects.ts`) to run against `FakeDb`
+ * exactly like it would against real Postgres - idempotent inserts via
+ * the same conflict keys the real UNIQUE constraints enforce, and rolled
+ * back together with everything else on a simulated transaction
+ * failure. Deeper behavioral coverage of these tables' OWN modules lives
+ * in their own dedicated test files (domain/notifications/*.test.ts,
+ * domain/permits/documents.test.ts), which use their own lightweight
+ * query stubs rather than this class.
+ */
+interface FakeNotification {
+  id: string;
+  recipient_user_id: string;
+  permit_id: string | null;
+  source_event_id: string;
+  notification_type: string;
+  title: string;
+  message: string;
+  created_at: string;
+  read_at: string | null;
+}
+
+interface FakeWhatsappOutboxMessage {
+  id: string;
+  permit_id: string;
+  source_event_id: string;
+  event_type: string;
+  payload: string;
+  status: 'PENDING' | 'SENT' | 'FAILED';
+  attempt_count: number;
+  last_error: string | null;
+  last_attempted_at: string | null;
+  sent_at: string | null;
+  created_at: string;
+}
+
+interface FakeIssuedDocumentSnapshot {
+  id: string;
+  permit_id: string;
+  source_event_id: string;
+  snapshot: unknown;
+  snapshot_hash: string;
+  created_at: string;
+}
+
+interface FakePermitDocumentJob {
+  id: string;
+  snapshot_id: string;
+  status: 'PENDING' | 'GENERATED' | 'FAILED';
+  storage_path: string | null;
+  file_hash: string | null;
+  generated_at: string | null;
+  attempt_count: number;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 class FakeDb {
@@ -136,6 +198,17 @@ class FakeDb {
   // back out on a simulated rollback (see `withTransaction`), so it's
   // what a later read would actually see.
   lifecycleEvents: FakeLifecycleEvent[] = [];
+  // Capability -> the set of user ids who hold it, for
+  // `resolveUserIdsWithCapabilities` (notification-recipient
+  // resolution) - see `grantCapability` below. Deliberately NOT part of
+  // the transaction rollback snapshot: granting a capability is test
+  // fixture setup, never something a permit transition itself writes.
+  capabilityAssignments = new Map<string, Set<string>>();
+  zeroRecipientCapabilities = new Set<string>();
+  notifications: FakeNotification[] = [];
+  whatsappOutbox: FakeWhatsappOutboxMessage[] = [];
+  documentSnapshots: FakeIssuedDocumentSnapshot[] = [];
+  documentJobs: FakePermitDocumentJob[] = [];
   queries: Array<{ sql: string; params: unknown[] }> = [];
   now = new Date();
   // Test-only failure injection: when set, the next matching INSERT INTO
@@ -146,6 +219,22 @@ class FakeDb {
   private jsaSeq = 0;
   private permitCounter = 0;
   private jsaCounter = 0;
+  private lifecycleEventCounter = 0;
+  private notificationCounter = 0;
+  private whatsappOutboxCounter = 0;
+  private documentSnapshotCounter = 0;
+  private documentJobCounter = 0;
+
+  /** Test fixture setup: grants `userId` a capability, for the notification-recipient-resolution queries `workflowSideEffects.ts` issues (`resolveCroRecipients`/`resolveHseRecipients`). Not a simulation of the real Team + Position -> Capabilities join - just enough surface for these tests. */
+  grantCapability(userId: string, capability: string): void {
+    const holders = this.capabilityAssignments.get(capability) ?? new Set<string>();
+    holders.add(userId);
+    this.capabilityAssignments.set(capability, holders);
+  }
+
+  denyRecipientsFor(...capabilities: string[]): void {
+    for (const capability of capabilities) this.zeroRecipientCapabilities.add(capability);
+  }
 
   /** Validates (as the real CHECK constraints would) before storing. */
   private setPermit(permit: PermitRow): PermitRow {
@@ -304,15 +393,27 @@ class FakeDb {
           `simulated CHECK constraint violation: permit_lifecycle_events_event_status_consistent (event_type=${eventType}, from_status=${fromStatus}, to_status=${toStatus})`,
         );
       }
+      this.lifecycleEventCounter += 1;
+      const eventId = `event-${this.lifecycleEventCounter}`;
       this.lifecycleEvents.push({
+        id: eventId,
         permit_id: permitId,
         event_type: eventType,
         actor_user_id: actorUserId,
         from_status: fromStatus,
         to_status: toStatus,
         reason: reason ?? null,
+        occurred_at: this.now.toISOString(),
       });
-      return { rows: [] };
+      // Real Postgres only returns a row here when the caller's INSERT
+      // has a RETURNING clause - matched the same way every other
+      // RETURNING-vs-not branch in this fake would be, by what the real
+      // SQL actually contains.
+      return {
+        rows: sql.includes('RETURNING')
+          ? [{ id: eventId, event_type: eventType, actor_user_id: actorUserId, occurred_at: this.now.toISOString(), snapshot_taken_at: this.now.toISOString() }]
+          : [],
+      };
     }
     if (sql.includes('fallback_eligible')) {
       const [id] = params as [string];
@@ -559,8 +660,256 @@ class FakeDb {
       const [permitId] = params as [string];
       const rows = this.lifecycleEvents
         .filter((e) => e.permit_id === permitId)
-        .map((e, index) => ({ id: `event-${permitId}-${index}`, ordinal: String(index + 1), occurred_at: this.now.toISOString(), ...e }));
+        .map((e, index) => ({ ordinal: String(index + 1), ...e }));
       return { rows };
+    }
+
+    // --- Notification-recipient resolution (authz/capabilities.ts::resolveUserIdsWithCapabilities) ---
+    if (sql.includes('FROM user_team_positions')) {
+      const [capabilityNames] = params as [string[]];
+      if (capabilityNames.some((capability) => this.zeroRecipientCapabilities.has(capability))) return { rows: [] };
+      const userIds = new Set<string>();
+      for (const capability of capabilityNames) {
+        for (const userId of this.capabilityAssignments.get(capability) ?? []) userIds.add(userId);
+      }
+      if (userIds.size === 0) {
+        userIds.add(capabilityNames.includes('permit.hse_review') ? 'default-hse-recipient' : 'default-cro-recipient');
+      }
+      return { rows: [...userIds].map((user_id) => ({ user_id })) };
+    }
+
+    // --- Notifications (domain/notifications/service.ts) ---
+    if (sql.startsWith('INSERT INTO notifications')) {
+      const [recipientUserId, permitId, sourceEventId, notificationType, title, message] = params as [
+        string,
+        string | null,
+        string,
+        string,
+        string,
+        string,
+      ];
+      const alreadyExists = this.notifications.some(
+        (n) => n.source_event_id === sourceEventId && n.recipient_user_id === recipientUserId,
+      );
+      if (alreadyExists) return { rows: [] }; // ON CONFLICT (source_event_id, recipient_user_id) DO NOTHING
+      this.notificationCounter += 1;
+      const row: FakeNotification = {
+        id: `notification-${this.notificationCounter}`,
+        recipient_user_id: recipientUserId,
+        permit_id: permitId,
+        source_event_id: sourceEventId,
+        notification_type: notificationType,
+        title,
+        message,
+        created_at: this.now.toISOString(),
+        read_at: null,
+      };
+      this.notifications.push(row);
+      return { rows: [row] };
+    }
+    if (sql.startsWith('SELECT * FROM notifications WHERE id = $1 AND recipient_user_id = $2')) {
+      const [id, recipientUserId] = params as [string, string];
+      const row = this.notifications.find((n) => n.id === id && n.recipient_user_id === recipientUserId);
+      return { rows: row ? [row] : [] };
+    }
+    if (sql.startsWith('UPDATE notifications SET read_at')) {
+      const [id, recipientUserId] = params as [string, string];
+      const index = this.notifications.findIndex((n) => n.id === id && n.recipient_user_id === recipientUserId);
+      if (index === -1) return { rows: [] };
+      const updated: FakeNotification = { ...this.notifications[index]!, read_at: this.now.toISOString() };
+      this.notifications[index] = updated;
+      return { rows: [updated] };
+    }
+    if (sql.startsWith('SELECT * FROM notifications WHERE recipient_user_id')) {
+      const [recipientUserId, pageSize, offset] = params as [string, number, number];
+      const unreadOnly = sql.includes('read_at IS NULL');
+      const rows = this.notifications
+        .filter((n) => n.recipient_user_id === recipientUserId && (!unreadOnly || n.read_at === null))
+        .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
+        .slice(offset, offset + pageSize);
+      return { rows };
+    }
+    if (sql.startsWith('SELECT COUNT(*)::text AS count FROM notifications WHERE recipient_user_id')) {
+      const [recipientUserId] = params as [string];
+      const unreadOnly = sql.includes('read_at IS NULL');
+      const count = this.notifications.filter(
+        (n) => n.recipient_user_id === recipientUserId && (!unreadOnly || n.read_at === null),
+      ).length;
+      return { rows: [{ count: String(count) }] };
+    }
+
+    // --- WhatsApp outbox (domain/notifications/whatsappOutbox.ts) ---
+    if (sql.startsWith('INSERT INTO whatsapp_outbox_messages')) {
+      const [permitId, sourceEventId, eventType, payload] = params as [string, string, string, string];
+      const alreadyExists = this.whatsappOutbox.some((m) => m.source_event_id === sourceEventId);
+      if (alreadyExists) return { rows: [] }; // ON CONFLICT (source_event_id) DO NOTHING
+      this.whatsappOutboxCounter += 1;
+      const row: FakeWhatsappOutboxMessage = {
+        id: `outbox-${this.whatsappOutboxCounter}`,
+        permit_id: permitId,
+        source_event_id: sourceEventId,
+        event_type: eventType,
+        payload,
+        status: 'PENDING',
+        attempt_count: 0,
+        last_error: null,
+        last_attempted_at: null,
+        sent_at: null,
+        created_at: this.now.toISOString(),
+      };
+      this.whatsappOutbox.push(row);
+      return { rows: [row] };
+    }
+    if (sql.startsWith('SELECT * FROM whatsapp_outbox_messages WHERE status IN')) {
+      const [limit] = params as [number];
+      const rows = this.whatsappOutbox
+        .filter((m) => m.status === 'PENDING' || m.status === 'FAILED')
+        .sort((a, b) => a.created_at.localeCompare(b.created_at))
+        .slice(0, limit);
+      return { rows };
+    }
+    if (sql.startsWith('UPDATE whatsapp_outbox_messages') && sql.includes("status = 'SENT'")) {
+      const [id] = params as [string];
+      const index = this.whatsappOutbox.findIndex((m) => m.id === id);
+      if (index !== -1) {
+        const existing = this.whatsappOutbox[index]!;
+        this.whatsappOutbox[index] = {
+          ...existing,
+          status: 'SENT',
+          sent_at: this.now.toISOString(),
+          last_attempted_at: this.now.toISOString(),
+          attempt_count: existing.attempt_count + 1,
+          last_error: null,
+        };
+      }
+      return { rows: [] };
+    }
+    if (sql.startsWith('UPDATE whatsapp_outbox_messages') && sql.includes("status = 'FAILED'")) {
+      const [id, lastError] = params as [string, string];
+      const index = this.whatsappOutbox.findIndex((m) => m.id === id);
+      if (index !== -1) {
+        const existing = this.whatsappOutbox[index]!;
+        this.whatsappOutbox[index] = {
+          ...existing,
+          status: 'FAILED',
+          last_attempted_at: this.now.toISOString(),
+          attempt_count: existing.attempt_count + 1,
+          last_error: lastError,
+        };
+      }
+      return { rows: [] };
+    }
+
+    // --- Immutable issued-document snapshot + PDF job (domain/permits/documents.ts) ---
+    if (sql.startsWith('INSERT INTO issued_document_snapshots')) {
+      const [permitId, sourceEventId, snapshotJson, snapshotHash] = params as [string, string, string, string];
+      const alreadyExists = this.documentSnapshots.some((s) => s.permit_id === permitId);
+      if (alreadyExists) return { rows: [] }; // ON CONFLICT (permit_id) DO NOTHING
+      this.documentSnapshotCounter += 1;
+      const row: FakeIssuedDocumentSnapshot = {
+        id: `snapshot-${this.documentSnapshotCounter}`,
+        permit_id: permitId,
+        source_event_id: sourceEventId,
+        snapshot: JSON.parse(snapshotJson) as unknown,
+        snapshot_hash: snapshotHash,
+        created_at: this.now.toISOString(),
+      };
+      this.documentSnapshots.push(row);
+      return { rows: [{ id: row.id }] };
+    }
+    if (sql.startsWith('SELECT id FROM issued_document_snapshots WHERE permit_id = $1')) {
+      const [permitId] = params as [string];
+      const row = this.documentSnapshots.find((s) => s.permit_id === permitId);
+      return { rows: row ? [{ id: row.id }] : [] };
+    }
+    if (sql.startsWith('INSERT INTO permit_document_jobs')) {
+      const [snapshotId] = params as [string];
+      const alreadyExists = this.documentJobs.some((j) => j.snapshot_id === snapshotId);
+      if (alreadyExists) return { rows: [] }; // ON CONFLICT (snapshot_id) DO NOTHING
+      this.documentJobCounter += 1;
+      const row: FakePermitDocumentJob = {
+        id: `job-${this.documentJobCounter}`,
+        snapshot_id: snapshotId,
+        status: 'PENDING',
+        storage_path: null,
+        file_hash: null,
+        generated_at: null,
+        attempt_count: 0,
+        last_error: null,
+        created_at: this.now.toISOString(),
+        updated_at: this.now.toISOString(),
+      };
+      this.documentJobs.push(row);
+      return { rows: [row] };
+    }
+    if (sql.startsWith('SELECT s.*, j.id AS job_id')) {
+      const [permitId] = params as [string];
+      const snapshot = this.documentSnapshots.find((s) => s.permit_id === permitId);
+      if (!snapshot) return { rows: [] };
+      const job = this.documentJobs.find((j) => j.snapshot_id === snapshot.id);
+      if (!job) return { rows: [] };
+      return {
+        rows: [
+          {
+            ...snapshot,
+            job_id: job.id,
+            job_status: job.status,
+            job_storage_path: job.storage_path,
+            job_file_hash: job.file_hash,
+            job_generated_at: job.generated_at,
+            job_attempt_count: job.attempt_count,
+            job_last_error: job.last_error,
+            job_created_at: job.created_at,
+            job_updated_at: job.updated_at,
+          },
+        ],
+      };
+    }
+    if (sql.startsWith('SELECT j.id, j.snapshot_id, s.snapshot, s.permit_id')) {
+      const [limit] = params as [number];
+      const rows = this.documentJobs
+        .filter((j) => j.status === 'PENDING' || j.status === 'FAILED')
+        .sort((a, b) => a.created_at.localeCompare(b.created_at))
+        .slice(0, limit)
+        .map((j) => {
+          const snapshot = this.documentSnapshots.find((s) => s.id === j.snapshot_id);
+          if (!snapshot) throw new Error(`FakeDb: document job ${j.id} has no matching snapshot`);
+          return { id: j.id, snapshot_id: j.snapshot_id, snapshot: snapshot.snapshot, permit_id: snapshot.permit_id };
+        });
+      return { rows };
+    }
+    if (sql.startsWith('UPDATE permit_document_jobs') && sql.includes("status = 'GENERATED'")) {
+      const [id, storagePath, fileHash] = params as [string, string, string];
+      const index = this.documentJobs.findIndex((j) => j.id === id);
+      if (index !== -1) {
+        const existing = this.documentJobs[index]!;
+        this.documentJobs[index] = {
+          ...existing,
+          status: 'GENERATED',
+          storage_path: storagePath,
+          file_hash: fileHash,
+          generated_at: this.now.toISOString(),
+          attempt_count: existing.attempt_count + 1,
+          last_error: null,
+          updated_at: this.now.toISOString(),
+        };
+      }
+      return { rows: [] };
+    }
+    if (sql.startsWith('UPDATE permit_document_jobs') && sql.includes("status = 'FAILED'")) {
+      const [id, lastError] = params as [string, string];
+      const index = this.documentJobs.findIndex((j) => j.id === id);
+      if (index !== -1) {
+        const existing = this.documentJobs[index]!;
+        this.documentJobs[index] = {
+          ...existing,
+          status: 'FAILED',
+          attempt_count: existing.attempt_count + 1,
+          last_error: lastError,
+          updated_at: this.now.toISOString(),
+        };
+      }
+      return { rows: [] };
     }
 
     throw new Error(`FakeDb: unhandled query: ${sql}`);
@@ -589,11 +938,19 @@ class FakeDb {
       // without building a general transaction log.
       const permitsSnapshot = new Map(this.permits);
       const lifecycleEventsSnapshot = [...this.lifecycleEvents];
+      const notificationsSnapshot = [...this.notifications];
+      const whatsappOutboxSnapshot = [...this.whatsappOutbox];
+      const documentSnapshotsSnapshot = [...this.documentSnapshots];
+      const documentJobsSnapshot = [...this.documentJobs];
       try {
         return await fn({ query });
       } catch (err) {
         this.permits = permitsSnapshot;
         this.lifecycleEvents = lifecycleEventsSnapshot;
+        this.notifications = notificationsSnapshot;
+        this.whatsappOutbox = whatsappOutboxSnapshot;
+        this.documentSnapshots = documentSnapshotsSnapshot;
+        this.documentJobs = documentJobsSnapshot;
         throw err;
       } finally {
         release();
@@ -2575,4 +2932,263 @@ test('JSA data is never modified through the full permit lifecycle (no JSA mutat
   const jsaAfter = await getPermitWithJsa(pendingHse.id, db.deps());
   assert.ok(jsaAfter);
   assert.deepEqual(jsaAfter?.jsa, jsaBefore?.jsa);
+});
+
+// --- Workflow side effects: notifications, WhatsApp outbox, immutable issued-document snapshots ---
+//
+// These prove `service.ts` actually WIRES `workflowSideEffects.ts` into
+// every relevant transition, atomically with it (same simulated
+// transaction, same FakeDb rollback). Deeper behavioral coverage of the
+// notification/outbox/document MODULES themselves (idempotency, payload
+// content, recipient de-duplication, PDF generation, storage adapters)
+// lives in their own dedicated test files
+// (domain/notifications/*.test.ts, domain/permits/documents.test.ts).
+
+test('submitPermit notifies every CRO-capability holder, de-duplicated across multiple capabilities', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('cro-a', 'permit.forward_hse'); // same person, two CRO capabilities
+  db.grantCapability('cro-b', 'permit.hold');
+
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  assert.equal(submitted.outcome, 'ok');
+
+  const recipients = db.notifications.filter((n) => n.permit_id === permit.id).map((n) => n.recipient_user_id);
+  assert.deepEqual(recipients.sort(), ['cro-a', 'cro-b']);
+  assert.equal(db.notifications.filter((n) => n.notification_type === 'PERMIT_SUBMITTED').length, 2);
+});
+
+test('resubmitPermit notifies CRO recipients with a distinct notification type from the original submission', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  const sentBack = await croSendBackToApplicant('cro-a', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
+  if (sentBack.outcome !== 'ok') throw new Error('setup failed');
+
+  const resubmitted = await resubmitPermit('applicant-1', permit.id, { expectedVersion: sentBack.permit.version }, db.deps());
+  assert.equal(resubmitted.outcome, 'ok');
+
+  const types = db.notifications.filter((n) => n.permit_id === permit.id).map((n) => n.notification_type);
+  assert.ok(types.includes('PERMIT_SENT_BACK_FOR_CORRECTION'));
+  assert.ok(types.includes('PERMIT_RESUBMITTED'));
+});
+
+test('forwardToHseReview notifies every HSE-capability holder', async () => {
+  const db = new FakeDb();
+  db.grantCapability('hse-a', 'permit.hse_review');
+  const pendingCro = await (async () => {
+    const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
+    await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+    const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+    if (submitted.outcome !== 'ok') throw new Error('setup failed');
+    return submitted.permit;
+  })();
+
+  const forwarded = await forwardToHseReview('cro-1', pendingCro.id, { expectedVersion: pendingCro.version }, db.deps());
+  assert.equal(forwarded.outcome, 'ok');
+
+  const hseNotifications = db.notifications.filter((n) => n.notification_type === 'PERMIT_FORWARDED_HSE');
+  assert.equal(hseNotifications.length, 1);
+  assert.equal(hseNotifications[0]?.recipient_user_id, 'hse-a');
+});
+
+test('hseApprove issuance: notifies the applicant AND every CRO recipient, creates the immutable issued-document snapshot, its PDF job, and the ISSUED WhatsApp outbox message - all atomically', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.close');
+  const pending = await createPendingHsePermit(db, 'applicant-1');
+
+  const approved = await hseApprove('hse-1', pending.id, { expectedVersion: pending.version }, db.deps());
+  assert.equal(approved.outcome, 'ok');
+  if (approved.outcome !== 'ok') return;
+
+  const issuedNotifications = db.notifications.filter((n) => n.notification_type === 'PERMIT_ISSUED');
+  assert.deepEqual(
+    issuedNotifications.map((n) => n.recipient_user_id).sort(),
+    ['applicant-1', 'cro-a'],
+  );
+
+  assert.equal(db.documentSnapshots.length, 1);
+  assert.equal(db.documentSnapshots[0]?.permit_id, approved.permit.id);
+  const snapshot = db.documentSnapshots[0]?.snapshot as {
+    issuanceEventId: string; issuanceEventType: string; issuanceActorUserId: string; issuanceOccurredAt: string;
+    snapshotTakenAt: string; issuedAt: string;
+  };
+  const issuanceEvent = db.lifecycleEvents.find((event) => event.event_type === 'HSE_APPROVED');
+  assert.equal(snapshot.issuanceEventId, issuanceEvent?.id);
+  assert.equal(snapshot.issuanceEventType, 'HSE_APPROVED');
+  assert.equal(snapshot.issuanceActorUserId, 'hse-1');
+  assert.equal(snapshot.issuanceOccurredAt, issuanceEvent?.occurred_at);
+  assert.equal(snapshot.snapshotTakenAt, issuanceEvent?.occurred_at);
+  assert.equal(snapshot.issuedAt, db.now.toISOString());
+  assert.equal(db.documentJobs.length, 1);
+  assert.equal(db.documentJobs[0]?.status, 'PENDING');
+
+  const outboxMessages = db.whatsappOutbox.filter((m) => m.permit_id === approved.permit.id);
+  assert.equal(outboxMessages.length, 1);
+  assert.equal(outboxMessages[0]?.event_type, 'ISSUED');
+});
+
+test('croFallbackApprove issuance creates the same set of side effects as hseApprove', async () => {
+  const db = new FakeDb();
+  const pending = await createPendingHsePermit(db, 'applicant-1');
+  db.advanceTime(5 * 60 * 1000 + 1);
+
+  const approved = await croFallbackApprove('cro-1', pending.id, { expectedVersion: pending.version }, db.deps());
+  assert.equal(approved.outcome, 'ok');
+  if (approved.outcome !== 'ok') return;
+
+  assert.equal(db.documentSnapshots.length, 1);
+  assert.equal(db.whatsappOutbox.filter((m) => m.event_type === 'ISSUED').length, 1);
+});
+
+test('holdPermit: the WhatsApp outbox message includes the mandatory hold reason', async () => {
+  const db = new FakeDb();
+  const issued = await createIssuedPermit(db, 'applicant-1');
+
+  const held = await holdPermit('cro-1', issued.id, { expectedVersion: issued.version, reason: 'unsafe wind conditions' }, db.deps());
+  assert.equal(held.outcome, 'ok');
+
+  const message = db.whatsappOutbox.find((m) => m.event_type === 'HELD');
+  assert.ok(message);
+  const payload = JSON.parse(message!.payload) as { holdReason?: string };
+  assert.equal(payload.holdReason, 'unsafe wind conditions');
+
+  const notification = db.notifications.find((n) => n.notification_type === 'PERMIT_HELD');
+  assert.equal(notification?.recipient_user_id, 'applicant-1');
+});
+
+test('resumePermit, cancelPermit, and closePermit each notify the applicant and enqueue their own WhatsApp outbox event', async () => {
+  const heldDb = new FakeDb();
+  const held = await createHeldPermit(heldDb, 'applicant-1');
+  const resumed = await resumePermit('cro-1', held.id, { expectedVersion: held.version }, heldDb.deps());
+  assert.equal(resumed.outcome, 'ok');
+  assert.equal(heldDb.notifications.find((n) => n.notification_type === 'PERMIT_RESUMED')?.recipient_user_id, 'applicant-1');
+  assert.equal(heldDb.whatsappOutbox.filter((m) => m.event_type === 'RESUMED').length, 1);
+
+  const cancelDb = new FakeDb();
+  const toCancel = await createIssuedPermit(cancelDb, 'applicant-1');
+  const cancelled = await cancelPermit('cro-1', toCancel.id, { expectedVersion: toCancel.version, reason: 'no longer needed' }, cancelDb.deps());
+  assert.equal(cancelled.outcome, 'ok');
+  assert.equal(cancelDb.notifications.find((n) => n.notification_type === 'PERMIT_CANCELLED')?.recipient_user_id, 'applicant-1');
+  assert.equal(cancelDb.whatsappOutbox.filter((m) => m.event_type === 'CANCELLED').length, 1);
+
+  const closeDb = new FakeDb();
+  const toClose = await createIssuedPermit(closeDb, 'applicant-1');
+  const closed = await closePermit('cro-1', toClose.id, { expectedVersion: toClose.version }, closeDb.deps());
+  assert.equal(closed.outcome, 'ok');
+  assert.equal(closeDb.notifications.find((n) => n.notification_type === 'PERMIT_CLOSED')?.recipient_user_id, 'applicant-1');
+  assert.equal(closeDb.whatsappOutbox.filter((m) => m.event_type === 'CLOSED').length, 1);
+});
+
+test('renewPermit: notifies the applicant with the NEW Permit Number, creates a NEW snapshot for the new permit, and never touches the old permit\'s own snapshot', async () => {
+  const db = new FakeDb();
+  const closed = await createClosedPermit(db, 'applicant-1');
+  const backdated = backdateIssuedAt(db, closed, '2020-01-01T00:00:00.000Z');
+  db.now = new Date('2020-01-02T00:00:00.000Z');
+
+  // The old permit gets its own issued-document snapshot too, exactly
+  // like any other issued permit - renewal must never touch it.
+  const oldPendingHse = await createPendingHsePermit(db, 'other-applicant');
+  const oldApproved = await hseApprove('hse-1', oldPendingHse.id, { expectedVersion: oldPendingHse.version }, db.deps());
+  if (oldApproved.outcome !== 'ok') throw new Error('setup failed');
+  const oldSnapshotBefore = db.documentSnapshots.find((s) => s.permit_id === oldApproved.permit.id);
+  assert.ok(oldSnapshotBefore);
+
+  const renewed = await renewPermit('cro-1', backdated.id, db.deps());
+  assert.equal(renewed.outcome, 'ok');
+  if (renewed.outcome !== 'ok') return;
+
+  const renewalNotification = db.notifications.find((n) => n.notification_type === 'PERMIT_RENEWED');
+  assert.equal(renewalNotification?.recipient_user_id, 'applicant-1');
+  assert.equal(renewalNotification?.permit_id, renewed.permit.id);
+
+  const newSnapshot = db.documentSnapshots.find((s) => s.permit_id === renewed.permit.id);
+  assert.ok(newSnapshot);
+  assert.notEqual(newSnapshot?.id, oldSnapshotBefore?.id);
+
+  const oldSnapshotAfter = db.documentSnapshots.find((s) => s.id === oldSnapshotBefore?.id);
+  assert.deepEqual(oldSnapshotAfter, oldSnapshotBefore);
+
+  const outboxMessage = db.whatsappOutbox.find((m) => m.event_type === 'RENEWED');
+  assert.ok(outboxMessage);
+  const payload = JSON.parse(outboxMessage!.payload) as { previousPermitNumber?: string; newPermitNumber?: string };
+  assert.equal(payload.previousPermitNumber, closed.permit_sequence);
+  assert.equal(payload.newPermitNumber, renewed.permit.permit_sequence);
+});
+
+test('a mid-transaction failure rolls back the notification/outbox/snapshot rows together with the permit transition itself - a successful transition never partially loses its side effects, and a failed one never partially keeps them', async () => {
+  const db = new FakeDb();
+  const pending = await createPendingHsePermit(db, 'applicant-1');
+  const notificationsBefore = db.notifications.length;
+  const outboxBefore = db.whatsappOutbox.length;
+  const snapshotsBefore = db.documentSnapshots.length;
+  const jobsBefore = db.documentJobs.length;
+  db.failNextLifecycleEventInsert = { eventType: 'HSE_APPROVED' };
+
+  await assert.rejects(() => hseApprove('hse-1', pending.id, { expectedVersion: pending.version }, db.deps()));
+
+  assert.equal(db.notifications.length, notificationsBefore);
+  assert.equal(db.whatsappOutbox.length, outboxBefore);
+  assert.equal(db.documentSnapshots.length, snapshotsBefore);
+  assert.equal(db.documentJobs.length, jobsBefore);
+  // The permit itself is unaffected too - still PENDING_HSE.
+  const permitAfter = await getPermitById(pending.id, db.deps());
+  assert.equal(permitAfter?.status, 'PENDING_HSE');
+});
+
+test('submitPermit fails closed and rolls back when no CRO recipient exists', async () => {
+  const db = new FakeDb();
+  db.denyRecipientsFor('permit.cro_review', 'permit.forward_hse', 'permit.send_back', 'permit.close', 'permit.hold', 'permit.cancel');
+  const { permit } = await createDraftPermit('applicant', 'UTC', db.deps());
+  await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, db.deps());
+  const beforeEvents = db.lifecycleEvents.length;
+  const result = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, db.deps());
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'no_responsible_recipient', responsibility: 'CRO' });
+  assert.equal(db.permits.get(permit.id)?.status, 'DRAFT');
+  assert.equal(db.lifecycleEvents.length, beforeEvents);
+  assert.equal(db.notifications.length, 0);
+});
+
+test('resubmitPermit fails closed and rolls back when no CRO recipient exists', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('applicant', 'UTC', db.deps());
+  await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, db.deps());
+  const submitted = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, db.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  const corrected = await croSendBackToApplicant('cro', permit.id, { expectedVersion: submitted.permit.version, reason: 'correct' }, db.deps());
+  if (corrected.outcome !== 'ok') throw new Error('setup failed');
+  db.denyRecipientsFor('permit.cro_review', 'permit.forward_hse', 'permit.send_back', 'permit.close', 'permit.hold', 'permit.cancel');
+  const beforeEvents = db.lifecycleEvents.length;
+  const result = await resubmitPermit('applicant', permit.id, { expectedVersion: corrected.permit.version }, db.deps());
+  assert.equal(result.outcome, 'conflict');
+  assert.equal(db.permits.get(permit.id)?.status, 'PENDING_CORRECTION');
+  assert.equal(db.lifecycleEvents.length, beforeEvents);
+});
+
+test('forward and HSE send-back fail closed when the destination responsibility has no recipient', async () => {
+  const forwardDb = new FakeDb();
+  const { permit } = await createDraftPermit('applicant', 'UTC', forwardDb.deps());
+  await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, forwardDb.deps());
+  const submitted = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, forwardDb.deps());
+  if (submitted.outcome !== 'ok') throw new Error('setup failed');
+  forwardDb.denyRecipientsFor('permit.hse_review');
+  const forwardEvents = forwardDb.lifecycleEvents.length;
+  const forward = await forwardToHseReview('cro', permit.id, { expectedVersion: submitted.permit.version }, forwardDb.deps());
+  assert.deepEqual(forward, { outcome: 'conflict', reason: 'no_responsible_recipient', responsibility: 'HSE' });
+  assert.equal(forwardDb.permits.get(permit.id)?.status, 'PENDING_CRO');
+  assert.equal(forwardDb.lifecycleEvents.length, forwardEvents);
+
+  const sendBackDb = new FakeDb();
+  const pendingHse = await createPendingHsePermit(sendBackDb, 'applicant');
+  sendBackDb.denyRecipientsFor('permit.cro_review', 'permit.forward_hse', 'permit.send_back', 'permit.close', 'permit.hold', 'permit.cancel');
+  const sendBackEvents = sendBackDb.lifecycleEvents.length;
+  const sentBack = await hseSendBackToCro('hse', pendingHse.id, { expectedVersion: pendingHse.version, reason: 'review again' }, sendBackDb.deps());
+  assert.deepEqual(sentBack, { outcome: 'conflict', reason: 'no_responsible_recipient', responsibility: 'CRO' });
+  assert.equal(sendBackDb.permits.get(pendingHse.id)?.status, 'PENDING_HSE');
+  assert.equal(sendBackDb.lifecycleEvents.length, sendBackEvents);
 });

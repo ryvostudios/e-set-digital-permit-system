@@ -5,9 +5,12 @@ import {
   canViewPermit,
   computeAvailableActions,
   computePermitValidity,
+  computeViewableStatuses,
   STATUS_VIEW_CAPABILITIES,
 } from '../domain/permits/access.js';
+import { getDocumentForPermit, hasExpectedFileHash, resolveDocumentStorageAdapter } from '../domain/permits/documents.js';
 import { toDisplayNumber } from '../domain/permits/numbering.js';
+import { searchPermitLifecycleEvents, searchPermits } from '../domain/permits/search.js';
 import {
   cancelPermit,
   closePermit,
@@ -42,9 +45,11 @@ import {
   holdBodySchema,
   hseApproveBodySchema,
   hseSendBackBodySchema,
+  lifecycleEventSearchQuerySchema,
   paginationQuerySchema,
   permitIdParamsSchema,
   permitQueueQuerySchema,
+  permitSearchQuerySchema,
   renewBodySchema,
   resubmitBodySchema,
   resumeBodySchema,
@@ -195,6 +200,52 @@ permitsRouter.get('/permits/queue', requireAuth, async (req: Request, res: Respo
 });
 
 /**
+ * Permit search/filtering - scoped by the EXACT SAME access model as
+ * every other permit read endpoint (`canViewPermit`/
+ * `STATUS_VIEW_CAPABILITIES`, via `computeViewableStatuses`): a general
+ * authenticated user searches only within permits they already own or
+ * already hold a capability-granted view into - "a search must NEVER
+ * reveal a permit the caller cannot normally view; do not add broad
+ * access merely for search". Filters map only to genuinely existing
+ * columns (Permit Number, JSA Number, status, applicant/created_by, date
+ * range, company - see `permitSearchQuerySchema`); bounded pagination,
+ * deterministic ordering, and parameterized SQL are enforced by
+ * `domain/permits/search.ts::searchPermits`, the same module the COUNT
+ * query goes through too, so result count and returned rows can never
+ * diverge in authorization scope.
+ *
+ * Registered before `/permits/:id` for the same routing reason as
+ * `/permits/mine` and `/permits/queue` above.
+ */
+permitsRouter.get('/permits/search', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  if (!userId) return;
+
+  const parsed = permitSearchQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    sendValidationError(res, parsed.error.issues);
+    return;
+  }
+
+  const capabilities = await resolveUserCapabilities(userId);
+  const page = await searchPermits(
+    { viewerId: userId, allowedStatuses: computeViewableStatuses(capabilities) },
+    {
+      permitNumber: parsed.data.permitNumber,
+      jsaNumber: parsed.data.jsaNumber,
+      status: parsed.data.status,
+      company: parsed.data.company,
+      createdBy: parsed.data.createdBy,
+      createdFrom: parsed.data.createdFrom,
+      createdTo: parsed.data.createdTo,
+    },
+    { page: parsed.data.page, pageSize: parsed.data.pageSize },
+  );
+
+  res.status(200).json({ permits: page.items.map(serializePermit), pagination: serializePagination(page) });
+});
+
+/**
  * Permit detail, together with its JSA, computed validity (once issued),
  * and a display-only `availableActions` hint. Access is granted to the
  * creator (any status) or to anyone holding a capability applicable to
@@ -249,8 +300,81 @@ permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Respons
  * permit detail (permit fetched/authorized first, via `getPermitById` +
  * `canViewPermit`, before anything else is read) - but this endpoint has
  * no use for the JSA at all, so it never fetches one.
+ *
+ * With NO filter/pagination query params, behaves exactly as before
+ * (every event, unfiltered, in chronological order, under the `events`
+ * key alone) - preserving the existing contract exactly. Supplying any
+ * filter (`eventType`, `actorUserId`, `fromStatus`, `toStatus`,
+ * `occurredFrom`/`occurredTo`) or pagination (`page`/`pageSize`) switches
+ * to the filtered/paginated path (`domain/permits/search.ts::searchPermitLifecycleEvents`),
+ * which additionally returns a `pagination` block - "Filtering/search
+ * over permit lifecycle history... Pagination + deterministic
+ * chronological ordering". READ ONLY either way: this never creates an
+ * update/delete/history-editing capability - the table's own append-only
+ * triggers make that impossible regardless of what a query here asks
+ * for.
  */
 permitsRouter.get('/permits/:id/history', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  if (!userId) return;
+
+  const params = permitIdParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    sendValidationError(res, params.error.issues);
+    return;
+  }
+  const filterQuery = lifecycleEventSearchQuerySchema.safeParse(req.query);
+  if (!filterQuery.success) {
+    sendValidationError(res, filterQuery.error.issues);
+    return;
+  }
+
+  const permit = await getPermitById(params.data.id);
+  if (!permit) {
+    sendNotFound(res);
+    return;
+  }
+
+  const capabilities = await resolveUserCapabilities(userId);
+  if (!canViewPermit(permit, userId, capabilities)) {
+    sendNotFound(res);
+    return;
+  }
+
+  const hasFilters = Object.keys(filterQuery.data).length > 0;
+  if (!hasFilters) {
+    const events: LifecycleEventRow[] = await getPermitLifecycleEvents(params.data.id);
+    res.status(200).json({ events });
+    return;
+  }
+
+  const page = await searchPermitLifecycleEvents(
+    params.data.id,
+    {
+      eventType: filterQuery.data.eventType,
+      actorUserId: filterQuery.data.actorUserId,
+      fromStatus: filterQuery.data.fromStatus,
+      toStatus: filterQuery.data.toStatus,
+      occurredFrom: filterQuery.data.occurredFrom,
+      occurredTo: filterQuery.data.occurredTo,
+    },
+    { page: filterQuery.data.page ?? 1, pageSize: filterQuery.data.pageSize ?? 20 },
+  );
+  res.status(200).json({ events: page.items, pagination: serializePagination(page) });
+});
+
+/**
+ * The immutable, combined Permit+JSA PDF for an issued (or post-issued:
+ * HELD/CANCELLED/CLOSED) permit - "CORE BUSINESS RULE: every ISSUED
+ * permit has ONE combined PDF containing PERMIT then JSA". Authorizes
+ * the permit FIRST (`getPermitById` + `canViewPermit`), exactly like
+ * permit detail/history above, BEFORE ever looking up the document -
+ * "authorize permit visibility BEFORE document/file retrieval". Never
+ * returns a fake/placeholder PDF: if generation/storage hasn't completed
+ * yet (or the configured storage adapter isn't set up), this responds
+ * with an explicit processing/unavailable status instead.
+ */
+permitsRouter.get('/permits/:id/pdf', requireAuth, async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   if (!userId) return;
 
@@ -272,8 +396,60 @@ permitsRouter.get('/permits/:id/history', requireAuth, async (req: Request, res:
     return;
   }
 
-  const events: LifecycleEventRow[] = await getPermitLifecycleEvents(params.data.id);
-  res.status(200).json({ events });
+  // Only ISSUED (or an issued permit's later HELD/CANCELLED/CLOSED
+  // state) ever has a document at all - `issued_at` is set if and only
+  // if the permit has ever been issued (permits_issued_at_consistent).
+  // DRAFT/PENDING_* permits are never issued, so this is a 404, not a
+  // "still generating" response - there is nothing to generate yet.
+  if (!permit.issued_at) {
+    sendNotFound(res);
+    return;
+  }
+
+  const lookup = await getDocumentForPermit(params.data.id);
+  if (!lookup) {
+    // An issued permit that somehow has no snapshot row would be a bug
+    // elsewhere (issuance is supposed to create one atomically) - still
+    // handled safely here as "not yet available" rather than a 500.
+    res.status(202).json({ status: 'processing', message: 'The permit document has not been generated yet' });
+    return;
+  }
+
+  if (lookup.job.status !== 'GENERATED' || !lookup.job.storage_path) {
+    res.status(202).json({
+      status: lookup.job.status === 'FAILED' ? 'failed' : 'processing',
+      message:
+        lookup.job.status === 'FAILED'
+          ? 'PDF generation previously failed and will be retried'
+          : 'The permit document is still being generated',
+    });
+    return;
+  }
+
+  const storage = resolveDocumentStorageAdapter();
+  const download = await storage.download(lookup.job.storage_path);
+  if (!download.ok) {
+    res.status(503).json({ error: 'storage_unavailable', message: 'The permit document could not be retrieved right now' });
+    return;
+  }
+
+  if (!hasExpectedFileHash(download.data, lookup.job.file_hash)) {
+    console.error(
+      JSON.stringify({
+        event: 'permit_document_integrity_failure',
+        requestId: req.requestId,
+        permitId: permit.id,
+      }),
+    );
+    res.status(500).json({ error: 'document_integrity_error', message: 'The permit document failed integrity verification' });
+    return;
+  }
+
+  const safeFileName = `permit-${toDisplayNumber(BigInt(permit.permit_sequence))}.pdf`;
+  res.status(200);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeFileName}"`);
+  res.send(download.data);
 });
 
 permitsRouter.patch(

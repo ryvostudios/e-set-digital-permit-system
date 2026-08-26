@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { canViewPermit, computeAvailableActions, computePermitValidity } from './access.js';
+import { canViewPermit, computeAvailableActions, computePermitValidity, computeViewableStatuses } from './access.js';
 import type { PermitRow } from './service.js';
 
 function basePermit(
@@ -362,4 +362,38 @@ test('computePermitValidity: a CANCELLED permit is NEVER valid, even strictly be
   const wellBeforeWhatWouldHaveBeenExpiry = new Date('2026-03-05T10:00:00.000Z');
   const result = computePermitValidity(permit, wellBeforeWhatWouldHaveBeenExpiry);
   assert.equal(result?.isValid, false);
+});
+
+// --- computeViewableStatuses (used by domain/permits/search.ts) ---
+
+test('computeViewableStatuses: no capabilities grants no non-owner status visibility, including DRAFT (never queue-able)', () => {
+  assert.deepEqual(computeViewableStatuses(new Set()), []);
+});
+
+test('computeViewableStatuses: a single relevant capability grants exactly the statuses it appears under in STATUS_VIEW_CAPABILITIES', () => {
+  const statuses = computeViewableStatuses(new Set(['permit.resume']));
+  assert.deepEqual(statuses.sort(), ['HELD']);
+});
+
+test('computeViewableStatuses: holding every CRO/HSE capability grants every non-DRAFT status', () => {
+  const statuses = computeViewableStatuses(
+    new Set([
+      'permit.cro_review',
+      'permit.forward_hse',
+      'permit.hse_review',
+      'permit.fallback_approve',
+      'permit.send_back',
+      'permit.close',
+      'permit.resume',
+      'permit.cancel',
+    ]),
+  );
+  assert.deepEqual(
+    statuses.sort(),
+    ['CANCELLED', 'CLOSED', 'HELD', 'ISSUED', 'PENDING_CORRECTION', 'PENDING_CRO', 'PENDING_HSE'].sort(),
+  );
+});
+
+test('computeViewableStatuses: an unrelated capability grants no visibility', () => {
+  assert.deepEqual(computeViewableStatuses(new Set(['permit.create'])), []);
 });

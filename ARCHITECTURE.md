@@ -140,23 +140,54 @@ transactions, optimistic concurrency (version checks), row locks where
 needed, and appropriate constraints. See `DATABASE.md` and `SECURITY.md`
 for detail. Management/privileged users do not bypass these protections.
 
-## Notifications (Future)
+## Notifications and Documents
 
-WhatsApp lifecycle notifications are an asynchronous, best-effort
-integration layered on top of committed permit transactions, not a
-dependency of them:
+In-app notifications (`domain/notifications/`) are implemented:
+database-backed, persistent, recipient-scoped, created atomically with
+the permit transition that causes them. WhatsApp lifecycle notifications
+follow the outbox pattern below - the durable outbox itself is
+implemented; the actual provider/send integration is not (see
+`DECISIONS.md`'s open WhatsApp-integration-method decision):
 
 ```
-Permit transaction commits
-    -> durable notification/outbox record
-    -> WhatsApp agent/integration
+Permit transaction commits (same DB transaction)
+    -> notification row(s) (recipient-scoped, in-app)
+    -> durable WhatsApp outbox record (PENDING)
+    -> [operator-run sender, once a provider is selected]
+    -> WhatsApp provider
     -> send
     -> report SENT/FAILED
 ```
 
-Permit/database actions must remain valid and complete even if WhatsApp
-delivery is unavailable, delayed, or fails. The specific integration
-method is not yet decided (see `DECISIONS.md`).
+Permit/database actions remain valid and complete even if WhatsApp
+delivery is unavailable, delayed, unconfigured, or fails - enqueueing the
+outbox row is the only thing that happens inside the permit transaction;
+sending is always a separate, later, non-blocking step.
+
+Responsibility handoffs are stricter than ordinary informational
+notifications: submit/resubmit requires at least one authoritative CRO,
+and forward/HSE-send-back requires at least one authoritative HSE/CRO
+respectively. Zero recipients raises a domain conflict inside the same
+transaction, rolling back status, lifecycle event, and all side effects.
+Both outbox and PDF workers claim work atomically with token-owned leases;
+stale leases are recoverable and obsolete workers cannot finalize them.
+
+The immutable issued Permit+JSA document follows the same non-blocking
+shape (`domain/permits/documents.ts`): issuance atomically captures an
+immutable business-content snapshot, then a separate, retryable job
+generates the PDF (via `pdfkit`) and uploads it to a private Supabase
+Storage bucket using a server-only service-role credential
+(`SUPABASE_SERVICE_ROLE_KEY` - never exposed to the frontend). Issuance
+itself never depends on PDF generation or Storage being available.
+Migration 0013 also backfills all earlier genuinely issued permits from
+their immutable Permit/JSA rows and unique authoritative issuance event;
+it aborts rather than fabricate or silently skip missing approval data.
+The backfill preserves the historical issuance time separately from the
+DB-authoritative time at which migration 0013 captures the snapshot.
+Downloads authorize the permit before document/storage lookup and verify
+the downloaded bytes against the immutable SHA-256 file hash.
+Workers classify failures into fixed safe codes; raw external exception
+messages are never persisted or logged.
 
 ## Production Hardening
 

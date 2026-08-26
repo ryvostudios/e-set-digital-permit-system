@@ -93,6 +93,29 @@ export const envSchema = z
     SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
     SUPABASE_PUBLISHABLE_KEY: z.string().min(1, 'SUPABASE_PUBLISHABLE_KEY is required'),
 
+    // Privileged Supabase Admin API credential - server-only, NEVER sent
+    // to the frontend. Optional: the server must start and the full
+    // permit workflow must keep working without it (issuance never
+    // depends on an external file/service being available). Only two
+    // things actually need it - both explicitly manual/operator-run, not
+    // part of normal request handling: the CEO bootstrap CLI
+    // (src/scripts/bootstrapCeo.ts, which creates/resolves the first CEO
+    // via the Supabase Admin API) and the Supabase Storage document
+    // adapter (domain/permits/documents.ts, which uploads the immutable
+    // issued Permit+JSA PDF to a private bucket). When unset, both stay
+    // in their documented "manual configuration pending" state rather
+    // than failing anything - see DEPLOYMENT.md.
+    SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
+
+    // The private Supabase Storage bucket the issued Permit+JSA PDF is
+    // uploaded to. Only meaningful together with
+    // SUPABASE_SERVICE_ROLE_KEY above; a default name is provided so an
+    // operator who has already configured the service-role key doesn't
+    // also have to invent a bucket name, but the bucket itself must
+    // still be created (private, not public) in the Supabase project -
+    // this backend does not create buckets.
+    SUPABASE_STORAGE_BUCKET: z.string().min(1).default('issued-permit-documents'),
+
     // The IANA time zone permit validity is evaluated in (next-midnight
     // expiry). No default - the site's actual timezone must be configured
     // explicitly rather than assumed.
@@ -165,6 +188,14 @@ export const envSchema = z
         path: ['SUPABASE_PUBLISHABLE_KEY'],
         message:
           'SUPABASE_PUBLISHABLE_KEY looks like a privileged service-role key, not the publishable/anon key - refusing to start with a service-role credential in a value read by frontend-facing config',
+      });
+    }
+
+    if (value.SUPABASE_SERVICE_ROLE_KEY && value.SUPABASE_SERVICE_ROLE_KEY === value.SUPABASE_PUBLISHABLE_KEY) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SUPABASE_SERVICE_ROLE_KEY'],
+        message: 'SUPABASE_SERVICE_ROLE_KEY must not be the same value as SUPABASE_PUBLISHABLE_KEY',
       });
     }
 

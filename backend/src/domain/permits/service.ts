@@ -2,6 +2,20 @@ import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 import { query, withTransaction } from '../../db/pool.js';
 import { MAX_PAGE_SIZE, MAX_PAGINATION_OFFSET } from './validation.js';
 import { isPermitValid } from './validity.js';
+import type { IssuanceEventMetadata } from './documents.js';
+import {
+  onCroSentBackToApplicant,
+  onForwardedToHse,
+  onHseSentBackToCro,
+  onPermitCancelled,
+  onPermitClosed,
+  onPermitHeld,
+  onPermitIssued,
+  onPermitRenewed,
+  onPermitResumed,
+  onPermitSubmittedOrResubmitted,
+  ResponsibilityRecipientUnavailableError,
+} from './workflowSideEffects.js';
 
 /** Postgres SQLSTATE for a unique-constraint violation. */
 const UNIQUE_VIOLATION_SQLSTATE = '23505';
@@ -105,6 +119,26 @@ export interface PermitsServiceDeps {
 }
 
 const defaultDeps: PermitsServiceDeps = { query, withTransaction };
+
+type MissingResponsibilityRecipientOutcome = {
+  outcome: 'conflict';
+  reason: 'no_responsible_recipient';
+  responsibility: 'CRO' | 'HSE';
+};
+
+async function runResponsibilityHandoff<T>(
+  deps: PermitsServiceDeps,
+  work: (client: PoolClient) => Promise<T>,
+): Promise<T | MissingResponsibilityRecipientOutcome> {
+  try {
+    return await deps.withTransaction(work);
+  } catch (err) {
+    if (err instanceof ResponsibilityRecipientUnavailableError) {
+      return { outcome: 'conflict', reason: 'no_responsible_recipient', responsibility: err.responsibility };
+    }
+    throw err;
+  }
+}
 
 function requireRow<T>(rows: T[]): T {
   const row = rows[0];
@@ -437,6 +471,7 @@ export interface SubmitInput {
 export type SubmitOutcome =
   | { outcome: 'not_found' }
   | { outcome: 'conflict'; reason: 'not_draft' | 'stale_version' }
+  | MissingResponsibilityRecipientOutcome
   | { outcome: 'invalid'; reason: 'missing_required_fields' }
   | { outcome: 'ok'; permit: PermitRow };
 
@@ -460,7 +495,7 @@ export async function submitPermit(
   input: SubmitInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<SubmitOutcome> {
-  return deps.withTransaction(async (client) => {
+  return runResponsibilityHandoff(deps, async (client) => {
     const existingResult = await client.query<PermitRow>(
       'SELECT * FROM permits WHERE id = $1 AND created_by = $2 FOR UPDATE',
       [permitId, actorUserId],
@@ -480,11 +515,14 @@ export async function submitPermit(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
-       VALUES ($1, $2, $3, $4, $5)`,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
       [permitId, 'SUBMITTED', actorUserId, 'DRAFT', 'PENDING_CRO'],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    await onPermitSubmittedOrResubmitted(client.query.bind(client), { permit, sourceEventId, resubmitted: false });
 
     return { outcome: 'ok', permit };
   });
@@ -497,6 +535,7 @@ export interface ResubmitInput {
 export type ResubmitOutcome =
   | { outcome: 'not_found' }
   | { outcome: 'conflict'; reason: 'not_pending_correction' | 'stale_version' }
+  | MissingResponsibilityRecipientOutcome
   | { outcome: 'invalid'; reason: 'missing_required_fields' }
   | { outcome: 'ok'; permit: PermitRow };
 
@@ -520,7 +559,7 @@ export async function resubmitPermit(
   input: ResubmitInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<ResubmitOutcome> {
-  return deps.withTransaction(async (client) => {
+  return runResponsibilityHandoff(deps, async (client) => {
     const existingResult = await client.query<PermitRow>(
       'SELECT * FROM permits WHERE id = $1 AND created_by = $2 FOR UPDATE',
       [permitId, actorUserId],
@@ -540,11 +579,14 @@ export async function resubmitPermit(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
-       VALUES ($1, $2, $3, $4, $5)`,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
       [permitId, 'APPLICANT_RESUBMITTED', actorUserId, 'PENDING_CORRECTION', 'PENDING_CRO'],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    await onPermitSubmittedOrResubmitted(client.query.bind(client), { permit, sourceEventId, resubmitted: true });
 
     return { outcome: 'ok', permit };
   });
@@ -563,6 +605,7 @@ export interface ForwardToHseInput {
 export type ForwardToHseOutcome =
   | { outcome: 'not_found' }
   | { outcome: 'conflict'; reason: 'not_pending_cro' | 'stale_version' }
+  | MissingResponsibilityRecipientOutcome
   | { outcome: 'ok'; permit: PermitRow };
 
 /**
@@ -580,7 +623,7 @@ export async function forwardToHseReview(
   input: ForwardToHseInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<ForwardToHseOutcome> {
-  return deps.withTransaction(async (client) => {
+  return runResponsibilityHandoff(deps, async (client) => {
     const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
       permitId,
     ]);
@@ -602,11 +645,14 @@ export async function forwardToHseReview(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
-       VALUES ($1, $2, $3, $4, $5)`,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
       [permitId, 'CRO_FORWARDED_HSE', actorUserId, 'PENDING_CRO', 'PENDING_HSE'],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    await onForwardedToHse(client.query.bind(client), { permit, sourceEventId });
 
     return { outcome: 'ok', permit };
   });
@@ -656,11 +702,14 @@ export async function croSendBackToApplicant(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
       [permitId, 'CRO_SENT_BACK_TO_APPLICANT', actorUserId, 'PENDING_CRO', 'PENDING_CORRECTION', reason],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    await onCroSentBackToApplicant(client.query.bind(client), { permit, sourceEventId });
 
     return { outcome: 'ok', permit };
   });
@@ -711,11 +760,16 @@ export async function hseApprove(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<IssuanceEventMetadata>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
-       VALUES ($1, $2, $3, $4, $5)`,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, event_type, actor_user_id, occurred_at, now() AS snapshot_taken_at`,
       [permitId, 'HSE_APPROVED', actorUserId, 'PENDING_HSE', 'ISSUED'],
     );
+    const issuanceEvent = requireRow(eventResult.rows);
+    const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
+    const jsa = requireRow(jsaResult.rows);
+    await onPermitIssued(client.query.bind(client), { permit, jsa, issuanceEvent });
 
     return { outcome: 'ok', permit };
   });
@@ -729,6 +783,7 @@ export interface HseSendBackInput {
 export type HseSendBackOutcome =
   | { outcome: 'not_found' }
   | { outcome: 'conflict'; reason: 'not_pending_hse' | 'stale_version' }
+  | MissingResponsibilityRecipientOutcome
   | { outcome: 'ok'; permit: PermitRow };
 
 /**
@@ -762,7 +817,7 @@ export async function hseSendBackToCro(
   input: HseSendBackInput,
   deps: PermitsServiceDeps = defaultDeps,
 ): Promise<HseSendBackOutcome> {
-  return deps.withTransaction(async (client) => {
+  return runResponsibilityHandoff(deps, async (client) => {
     const existingResult = await client.query<PermitRow>('SELECT * FROM permits WHERE id = $1 FOR UPDATE', [
       permitId,
     ]);
@@ -785,11 +840,14 @@ export async function hseSendBackToCro(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
       [permitId, 'HSE_SENT_BACK_TO_CRO', actorUserId, 'PENDING_HSE', 'PENDING_CRO', reason],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    await onHseSentBackToCro(client.query.bind(client), { permit, sourceEventId });
 
     return { outcome: 'ok', permit };
   });
@@ -849,11 +907,16 @@ export async function croFallbackApprove(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<IssuanceEventMetadata>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
-       VALUES ($1, $2, $3, $4, $5)`,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, event_type, actor_user_id, occurred_at, now() AS snapshot_taken_at`,
       [permitId, 'CRO_FALLBACK_APPROVED', actorUserId, 'PENDING_HSE', 'ISSUED'],
     );
+    const issuanceEvent = requireRow(eventResult.rows);
+    const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
+    const jsa = requireRow(jsaResult.rows);
+    await onPermitIssued(client.query.bind(client), { permit, jsa, issuanceEvent });
 
     return { outcome: 'ok', permit };
   });
@@ -903,11 +966,16 @@ export async function holdPermit(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
       [permitId, 'HELD', actorUserId, 'ISSUED', 'HELD', input.reason],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
+    const jsa = requireRow(jsaResult.rows);
+    await onPermitHeld(client.query.bind(client), { permit, jsa, sourceEventId, holdReason: input.reason });
 
     return { outcome: 'ok', permit };
   });
@@ -976,11 +1044,16 @@ export async function resumePermit(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
-       VALUES ($1, $2, $3, $4, $5)`,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
       [permitId, 'RESUMED', actorUserId, 'HELD', 'ISSUED'],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
+    const jsa = requireRow(jsaResult.rows);
+    await onPermitResumed(client.query.bind(client), { permit, jsa, sourceEventId });
 
     return { outcome: 'ok', permit };
   });
@@ -1046,11 +1119,16 @@ export async function cancelPermit(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
       [permitId, 'CANCELLED', actorUserId, fromStatus, 'CANCELLED', reason],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
+    const jsa = requireRow(jsaResult.rows);
+    await onPermitCancelled(client.query.bind(client), { permit, jsa, sourceEventId });
 
     return { outcome: 'ok', permit };
   });
@@ -1146,11 +1224,16 @@ export async function closePermit(
     );
     const permit = requireRow(updateResult.rows);
 
-    await client.query(
+    const eventResult = await client.query<{ id: string }>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status, reason)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
       [permitId, PERMIT_CLOSED_EVENT_TYPE, actorUserId, fromStatus, 'CLOSED', closureRemarks],
     );
+    const sourceEventId = requireRow(eventResult.rows).id;
+    const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
+    const jsa = requireRow(jsaResult.rows);
+    await onPermitClosed(client.query.bind(client), { permit, jsa, sourceEventId });
 
     return { outcome: 'ok', permit };
   });
@@ -1239,14 +1322,18 @@ export async function renewPermit(
       throw err;
     }
 
-    await client.query(
+    const eventResult = await client.query<IssuanceEventMetadata>(
       `INSERT INTO permit_lifecycle_events (permit_id, event_type, actor_user_id, from_status, to_status)
-       VALUES ($1, $2, $3, $4, $5)`,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, event_type, actor_user_id, occurred_at, now() AS snapshot_taken_at`,
       [permit.id, 'RENEWED', actorUserId, null, 'ISSUED'],
     );
+    const issuanceEvent = requireRow(eventResult.rows);
 
     const jsaResult = await client.query<JsaRow>('SELECT * FROM jsas WHERE id = $1', [permit.jsa_id]);
     const jsa = requireRow(jsaResult.rows);
+
+    await onPermitRenewed(client.query.bind(client), { newPermit: permit, oldPermit: existing, jsa, issuanceEvent });
 
     return { outcome: 'ok', permit, jsa };
   });

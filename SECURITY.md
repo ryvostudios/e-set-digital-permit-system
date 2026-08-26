@@ -49,7 +49,18 @@ pass.
 - **Production HTTPS** for all traffic.
 - **Secure backups/recovery** for the production database.
 - **Immutable historical data** where required (issued/closed permit
-  snapshots, audit/lifecycle history).
+  snapshots, audit/lifecycle history). Implemented: once a permit is
+  ISSUED, its business-content snapshot (`issued_document_snapshots`,
+  migration `0013`) can never be updated, deleted, or truncated by
+  anyone - including the CEO or Site Manager - a stricter rule than
+  ordinary audit-log append-only governance, enforced at the database
+  level the same way `permit_lifecycle_events` already is. The generated
+  PDF's stored file reference/hash is likewise locked once generation
+  succeeds.
+  Migration 0013 transactionally backfills every earlier issued permit
+  from its unique authoritative issuance lifecycle event, refusing the
+  migration if any such event is missing or ambiguous. PDF downloads
+  verify private object bytes against the immutable stored hash.
 
 ## Authorization Model Requirements
 
@@ -82,6 +93,19 @@ requirements:
   performing a workflow action.
 - V5.19's legacy `SYSTEM_ADMIN` role is not assumed to exist in this
   system (see `DECISIONS.md`).
+- **Initial CEO provisioning** (implemented): the very first CEO is
+  created only by a server-only CLI (`npm run bootstrap:ceo`), never
+  through public signup, a UI flow, or any HTTP endpoint - there is no
+  code path that lets a request, authenticated or not, create or grant
+  CEO access. It refuses to run without a server-only service-role
+  credential configured, refuses to create a second active CEO if one
+  already exists, never derives authorization from Supabase Auth
+  `user_metadata`, and never logs the bootstrap password. See
+  `DECISIONS.md` → "CEO Bootstrap" and `DEPLOYMENT.md`.
+
+  A fixed-key database reservation prevents concurrent initial-CEO
+  creation; its lease lets retry reconcile an Auth identity created
+  before a transient database failure.
 
 ## Data Integrity / No Silent Overwrite
 
@@ -144,6 +168,9 @@ production-hardening batch:
   client; database errors are always passed through
   `db/pool.ts::toSafeDbErrorMessage` before being logged, and never
   logged or returned verbatim.
+  WhatsApp/PDF workers follow the same rule: provider and Storage
+  exceptions become fixed safe categories in `last_error`, and their CLI
+  entry points emit sanitized structured failures without raw messages.
 - **Secure session/authentication handling**: `requireAuth` verifies the
   Supabase access token server-side on every request (never trusts a
   client-supplied identity) and fails closed (401) on any missing,
@@ -152,11 +179,38 @@ production-hardening batch:
 
 ## Notification Security
 
-- WhatsApp lifecycle notifications are decoupled from the permit
-  transaction (outbox pattern); notification failures never invalidate
-  or block a committed permit action.
-- Future message processing must use idempotency/unique event IDs to
-  prevent duplicate sends.
+- **In-app notifications** (implemented): the recipient is always
+  resolved server-side from the authoritative Team + Position ->
+  Capabilities model (or the permit's own `created_by`) -
+  `domain/notifications/recipients.ts`. A client can never create a
+  notification for, or choose the recipient of, an arbitrary user; there
+  is no client-facing "create notification" endpoint at all - every
+  notification is a side effect of an authorized workflow transition.
+  `GET /api/v1/notifications` and `POST /api/v1/notifications/:id/read`
+  are scoped by `recipient_user_id = caller` only - a notification
+  belonging to another user is never visible or markable (404, not 403,
+  for one that exists but isn't the caller's - the same IDOR-safe
+  pattern as every other object-access check in this API). Idempotent
+  via a database uniqueness constraint on
+  (`source_event_id`, `recipient_user_id`) - a retried/racing transition
+  can never create a duplicate.
+- **WhatsApp outbox** (implemented, provider not yet selected): decoupled
+  from the permit transaction (outbox pattern) - a permit transition only
+  ever writes a local, durable outbox row inside its own transaction;
+  notification/outbox failures never invalidate or block a committed
+  permit action, and the transition never depends on WhatsApp (or any
+  provider) being reachable. The destination is never client-influenced
+  (always the one configured company group, resolved server-side once a
+  provider exists). Idempotent via a database uniqueness constraint on
+  `source_event_id` - exactly one outbox message per qualifying lifecycle
+  event, even under a retried/racing transition. The message payload is
+  server-generated only, and never contains a credential/secret.
+- No workflow notification or outbox message text can cause log/header
+  injection: every value rendered into a title/message/payload is either
+  a server-derived Permit/JSA number or free text that already passed
+  this codebase's `.trim().max(2000)` validation on the way in
+  (`domain/permits/validation.ts`) - no raw client input is ever embedded
+  unvalidated.
 
 ## Development Security Gate (per implementation section)
 

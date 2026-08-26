@@ -2,6 +2,18 @@ import { readFileSync } from 'node:fs';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg';
 import { env } from '../config/env.js';
 
+/**
+ * Shared shape for anything that can run a parameterized query - either
+ * the pool-wide `query` below, or a `PoolClient.query` bound inside an
+ * open transaction. New modules that need to accept either
+ * interchangeably (e.g. domain/notifications, domain/permits/documents)
+ * should use this instead of redefining the same literal type locally.
+ */
+export type QueryFn = <T extends QueryResultRow = QueryResultRow>(
+  text: string,
+  params?: unknown[],
+) => Promise<QueryResult<T>>;
+
 let pool: Pool | undefined;
 
 /** Thrown when TLS is enabled but the configured CA certificate can't be loaded. */

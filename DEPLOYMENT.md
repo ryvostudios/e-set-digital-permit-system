@@ -19,10 +19,64 @@ missing or invalid for the current `NODE_ENV` - see
 `SUPABASE_PUBLISHABLE_KEY` isn't accidentally a service-role/secret key
 (both the legacy JWT and the new `sb_secret_...` key shape are rejected).
 
+`SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_STORAGE_BUCKET` are optional -
+the backend starts and the full permit workflow (including issuance)
+works without them. They gate exactly two things, both manual/
+operator-run, never part of normal request handling: the CEO bootstrap
+CLI and uploading the immutable issued Permit+JSA PDF to Supabase
+Storage. Neither is configured in any environment as of this document's
+last update - see "Manual production configuration decisions" below.
+
 ## Manual production configuration decisions
 
 These are real operator decisions this repository cannot make for you -
 they depend on the actual deployment topology:
+
+- **`SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_STORAGE_BUCKET`.** Required
+  before you can run `npm run bootstrap:ceo` or before generated Permit+
+  JSA PDFs can actually be uploaded/downloaded. Create a PRIVATE
+  (non-public) Storage bucket in the Supabase project first, set
+  `SUPABASE_STORAGE_BUCKET` to its name (defaults to
+  `issued-permit-documents` if you name it that), and set
+  `SUPABASE_SERVICE_ROLE_KEY` to that project's service-role key from the
+  Supabase Dashboard (Project Settings -> API). Never commit this value,
+  never put it in any frontend-facing config, and never set it as
+  `SUPABASE_PUBLISHABLE_KEY` (or vice versa - `env.ts` refuses to start
+  if the two are identical). Until this is configured: PDF generation
+  jobs stay in a retryable `PENDING`/`FAILED` state (permit issuance
+  itself is completely unaffected), and `npm run bootstrap:ceo` refuses
+  to run.
+- **Provisioning the first CEO.** Run `npm run bootstrap:ceo` from
+  `backend/`, with `SUPABASE_SERVICE_ROLE_KEY` configured and
+  `BOOTSTRAP_CEO_EMAIL` / `BOOTSTRAP_CEO_PASSWORD` (and optionally
+  `BOOTSTRAP_CEO_NAME`) set in the environment for that one invocation
+  only. It creates or resolves the Supabase Auth user and grants CEO via
+  the existing `privileged_access_events` model - see `DECISIONS.md` →
+  "CEO Bootstrap". It refuses to run if an active CEO already exists.
+  A database singleton reservation serializes concurrent initial runs.
+  If Auth creation succeeds before a transient database failure, retry
+  after the five-minute reservation lease reuses the matching Auth user
+  rather than creating another identity.
+  After a successful run: require a password change on that account's
+  first login, enable MFA before production go-live, and remove
+  `BOOTSTRAP_CEO_EMAIL`/`BOOTSTRAP_CEO_PASSWORD` from the environment -
+  they have no further use once bootstrap succeeds, and leaving them set
+  is an unnecessary credential to protect.
+- **Running the WhatsApp outbox / PDF-generation processors.** Neither
+  `npm run outbox:whatsapp:process` nor `npm run documents:process` is
+  invoked automatically by this backend (no cron/scheduler exists in
+  this codebase - see `ARCHITECTURE.md`'s scaling principle). Schedule
+  them externally (platform cron, a scheduled job, etc.) at whatever
+  interval fits actual usage once (respectively) a real WhatsApp provider
+  is wired into `WhatsappProvider`
+  (`backend/src/domain/notifications/whatsappOutbox.ts`) and Storage is
+  configured. Running either command before that is safe - pending items
+  simply stay pending/retryable with a clear "not configured" reason,
+  never a false "sent"/"generated".
+  Workers use atomic token-owned claims with five-minute leases and
+  bounded retry delays. For PDF upload/crash recovery, an existing
+  deterministic object is downloaded and hash-compared; a match is
+  finalized, while a mismatch fails closed and is never overwritten.
 
 - **`TRUST_PROXY_CIDRS`.** If this backend runs behind any reverse
   proxy/load balancer/ingress (nearly always true in production), this
@@ -96,7 +150,7 @@ non-negotiable requirement:
   `DB_SSL=true` (enforced by `env.ts`); set `DB_CA_CERT_PATH` if the
   platform's default trusted CA store doesn't already cover Supabase's
   CA.
-- **Applying migrations.** `database/migrations/0001`-`0012` are applied
+- **Applying migrations.** `database/migrations/0001`-`0014` are applied
   and live-verified against the current Supabase project
   (`yfxnigovfmngypbgcnaw`) - see `PROJECT_CONTEXT.md`. Migration
   `0012_permit_workflow_completion.sql` (the Send-Back/Hold/Resume/
@@ -105,6 +159,20 @@ non-negotiable requirement:
   invariants valid, renewal uniqueness active, lifecycle append-only
   protections intact, RLS/default-deny intact, no anon/authenticated
   direct grants, no new policies, no data-integrity violations found.
+  Migration `0013_notifications_outbox_documents.sql` (notifications, the
+  WhatsApp outbox, immutable issued-document snapshots and their PDF job
+  state, and justified search/audit indexes) is applied and live-verified.
+  Every new table has RLS enabled; there are no direct `anon`/
+  `authenticated` grants or new policies; immutable snapshot protections
+  are active. The live database contained zero already-issued permits, so
+  its historical backfill had zero rows to process. Migration
+  `0014_fix_trigger_function_search_paths.sql` is applied and live-
+  verified: both affected functions have `search_path=pg_catalog`, both
+  remain SECURITY INVOKER, and the two Security Advisor mutable-search-
+  path warnings are gone. All five support-feature tables remain RLS-
+  enabled, with zero direct `anon`/`authenticated` grants and zero added
+  policies. No security regression was found; the Performance Advisor
+  reports informational items only.
   Running `npm run migrate` (from `backend/`) against a database applies
   whatever hasn't been applied yet, in order; nothing here changes that
   process.

@@ -14,6 +14,18 @@ Versioned, plain SQL migration files, applied in filename order by
 - No down/rollback files: forward-only migrations, consistent with this
   project's append-only/immutable-history principles (see `DATABASE.md`).
 
+## Live migration state
+
+- `0001`-`0014`: applied and live-verified.
+- `0013_notifications_outbox_documents.sql`: live verification confirmed
+  RLS on every new application table, no direct `anon`/`authenticated`
+  grants, no new policies, and active immutable-snapshot protections. The
+  live database contained zero already-issued permits, so its historical
+  backfill processed zero rows.
+- `0014_fix_trigger_function_search_paths.sql`: applied and live-verified;
+  both functions have `search_path=pg_catalog`, remain SECURITY INVOKER,
+  and no longer produce `function_search_path_mutable` warnings.
+
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
 later, scoped implementation sections — not here.

@@ -225,11 +225,26 @@ casually overwritten - `RENEWED` in particular is recorded only on the
 NEW permit's own history (`NULL -> ISSUED`); the OLD permit's history is
 never touched by its own renewal.
 
-## Notifications (Future)
+## Notifications
 
-Desired lifecycle notifications (WhatsApp, via future integration):
-`ISSUED`, `HOLD`, `RESUMED`, `RENEWED`, `CLOSED`. Permit/database actions
-never depend on notification delivery succeeding (see `ARCHITECTURE.md`).
+In-app notifications are implemented: every workflow handoff (submit/
+resubmit, CRO forward-to-HSE, HSE send-back, CRO send-back, issuance,
+Hold, Resume, Cancel, Close, Renewal) creates a recipient-scoped
+notification atomically with the transition itself. See `DECISIONS.md` →
+"Notifications (in-app - implemented)" for the full recipient rules and
+`GET /api/v1/notifications` / `POST /api/v1/notifications/:id/read`.
+
+Submit/resubmit/forward/HSE-send-back are responsibility handoffs: if
+the authoritative destination CRO/HSE recipient set is empty, the whole
+transition aborts with conflict and no lifecycle/notification side effect
+commits.
+
+Lifecycle notifications to the company WhatsApp group (`ISSUED`, `HELD`,
+`RESUMED`, `CANCELLED`, `RENEWED`, `CLOSED`) have a durable, idempotent outbox
+foundation implemented; the actual WhatsApp provider/send integration
+remains not implemented - see `DECISIONS.md`'s open WhatsApp-integration-
+method decision. Permit/database actions never depend on notification
+delivery succeeding (see `ARCHITECTURE.md`).
 
 ## Related Open Decisions
 
