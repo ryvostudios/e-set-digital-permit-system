@@ -78,7 +78,10 @@ Privileged management authority (CEO, Site Manager) is separate from
 operational Team + Position capabilities, and carries its own security
 requirements:
 
-- Only one active CEO at a time.
+- Initial CEO bootstrap is singleton-safe. Before any future general CEO
+  grant/revoke API is introduced, replacement/revocation semantics and a
+  race-safe one-active-CEO database invariant are a required blocker; this
+  task does not guess those unresolved semantics or create that API.
 - CEO is not created through the ordinary user-management workflow, and
   is specially protected from normal modification/removal.
 - Only the CEO may grant or revoke Site Manager privileged access.
@@ -176,6 +179,20 @@ production-hardening batch:
   client-supplied identity) and fails closed (401) on any missing,
   malformed, or invalid/expired token or verification error - see
   `middleware/auth.ts`.
+  It then requires DB-authoritative `app_user_access.state = ACTIVE`; a
+  disabled or missing row is rejected immediately, including for CEO/Site
+  Manager and regardless of capabilities.
+- **Credential separation**: the API pool reads only the restricted runtime
+  `DATABASE_URL`; migration execution requires distinct
+  `MIGRATION_DATABASE_URL`. Auth Admin service-role authority is confined to
+  CEO bootstrap. PDF Storage uses separate Storage-scoped S3 credentials and
+  verifies the exact private bucket configuration before I/O.
+  This split is live-verified: `DATABASE_URL` uses `app_runtime`, which has no
+  schema ownership/DDL, migration-ledger/bootstrap access, application-table
+  DELETE/TRUNCATE, or browser-role grants. Required lookup access includes
+  SELECT-only grants on `teams`, `positions`, and `team_positions`; its only
+  Storage catalog access is schema USAGE plus `storage.buckets` SELECT for
+  preflight. `MIGRATION_DATABASE_URL` remains migration-command-only.
 
 ## Notification Security
 

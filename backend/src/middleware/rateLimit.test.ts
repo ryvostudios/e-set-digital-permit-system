@@ -3,6 +3,7 @@ import http from 'node:http';
 import { test } from 'node:test';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { buildRateLimiter } from './rateLimit.js';
+import { requestId, requestLog } from './requestLog.js';
 
 /**
  * Exercises the real `express-rate-limit` mechanism via `buildRateLimiter`
@@ -25,10 +26,55 @@ async function startServer(app: Express): Promise<{ url: string; close: () => Pr
 
 function appWithLimiter(limiter: ReturnType<typeof buildRateLimiter>): Express {
   const app = express();
+  app.use(requestId);
   app.use(limiter);
   app.get('/', (_req: Request, res: Response) => res.status(200).json({ ok: true }));
   return app;
 }
+
+test('limiter rejection keeps request identity and emits one sanitized lightweight event without a completion listener', async () => {
+  const limiter = buildRateLimiter({ windowMs: 60_000, limit: 1 });
+  const app = express();
+  app.set('trust proxy', ['loopback']);
+  app.use(requestId);
+  app.use(limiter);
+  app.use(requestLog);
+  app.post('/safe-path', (_req: Request, res: Response) => res.status(200).json({ ok: true }));
+  const lines: string[] = [];
+  const originalLog = console.log;
+  console.log = (...values: unknown[]) => { lines.push(values.join(' ')); };
+  const { url, close } = await startServer(app);
+  try {
+    const requestIdValue = 'stable-rate-limit-request-id';
+    const headers = {
+      authorization: 'Bearer MUST_NOT_APPEAR',
+      'content-type': 'text/plain',
+      'x-forwarded-for': '203.0.113.9, 198.51.100.4',
+      'x-request-id': requestIdValue,
+    };
+    assert.equal((await fetch(`${url}/safe-path?secret=QUERY_SECRET`, { method: 'POST', headers, body: 'BODY_SECRET' })).status, 200);
+    const rejected = await fetch(`${url}/safe-path?secret=QUERY_SECRET`, { method: 'POST', headers, body: 'BODY_SECRET' });
+    assert.equal(rejected.status, 429);
+    assert.equal(rejected.headers.get('x-request-id'), requestIdValue);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    const limited = events.filter((event) => event.event === 'rate_limit_exceeded');
+    assert.deepEqual(limited, [{
+      ts: limited[0]?.ts,
+      event: 'rate_limit_exceeded',
+      requestId: requestIdValue,
+      method: 'POST',
+      path: '/safe-path',
+      status: 429,
+    }]);
+    assert.equal(events.filter((event) => event.event === 'request').length, 1, 'only the accepted request gets full completion logging');
+    assert.doesNotMatch(lines.join('\n'), /MUST_NOT_APPEAR|QUERY_SECRET|BODY_SECRET|203\.0\.113\.9|198\.51\.100\.4/);
+  } finally {
+    console.log = originalLog;
+    await close();
+  }
+});
 
 test('buildRateLimiter allows requests up to the configured limit, then rejects with a sanitized 429', async () => {
   const limiter = buildRateLimiter({ windowMs: 60_000, limit: 2 });

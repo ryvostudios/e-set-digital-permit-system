@@ -6,7 +6,17 @@ import {
   MAX_PAGINATION_OFFSET,
   paginationQuerySchema,
   permitQueueQuerySchema,
+  updatePermitBodySchema,
 } from './validation.js';
+
+test('company/companyOther accepts exactly the agreed exclusive combinations', () => {
+  assert.equal(updatePermitBodySchema.safeParse({ version: 1, company: 'OTHER', companyOther: 'Vendor' }).success, true);
+  assert.equal(updatePermitBodySchema.safeParse({ version: 1, company: 'OTHER' }).success, false);
+  for (const company of ['ESET', 'SGRE', 'ZPL'] as const) {
+    assert.equal(updatePermitBodySchema.safeParse({ version: 1, company }).success, true);
+    assert.equal(updatePermitBodySchema.safeParse({ version: 1, company, companyOther: 'forbidden' }).success, false);
+  }
+});
 
 test('closePermitBodySchema accepts version alone (closureRemarks stays optional - not required, per the unresolved-mandatory-remarks decision)', () => {
   const result = closePermitBodySchema.safeParse({ version: 1 });

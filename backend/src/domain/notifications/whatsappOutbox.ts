@@ -116,6 +116,8 @@ export type WhatsappSendResult = { ok: true } | { ok: false; code: WhatsappFailu
  * implementation shipped, and it never fakes success.
  */
 export interface WhatsappProvider {
+  deliveryGuarantee: 'DISABLED' | 'PROVIDER_IDEMPOTENCY' | 'PROVIDER_RECONCILIATION';
+  requestTimeoutMs: number;
   send(payload: WhatsappOutboxPayload, context: { idempotencyKey: string }): Promise<WhatsappSendResult>;
 }
 
@@ -128,6 +130,8 @@ export interface WhatsappProvider {
  * of any kind.
  */
 export const disabledWhatsappProvider: WhatsappProvider = {
+  deliveryGuarantee: 'DISABLED',
+  requestTimeoutMs: 30_000,
   async send(): Promise<WhatsappSendResult> {
     return {
       ok: false,
@@ -136,6 +140,18 @@ export const disabledWhatsappProvider: WhatsappProvider = {
     };
   },
 };
+
+export const OUTBOX_LEASE_SECONDS = 300;
+
+export function assertWhatsappProviderSafe(provider: WhatsappProvider): void {
+  if (provider.deliveryGuarantee === 'DISABLED') return;
+  if (!['PROVIDER_IDEMPOTENCY', 'PROVIDER_RECONCILIATION'].includes(provider.deliveryGuarantee)) {
+    throw new Error('WhatsApp provider lacks a durable delivery guarantee');
+  }
+  if (!Number.isSafeInteger(provider.requestTimeoutMs) || provider.requestTimeoutMs < 1 || provider.requestTimeoutMs >= OUTBOX_LEASE_SECONDS * 1000) {
+    throw new Error('WhatsApp provider timeout must be positive and shorter than the worker lease');
+  }
+}
 
 export interface ProcessOutboxDeps {
   query: QueryFn;
@@ -146,8 +162,6 @@ export interface ProcessOutboxResult {
   sent: number;
   failed: number;
 }
-
-const OUTBOX_LEASE_SECONDS = 300;
 
 /**
  * Sends up to `batchSize` PENDING (or previously FAILED, so a transient
@@ -165,6 +179,7 @@ export async function processPendingWhatsappOutbox(
   provider: WhatsappProvider = disabledWhatsappProvider,
   batchSize = 25,
 ): Promise<ProcessOutboxResult> {
+  assertWhatsappProviderSafe(provider);
   const claimToken = randomUUID();
   const pending = await deps.query<WhatsappOutboxRow>(
     `WITH claimable AS (

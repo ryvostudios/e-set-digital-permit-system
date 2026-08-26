@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import PDFDocument from 'pdfkit';
 import { env } from '../../config/env.js';
 import { query, type QueryFn } from '../../db/pool.js';
-import { getSupabaseAdminClient } from '../../lib/supabaseAdmin.js';
 import { toDisplayNumber } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
 import { computeNextMidnightUtc } from './validity.js';
@@ -99,7 +99,7 @@ export function buildIssuedPermitSnapshot(
 }
 
 /** Deterministic (sorted-key) JSON, so `computeSnapshotHash` never depends on incidental property insertion order. */
-function stableStringify(value: unknown): string {
+export function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
@@ -108,9 +108,32 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function pgJsonbStringifyV1(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(pgJsonbStringifyV1).join(', ')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => Buffer.byteLength(a) - Buffer.byteLength(b) || Buffer.compare(Buffer.from(a), Buffer.from(b)));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}: ${pgJsonbStringifyV1(v)}`).join(', ')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export type SnapshotHashVersion = 'PG_JSONB_SHA256_V1' | 'SORTED_JSON_SHA256_V1';
+export const CURRENT_SNAPSHOT_HASH_VERSION: SnapshotHashVersion = 'SORTED_JSON_SHA256_V1';
+
 /** The hash recorded on `issued_document_snapshots.snapshot_hash` - a content fingerprint of the immutable business snapshot itself (independent of the PDF file bytes, which get their own `permit_document_jobs.file_hash` once generated). */
 export function computeSnapshotHash(snapshot: IssuedPermitSnapshot): string {
   return createHash('sha256').update(stableStringify(snapshot)).digest('hex');
+}
+
+export function computeVersionedSnapshotHash(snapshot: IssuedPermitSnapshot, version: SnapshotHashVersion): string {
+  const serialized = version === 'PG_JSONB_SHA256_V1' ? pgJsonbStringifyV1(snapshot) : stableStringify(snapshot);
+  return createHash('sha256').update(serialized).digest('hex');
+}
+
+export function hasValidSnapshotHash(snapshot: IssuedPermitSnapshot, expected: string, version: string): boolean {
+  if (version !== 'PG_JSONB_SHA256_V1' && version !== 'SORTED_JSON_SHA256_V1') return false;
+  return computeVersionedSnapshotHash(snapshot, version) === expected;
 }
 
 export function computeFileHash(data: Buffer): string {
@@ -132,6 +155,13 @@ export interface CreateIssuedDocumentSnapshotResult {
   snapshotId: string;
   /** false when a snapshot for this permit already existed (idempotent retry) - the existing row is left completely untouched either way, since it's immutable. */
   created: boolean;
+}
+
+export class SnapshotIntegrityConflictError extends Error {
+  constructor() {
+    super('Existing issued snapshot does not match the issuance transaction');
+    this.name = 'SnapshotIntegrityConflictError';
+  }
 }
 
 /**
@@ -163,13 +193,29 @@ export async function createIssuedDocumentSnapshot(
   let snapshotId = insertResult.rows[0]?.id;
   const created = Boolean(snapshotId);
   if (!snapshotId) {
-    const existing = await queryFn<{ id: string }>('SELECT id FROM issued_document_snapshots WHERE permit_id = $1', [
-      input.permitId,
-    ]);
-    snapshotId = existing.rows[0]?.id;
+    const existing = await queryFn<{
+      id: string; source_event_id: string; snapshot: IssuedPermitSnapshot; snapshot_hash: string; hash_version: string;
+    }>(`SELECT s.id, s.source_event_id, s.snapshot, s.snapshot_hash, i.hash_version
+          FROM issued_document_snapshots s
+          JOIN issued_document_snapshot_integrity i ON i.snapshot_id = s.id
+         WHERE s.permit_id = $1`, [input.permitId]);
+    const row = existing.rows[0];
+    if (
+      !row || row.source_event_id !== input.sourceEventId || row.snapshot_hash !== snapshotHash ||
+      row.hash_version !== CURRENT_SNAPSHOT_HASH_VERSION ||
+      stableStringify(row.snapshot) !== stableStringify(input.snapshot)
+    ) throw new SnapshotIntegrityConflictError();
+    snapshotId = row.id;
   }
   if (!snapshotId) {
     throw new Error('Expected an issued_document_snapshots row after insert/lookup but found none');
+  }
+
+  if (created) {
+    await queryFn(
+      'INSERT INTO issued_document_snapshot_integrity (snapshot_id, hash_version) VALUES ($1, $2)',
+      [snapshotId, CURRENT_SNAPSHOT_HASH_VERSION],
+    );
   }
 
   await queryFn(
@@ -194,6 +240,8 @@ export interface PermitDocumentJobRow {
   last_error: string | null;
   created_at: string;
   updated_at: string;
+  renderer_version: string | null;
+  expected_file_hash: string | null;
 }
 
 export interface IssuedDocumentSnapshotRow {
@@ -202,6 +250,7 @@ export interface IssuedDocumentSnapshotRow {
   source_event_id: string;
   snapshot: IssuedPermitSnapshot;
   snapshot_hash: string;
+  hash_version: SnapshotHashVersion;
   created_at: string;
 }
 
@@ -268,6 +317,7 @@ export type DocumentStorageErrorCode =
   | 'STORAGE_DOWNLOAD_FAILED'
   | 'STORAGE_OBJECT_EXISTS'
   | 'STORAGE_INTEGRITY_MISMATCH'
+  | 'STORAGE_PREFLIGHT_FAILED'
   | 'DOCUMENT_GENERATION_FAILED';
 export type DocumentStorageResult = { ok: true } | { ok: false; code: DocumentStorageErrorCode; alreadyExists?: boolean };
 export type DocumentDownloadResult = { ok: true; data: Buffer } | { ok: false; code: DocumentStorageErrorCode };
@@ -280,13 +330,28 @@ export type DocumentDownloadResult = { ok: true; data: Buffer } | { ok: false; c
  * path-traversal surface regardless of which adapter is active.
  */
 export interface DocumentStorageAdapter {
+  preflight?(): Promise<DocumentStorageResult>;
   upload(path: string, data: Buffer, contentType: string): Promise<DocumentStorageResult>;
   download(path: string): Promise<DocumentDownloadResult>;
 }
 
+export interface StorageBucketMetadata {
+  id: string;
+  public: boolean;
+  file_size_limit: number | null;
+  allowed_mime_types: string[] | null;
+}
+
+export function isValidPrivateDocumentBucket(row: StorageBucketMetadata | undefined, expectedBucket: string): boolean {
+  return Boolean(
+    row && row.id === expectedBucket && !row.public && row.file_size_limit && row.file_size_limit >= 100_000 &&
+    row.allowed_mime_types?.includes('application/pdf'),
+  );
+}
+
 /**
- * The safe default when Supabase Storage isn't configured
- * (`SUPABASE_SERVICE_ROLE_KEY` unset) - "if actual storage upload cannot
+ * The safe default when Supabase Storage S3 credentials aren't configured -
+ * "if actual storage upload cannot
  * complete without a missing credential/configuration, still implement
  * the pending/retry job - and report the missing production credential
  * as manual configuration". Never fakes success.
@@ -301,37 +366,69 @@ export const unconfiguredDocumentStorageAdapter: DocumentStorageAdapter = {
 };
 
 /**
- * The real adapter, backed by a PRIVATE Supabase Storage bucket
- * (`env.SUPABASE_STORAGE_BUCKET`) via the service-role admin client -
- * "private bucket/object access; backend/server credentials only". This
+ * The real adapter, backed by a PRIVATE Supabase Storage bucket using
+ * Storage-scoped S3 credentials - never the Auth Admin service-role key.
+ * This
  * backend never creates the bucket itself and never makes it public;
  * that is a one-time manual Supabase Dashboard step (see DEPLOYMENT.md).
- * `upsert: false` on upload is deliberate defense-in-depth on top of the
+ * S3 `If-None-Match: *` on upload is deliberate defense-in-depth on top of the
  * database-level immutability already enforced by
  * `permit_document_jobs_restrict_update()` (migration 0013): even if
  * something somehow tried to re-upload to the same path, Storage itself
  * refuses to silently overwrite an existing object.
  */
-export function createSupabaseDocumentStorageAdapter(): DocumentStorageAdapter | null {
-  const admin = getSupabaseAdminClient();
-  if (!admin) return null;
+export function createSupabaseDocumentStorageAdapter(queryFn: QueryFn = query): DocumentStorageAdapter | null {
+  if (
+    !env.SUPABASE_STORAGE_ENDPOINT || !env.SUPABASE_STORAGE_REGION ||
+    !env.SUPABASE_STORAGE_ACCESS_KEY_ID || !env.SUPABASE_STORAGE_SECRET_ACCESS_KEY
+  ) return null;
+  const client = new S3Client({
+    endpoint: env.SUPABASE_STORAGE_ENDPOINT,
+    region: env.SUPABASE_STORAGE_REGION,
+    forcePathStyle: true,
+    credentials: {
+      accessKeyId: env.SUPABASE_STORAGE_ACCESS_KEY_ID,
+      secretAccessKey: env.SUPABASE_STORAGE_SECRET_ACCESS_KEY,
+    },
+  });
+  const bucket = env.SUPABASE_DOCUMENT_BUCKET;
 
   return {
+    async preflight(): Promise<DocumentStorageResult> {
+      try {
+        await client.send(new HeadBucketCommand({ Bucket: bucket }));
+        const metadata = await queryFn<StorageBucketMetadata>(
+          `SELECT id, public, file_size_limit, allowed_mime_types
+             FROM storage.buckets WHERE id = $1`,
+          [bucket],
+        );
+        const row = metadata.rows[0];
+        if (!isValidPrivateDocumentBucket(row, bucket)) return { ok: false, code: 'STORAGE_PREFLIGHT_FAILED' };
+        return { ok: true };
+      } catch {
+        return { ok: false, code: 'STORAGE_PREFLIGHT_FAILED' };
+      }
+    },
     async upload(path, data, contentType): Promise<DocumentStorageResult> {
-      const { error } = await admin.storage
-        .from(env.SUPABASE_STORAGE_BUCKET)
-        .upload(path, data, { contentType, upsert: false });
-      if (error) {
-        const status = 'statusCode' in error ? Number(error.statusCode) : 0;
-        const alreadyExists = status === 409 || /already exists|duplicate/i.test(error.message);
+      try {
+        await client.send(new PutObjectCommand({ Bucket: bucket, Key: path, Body: data, ContentType: contentType, IfNoneMatch: '*' }));
+        return { ok: true };
+      } catch (error) {
+        const status = error && typeof error === 'object' && '$metadata' in error
+          ? Number((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode)
+          : 0;
+        const alreadyExists = status === 409 || status === 412;
         return { ok: false, code: alreadyExists ? 'STORAGE_OBJECT_EXISTS' : 'STORAGE_UPLOAD_FAILED', alreadyExists };
       }
-      return { ok: true };
     },
     async download(path): Promise<DocumentDownloadResult> {
-      const { data, error } = await admin.storage.from(env.SUPABASE_STORAGE_BUCKET).download(path);
-      if (error || !data) return { ok: false, code: 'STORAGE_DOWNLOAD_FAILED' };
-      return { ok: true, data: Buffer.from(await data.arrayBuffer()) };
+      try {
+        const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: path }));
+        if (!result.Body) return { ok: false, code: 'STORAGE_DOWNLOAD_FAILED' };
+        return { ok: true, data: Buffer.from(await result.Body.transformToByteArray()) };
+      } catch {
+        return { ok: false, code: 'STORAGE_DOWNLOAD_FAILED' };
+      }
     },
   };
 }
@@ -368,14 +465,16 @@ export async function getDocumentForPermit(
   permitId: string,
   deps: { query: QueryFn } = { query },
 ): Promise<PermitDocumentLookup | null> {
-  const result = await deps.query<IssuedDocumentSnapshotRow & { job_id: string; job_status: PermitDocumentJobRow['status']; job_storage_path: string | null; job_file_hash: string | null; job_generated_at: string | null; job_attempt_count: number; job_claim_token: string | null; job_claimed_at: string | null; job_next_attempt_at: string; job_last_error: string | null; job_created_at: string; job_updated_at: string }>(
-    `SELECT s.*, j.id AS job_id, j.status AS job_status, j.storage_path AS job_storage_path,
+  const result = await deps.query<IssuedDocumentSnapshotRow & { job_id: string; job_status: PermitDocumentJobRow['status']; job_storage_path: string | null; job_file_hash: string | null; job_generated_at: string | null; job_attempt_count: number; job_claim_token: string | null; job_claimed_at: string | null; job_next_attempt_at: string; job_last_error: string | null; job_created_at: string; job_updated_at: string; job_renderer_version: string | null; job_expected_file_hash: string | null }>(
+    `SELECT s.*, i.hash_version, j.id AS job_id, j.status AS job_status, j.storage_path AS job_storage_path,
             j.file_hash AS job_file_hash, j.generated_at AS job_generated_at,
             j.attempt_count AS job_attempt_count, j.claim_token AS job_claim_token,
             j.claimed_at AS job_claimed_at, j.next_attempt_at AS job_next_attempt_at,
             j.last_error AS job_last_error,
-            j.created_at AS job_created_at, j.updated_at AS job_updated_at
+            j.created_at AS job_created_at, j.updated_at AS job_updated_at,
+            j.renderer_version AS job_renderer_version, j.expected_file_hash AS job_expected_file_hash
        FROM issued_document_snapshots s
+       JOIN issued_document_snapshot_integrity i ON i.snapshot_id = s.id
        JOIN permit_document_jobs j ON j.snapshot_id = s.id
       WHERE s.permit_id = $1`,
     [permitId],
@@ -383,7 +482,7 @@ export async function getDocumentForPermit(
   const row = result.rows[0];
   if (!row) return null;
 
-  const { job_id, job_status, job_storage_path, job_file_hash, job_generated_at, job_attempt_count, job_claim_token, job_claimed_at, job_next_attempt_at, job_last_error, job_created_at, job_updated_at, ...snapshot } = row;
+  const { job_id, job_status, job_storage_path, job_file_hash, job_generated_at, job_attempt_count, job_claim_token, job_claimed_at, job_next_attempt_at, job_last_error, job_created_at, job_updated_at, job_renderer_version, job_expected_file_hash, ...snapshot } = row;
   return {
     snapshot,
     job: {
@@ -400,6 +499,8 @@ export async function getDocumentForPermit(
       last_error: job_last_error,
       created_at: job_created_at,
       updated_at: job_updated_at,
+      renderer_version: job_renderer_version,
+      expected_file_hash: job_expected_file_hash,
     },
   };
 }
@@ -435,8 +536,10 @@ export async function processPendingDocumentJobs(
   storage: DocumentStorageAdapter = resolveDocumentStorageAdapter(),
   batchSize = 10,
 ): Promise<ProcessDocumentJobsResult> {
+  const preflight = storage.preflight ? await storage.preflight() : { ok: true as const };
+  if (!preflight.ok) return { processed: 0, generated: 0, failed: 0 };
   const claimToken = randomUUID();
-  const pending = await deps.query<{ id: string; snapshot_id: string; snapshot: IssuedPermitSnapshot; permit_id: string }>(
+  const pending = await deps.query<{ id: string; snapshot_id: string; snapshot: IssuedPermitSnapshot; snapshot_hash: string; hash_version: string; permit_id: string; renderer_version: string | null; expected_file_hash: string | null }>(
     `WITH claimable AS (
        SELECT j.id
          FROM permit_document_jobs j
@@ -455,9 +558,12 @@ export async function processPendingDocumentJobs(
         WHERE j.id = claimable.id
         RETURNING j.id, j.snapshot_id
      )
-     SELECT claimed.id, claimed.snapshot_id, s.snapshot, s.permit_id
+       SELECT claimed.id, claimed.snapshot_id, s.snapshot, s.snapshot_hash, i.hash_version, s.permit_id,
+              j.renderer_version, j.expected_file_hash
        FROM claimed
-       JOIN issued_document_snapshots s ON s.id = claimed.snapshot_id`,
+       JOIN issued_document_snapshots s ON s.id = claimed.snapshot_id
+       JOIN issued_document_snapshot_integrity i ON i.snapshot_id = s.id
+       JOIN permit_document_jobs j ON j.id = claimed.id`,
     [batchSize, claimToken, DOCUMENT_JOB_LEASE_SECONDS],
   );
 
@@ -466,9 +572,24 @@ export async function processPendingDocumentJobs(
 
   for (const row of pending.rows) {
     try {
+      if (!hasValidSnapshotHash(row.snapshot, row.snapshot_hash, row.hash_version)) {
+        throw new Error('snapshot integrity verification failed');
+      }
       const pdfBuffer = await generateIssuedPermitPdf(row.snapshot);
       const fileHash = computeFileHash(pdfBuffer);
       const storagePath = `permits/${row.permit_id}/${row.snapshot_id}.pdf`;
+
+      const intended = await deps.query<{ id: string }>(
+        `UPDATE permit_document_jobs
+            SET renderer_version = COALESCE(renderer_version, 'PDFKIT_V1'),
+                expected_file_hash = COALESCE(expected_file_hash, $3), updated_at = now()
+          WHERE id = $1 AND status = 'PROCESSING' AND claim_token = $2
+            AND (renderer_version IS NULL OR renderer_version = 'PDFKIT_V1')
+            AND (expected_file_hash IS NULL OR expected_file_hash = $3)
+          RETURNING id`,
+        [row.id, claimToken, fileHash],
+      );
+      if (intended.rows.length === 0) throw new Error('document intended identity conflict');
 
       const uploadResult = await storage.upload(storagePath, pdfBuffer, 'application/pdf');
       if (!uploadResult.ok) {

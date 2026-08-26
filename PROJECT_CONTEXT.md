@@ -32,7 +32,7 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   and migration runner).
 - Frontend: React + Vite + TypeScript PWA scaffold with Supabase Auth;
   no permit-workflow UI has been built yet.
-- Database: migrations `0001`-`0014` are applied and live-verified
+- Database: migrations `0001`-`0015` are applied and live-verified
   against the live Supabase project (`yfxnigovfmngypbgcnaw`) - Supabase
   security hardening; Team + Position -> Capabilities authorization;
   privileged-access [CEO/Site Manager] data-model foundation; Permit/JSA
@@ -62,6 +62,10 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   feature tables remain RLS-enabled, with zero direct `anon`/
   `authenticated` grants and zero policies added; no security regression
   was found, and Performance Advisor findings are informational only.
+  Migration `0015_backend_integrity_hardening.sql` is **APPLIED /
+  LIVE-VERIFIED**. It adds application account disabling,
+  credential-boundary support, and database integrity constraints without
+  changing agreed workflow semantics.
 - Backend notifications/outbox/documents domain
   (`backend/src/domain/notifications/`,
   `backend/src/domain/permits/{documents,search,workflowSideEffects}.ts`,
@@ -107,11 +111,18 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   - **Genuine manual/external blockers, not yet resolved by this batch:**
     (1) no real WhatsApp provider is selected or configured - the outbox always
     reports messages as failed/pending until one is (`DECISIONS.md`'s
-    open decision #2); (2) `SUPABASE_SERVICE_ROLE_KEY` /
-    `SUPABASE_STORAGE_BUCKET` are not configured in any environment yet -
-    PDF generation jobs and the CEO bootstrap CLI both stay in their
-    documented safe-pending/refuses-to-run state until an operator
-    configures them (see `DEPLOYMENT.md`).
+    open decision #2); (2) the private PDF bucket and Storage-scoped S3
+    credentials are not configured - PDF generation jobs remain in their
+    documented safe-pending state until an operator configures them (see
+    `DEPLOYMENT.md`). Auth Admin service-role authority remains separate and is
+    used only for CEO bootstrap.
+  - The live backend now uses the restricted `app_runtime` PostgreSQL login for
+    `DATABASE_URL`; migrations use a distinct owner in
+    `MIGRATION_DATABASE_URL`. Runtime smoke tests covered readiness and all
+    required application reads, including the SELECT-only `teams`, `positions`,
+    and `team_positions` lookups. The runtime role has no schema ownership/DDL,
+    migration-ledger/bootstrap access, application DELETE/TRUNCATE, or browser
+    role exposure; its `storage.buckets` SELECT is preflight-only.
 - Backend permit domain (`backend/src/domain/permits/`,
   `backend/src/routes/permits.ts`, `backend/src/routes/auth.ts`): the
   full agreed Permit workflow is now implemented - draft creation/
@@ -179,10 +190,11 @@ Open Decisions) govern what's actually confirmed or still unresolved.
 - Closure by CRO only (no creator-initiated closure).
 - Renewal after midnight expiry, issuing a new Permit Number while
   preserving the same JSA Number and linking to permit history.
-- Read-only, immutable PDF generation for issued and closed permits,
-  reflecting the official form layout - implemented (see above); Supabase
-  Storage upload requires a manual, not-yet-configured service-role
-  credential.
+- Read-only immutable PDF infrastructure for the currently defined skeletal
+  Permit/JSA data contract is implemented (see above); the official form
+  fields/layout remain a production blocker and must not be invented. Supabase
+  Storage upload requires manual, not-yet-live-verified private-bucket
+  configuration and Storage-scoped S3 credentials; it never uses Auth Admin.
 - Durable, non-blocking in-app notifications - implemented. Durable,
   non-blocking WhatsApp lifecycle notifications via a future provider
   integration (permit actions never depend on notification delivery) -
@@ -191,6 +203,15 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   separate privileged management tier (CEO, Site Manager).
 
 ## Explicitly Out of Scope (for now)
+
+- **PRODUCTION BLOCKER:** official Permit and JSA field definitions and form
+  layout must be supplied and agreed before the frontend/immutable PDF
+  contract is final. No PPE/hazard/isolation/signature/equipment fields are
+  guessed here. Later official fields must extend the DB schema, validation,
+  draft APIs, snapshot schema/version, and renderer together.
+- Before a second site/security domain shares this database, explicit site
+  scoping must be designed across permits, assignments, queues, recipients,
+  notifications, search, and relevant history/reporting.
 
 - Microservices, message brokers, Redis, Kubernetes, or other scaling
   infrastructure not justified by an actual current requirement.

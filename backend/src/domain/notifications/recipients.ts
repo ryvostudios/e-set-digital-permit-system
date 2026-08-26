@@ -3,12 +3,8 @@ import type { QueryFn } from '../../db/pool.js';
 
 /**
  * The capabilities that identify "a CRO, for notification-recipient
- * purposes" - deliberately broader than
- * `domain/permits/access.ts::STATUS_VIEW_CAPABILITIES`'s per-status view
- * list (a different concern: who may currently SEE a permit in one
- * specific status) and kept as its own list here so the two can't
- * silently drift into meaning the same thing. Anyone holding at least
- * one of these is a CRO recipient for every CRO-facing notification
+ * purposes". Anyone holding at least one established CRO workflow
+ * capability is a CRO recipient for every CRO-facing notification
  * event (submission, resubmission, HSE send-back) - matching WORKFLOW.md's
  * "four CRO personnel, only one on duty" (there is no single "you are
  * THE on-duty CRO" flag; every currently-CRO-capable user is notified,
@@ -23,8 +19,8 @@ export const CRO_RECIPIENT_CAPABILITIES = [
   'permit.close',
 ] as const;
 
-/** The HSE-equivalent of `CRO_RECIPIENT_CAPABILITIES` above. */
-export const HSE_RECIPIENT_CAPABILITIES = ['permit.hse_review', 'permit.fallback_approve'] as const;
+/** HSE responsibility requires the actual HSE-review capability. CRO fallback authority is not an HSE identity marker. */
+export const HSE_RECIPIENT_CAPABILITIES = ['permit.hse_review'] as const;
 
 /**
  * Every user who should be notified as "the CRO" for a given event -

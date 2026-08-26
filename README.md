@@ -39,15 +39,17 @@ paginated read APIs, permit search, filtered lifecycle/audit search,
 in-app notifications, a durable WhatsApp outbox foundation, and
 immutable issued Permit+JSA PDF generation - all under Team + Position ->
 Capabilities authorization with Supabase Auth token verification.
-Database migrations `0001`-`0014` are applied and live-verified against
+Database migrations `0001`-`0015` are applied and live-verified against
 the live Supabase project (see `database/migrations/README.md`) - `0012`
 is the workflow-completion schema (Send-Back/Hold/Resume/Cancel/Renewal),
 and `0013` adds notifications, outbox/document support, an atomic
 historical issued-document backfill, leased worker claims, and the
 initial-CEO singleton reservation. Migration `0014` pins the safe search
 path of two `0013` trigger functions without changing their behavior and
-has also been applied and live-verified. Backend production
-hardening (rate limiting, security headers, structured logging,
+security mode. Migration `0015_backend_integrity_hardening.sql` is
+**APPLIED / LIVE-VERIFIED**; its account-disable and cross-table/document/
+outbox integrity protections are active without changing workflow.
+Backend production hardening (rate limiting, security headers, structured logging,
 environment validation, a `/ready` readiness endpoint) is also in place
 - see `PROJECT_CONTEXT.md` for the precise, current breakdown. `frontend/`
 is a React + Vite + TypeScript PWA scaffold with Supabase Auth wired up;
@@ -57,10 +59,16 @@ each is either an unresolved business rule (`DECISIONS.md`'s Open
 Decisions) or a manual production-configuration step (`DEPLOYMENT.md`),
 not merely unscheduled.
 
+**Production blocker:** the official Permit/JSA field definitions and form
+layout have not yet been supplied. The immutable snapshot/PDF infrastructure
+is sound for the current skeletal schema, but its final business contract and
+frontend must not be treated as complete or extended with guessed fields.
+
 ## Technology
 
 - **Frontend:** React + Vite + TypeScript, built as a PWA
-- **Backend:** Node.js + Express + TypeScript, REST API
+- **Backend:** Node.js 24.x + Express + TypeScript, REST API (`engines` is
+  authoritative; CI/deployment must use the same major)
 - **Database:** PostgreSQL via Supabase infrastructure
 - **Validation:** Zod
 - **Forms:** React Hook Form
@@ -83,3 +91,10 @@ allowed states for Hold/Cancel, the CRO/HSE send-back target state, and
 the status of a renewed permit are now resolved and implemented.) See
 the "Open Decisions" section of [`DECISIONS.md`](./DECISIONS.md) before
 implementing related behavior.
+
+The remaining production/operator blockers are also explicit: the private
+PDF bucket and Storage-scoped S3 credentials are not configured; Supabase
+leaked-password protection and privileged-account MFA are not enabled and
+live-verified; the official Permit/JSA form and fields and final human-visible
+number format are unresolved; and explicit site scoping is required before a
+second site/security domain uses this database.

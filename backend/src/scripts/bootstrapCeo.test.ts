@@ -10,6 +10,7 @@ class FakeBootstrapSystem {
   authUsers = new Map<string, string>();
   createCalls = 0;
   failAuthPersistenceOnce = false;
+  access = new Map<string, 'ACTIVE' | 'DISABLED'>();
 
   admin: BootstrapAdmin = {
     createUser: async ({ email }) => {
@@ -50,6 +51,8 @@ class FakeBootstrapSystem {
     if (sql.startsWith('SELECT auth_user_id FROM initial_ceo_bootstrap')) {
       return { rows: this.reservation?.status === 'RESERVED' && this.reservation.token === params[0] ? [{ auth_user_id: this.reservation.authUserId }] : [] };
     }
+    if (sql.startsWith('INSERT INTO app_user_access')) { if (!this.access.has(String(params[0]))) this.access.set(String(params[0]), 'ACTIVE'); return { rows: [] }; }
+    if (sql.startsWith('SELECT state FROM app_user_access')) { const state = this.access.get(String(params[0])); return { rows: state ? [{ state }] : [] }; }
     if (sql.startsWith('INSERT INTO privileged_access_events')) { this.ceos.add(String(params[0])); return { rows: [] }; }
     if (sql.startsWith('UPDATE initial_ceo_bootstrap') && sql.includes("status = 'COMPLETED'")) {
       if (this.reservation?.status === 'RESERVED' && this.reservation.token === params[0]) {

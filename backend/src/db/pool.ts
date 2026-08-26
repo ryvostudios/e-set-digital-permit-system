@@ -37,9 +37,9 @@ export function buildSslConfig(): PoolConfig['ssl'] {
   }
 }
 
-function buildPoolConfig(): PoolConfig {
+export function buildPoolConfig(databaseUrl = env.DATABASE_URL): PoolConfig {
   return {
-    connectionString: env.DATABASE_URL,
+    connectionString: databaseUrl,
     ssl: buildSslConfig(),
     max: env.DB_POOL_MAX,
     idleTimeoutMillis: env.DB_IDLE_TIMEOUT_MS,

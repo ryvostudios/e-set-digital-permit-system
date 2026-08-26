@@ -176,8 +176,8 @@ The immutable issued Permit+JSA document follows the same non-blocking
 shape (`domain/permits/documents.ts`): issuance atomically captures an
 immutable business-content snapshot, then a separate, retryable job
 generates the PDF (via `pdfkit`) and uploads it to a private Supabase
-Storage bucket using a server-only service-role credential
-(`SUPABASE_SERVICE_ROLE_KEY` - never exposed to the frontend). Issuance
+Storage bucket using Storage-scoped S3 server credentials (never the Auth
+Admin `SUPABASE_SERVICE_ROLE_KEY` and never exposed to the frontend). Issuance
 itself never depends on PDF generation or Storage being available.
 Migration 0013 also backfills all earlier genuinely issued permits from
 their immutable Permit/JSA rows and unique authoritative issuance event;
@@ -188,6 +188,24 @@ Downloads authorize the permit before document/storage lookup and verify
 the downloaded bytes against the immutable SHA-256 file hash.
 Workers classify failures into fixed safe codes; raw external exception
 messages are never persisted or logged.
+
+Migration 0015 adds a versioned snapshot-hash contract and deterministic
+intended PDF identity. Rendering verifies immutable snapshot integrity first.
+JWT authentication additionally requires a DB-authoritative ACTIVE
+`app_user_access` row; missing/disabled fails closed.
+
+The live database boundary uses `app_runtime` for `DATABASE_URL` and a
+different migration owner for `MIGRATION_DATABASE_URL`. The runtime login has
+only required application DML/SELECT and sequence privileges (including
+SELECT-only lookup access to `teams`, `positions`, and `team_positions`), no
+schema ownership or DDL, and only `storage` schema usage plus
+`storage.buckets` SELECT for private-bucket preflight. Browser roles remain
+default-deny.
+
+The current deployment is intentionally single-site. Before a second
+site/security domain shares this database, explicit `site_id` scoping is
+required across permits, Team+Position assignments, queues, notifications,
+CRO/HSE recipients, search, and relevant history/reporting.
 
 ## Production Hardening
 

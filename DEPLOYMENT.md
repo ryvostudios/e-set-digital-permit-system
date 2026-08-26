@@ -19,38 +19,50 @@ missing or invalid for the current `NODE_ENV` - see
 `SUPABASE_PUBLISHABLE_KEY` isn't accidentally a service-role/secret key
 (both the legacy JWT and the new `sb_secret_...` key shape are rejected).
 
-`SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_STORAGE_BUCKET` are optional -
-the backend starts and the full permit workflow (including issuance)
-works without them. They gate exactly two things, both manual/
-operator-run, never part of normal request handling: the CEO bootstrap
-CLI and uploading the immutable issued Permit+JSA PDF to Supabase
-Storage. Neither is configured in any environment as of this document's
-last update - see "Manual production configuration decisions" below.
+`MIGRATION_DATABASE_URL` is required only by `npm run migrate`; it must use
+a deployment-owner login distinct from the restricted `DATABASE_URL`
+runtime login. `SUPABASE_SERVICE_ROLE_KEY` is required only by the
+operator-run CEO bootstrap. PDF access uses the separate Storage-scoped
+S3 variables in `.env.example`; normal API startup needs neither admin
+credential and fails closed only at the unavailable feature boundary.
 
 ## Manual production configuration decisions
 
 These are real operator decisions this repository cannot make for you -
 they depend on the actual deployment topology:
 
-- **`SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_STORAGE_BUCKET`.** Required
-  before you can run `npm run bootstrap:ceo` or before generated Permit+
-  JSA PDFs can actually be uploaded/downloaded. Create a PRIVATE
-  (non-public) Storage bucket in the Supabase project first, set
-  `SUPABASE_STORAGE_BUCKET` to its name (defaults to
-  `issued-permit-documents` if you name it that), and set
-  `SUPABASE_SERVICE_ROLE_KEY` to that project's service-role key from the
-  Supabase Dashboard (Project Settings -> API). Never commit this value,
-  never put it in any frontend-facing config, and never set it as
-  `SUPABASE_PUBLISHABLE_KEY` (or vice versa - `env.ts` refuses to start
-  if the two are identical). Until this is configured: PDF generation
-  jobs stay in a retryable `PENDING`/`FAILED` state (permit issuance
-  itself is completely unaffected), and `npm run bootstrap:ceo` refuses
-  to run.
+- **Database roles (provisioned and live-verified).** `DATABASE_URL` uses the
+  restricted `app_runtime` login; `MIGRATION_DATABASE_URL` uses the separate
+  migration owner and is required only by `npm run migrate`. The normal API
+  must never use or fall back to the migration credential. `app_runtime` has
+  `LOGIN` and `BYPASSRLS` solely so the backend can operate the intentional
+  RLS/default-deny architecture, but is not superuser, cannot create roles or
+  databases, does not inherit other roles, does not own the schema, and has no
+  `CREATE`/DDL authority on `public`. Its application access is limited to the
+  required table/sequence `SELECT` and DML privileges. In particular, the
+  lookup tables `teams`, `positions`, and `team_positions` are `SELECT`-only
+  (no INSERT, UPDATE, DELETE, or TRUNCATE). It has no access to
+  `schema_migrations` or `initial_ceo_bootstrap`, no INSERT/sequence access for
+  `privileged_access_events`, and no DELETE/TRUNCATE authority on application
+  tables. For private-bucket preflight only, it has `USAGE` on `storage` and
+  `SELECT` on `storage.buckets`. Browser `anon` and `authenticated` roles
+  remain intentionally default-deny with zero direct application-table grants.
+- **Private PDF Storage.** Create the configured bucket manually as
+  private (`public=false`), restrict MIME types to `application/pdf`, and
+  set a sensible non-null size limit. Configure the four Storage S3
+  variables and `SUPABASE_DOCUMENT_BUCKET`; do not use the Auth Admin
+  service-role key. Worker/download preflight verifies the exact bucket
+  metadata and fails closed without upload when privacy cannot be proved.
 - **Provisioning the first CEO.** Run `npm run bootstrap:ceo` from
   `backend/`, with `SUPABASE_SERVICE_ROLE_KEY` configured and
   `BOOTSTRAP_CEO_EMAIL` / `BOOTSTRAP_CEO_PASSWORD` (and optionally
   `BOOTSTRAP_CEO_NAME`) set in the environment for that one invocation
-  only. It creates or resolves the Supabase Auth user and grants CEO via
+  only. The restricted `app_runtime` role intentionally cannot access
+  `initial_ceo_bootstrap` or insert `privileged_access_events`, so this
+  isolated operator command also requires a separately authorized database
+  login supplied as its `DATABASE_URL` for that invocation. Never start the
+  normal API with that privileged connection. The command creates or resolves
+  the Supabase Auth user and grants CEO via
   the existing `privileged_access_events` model - see `DECISIONS.md` →
   "CEO Bootstrap". It refuses to run if an active CEO already exists.
   A database singleton reservation serializes concurrent initial runs.
@@ -58,10 +70,17 @@ they depend on the actual deployment topology:
   after the five-minute reservation lease reuses the matching Auth user
   rather than creating another identity.
   After a successful run: require a password change on that account's
-  first login, enable MFA before production go-live, and remove
+  first login, enable and live-verify privileged-account MFA before production
+  go-live, and remove
   `BOOTSTRAP_CEO_EMAIL`/`BOOTSTRAP_CEO_PASSWORD` from the environment -
   they have no further use once bootstrap succeeds, and leaving them set
   is an unnecessary credential to protect.
+- **Application account state.** Migration 0015 initializes every existing
+  `auth.users` identity as ACTIVE. Every future server-side provisioning flow
+  must insert the matching ACTIVE `app_user_access` row transactionally;
+  missing rows fail closed. Offboarding changes the row to DISABLED with
+  DB-authoritative timestamps instead of deleting the Auth identity/history.
+  No public provisioning or disable endpoint is introduced here.
 - **Running the WhatsApp outbox / PDF-generation processors.** Neither
   `npm run outbox:whatsapp:process` nor `npm run documents:process` is
   invoked automatically by this backend (no cron/scheduler exists in
@@ -97,7 +116,8 @@ they depend on the actual deployment topology:
   see "Network topology requirement" below, which this list depends on
   being true.**
 - **`CORS_ALLOWED_ORIGINS`.** The real, exact frontend origin(s) - no
-  wildcard (rejected by `env.ts` in production anyway).
+  wildcard. Production accepts only canonical credential-free HTTPS root
+  origins: no path, query, fragment, or userinfo.
 - **Rate limit tuning** (`RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_GLOBAL_MAX`,
   `RATE_LIMIT_MUTATION_MAX`) - the shipped defaults are reasonable
   starting points, not measured for this deployment's actual traffic.
@@ -150,7 +170,7 @@ non-negotiable requirement:
   `DB_SSL=true` (enforced by `env.ts`); set `DB_CA_CERT_PATH` if the
   platform's default trusted CA store doesn't already cover Supabase's
   CA.
-- **Applying migrations.** `database/migrations/0001`-`0014` are applied
+- **Applying migrations.** `database/migrations/0001`-`0015` are applied
   and live-verified against the current Supabase project
   (`yfxnigovfmngypbgcnaw`) - see `PROJECT_CONTEXT.md`. Migration
   `0012_permit_workflow_completion.sql` (the Send-Back/Hold/Resume/
@@ -173,6 +193,12 @@ non-negotiable requirement:
   enabled, with zero direct `anon`/`authenticated` grants and zero added
   policies. No security regression was found; the Performance Advisor
   reports informational items only.
+  Migration `0015_backend_integrity_hardening.sql` is **APPLIED / LIVE-
+  VERIFIED**. Migration id 15 is recorded; the existing Auth user was
+  backfilled ACTIVE; both new tables are RLS-enabled/default-deny with zero
+  browser grants or policies; all integrity constraints and invoker-mode,
+  `search_path=pg_catalog` triggers were verified; and no invalid company or
+  snapshot-integrity data was found. The temporary hash helper is absent.
   Running `npm run migrate` (from `backend/`) against a database applies
   whatever hasn't been applied yet, in order; nothing here changes that
   process.
@@ -209,9 +235,14 @@ Supabase Auth offers a "leaked password protection" setting (checks
 new/changed passwords against known-breach corpora) that is configured
 in the Supabase Dashboard (Authentication -> Policies), not in this
 repository - there is no migration or backend code path that controls
-it. Confirm it is enabled for the production project before go-live;
+it. It is currently reported **disabled** and is a **GO-LIVE BLOCKER**.
+Enable and live-verify it before go-live;
 this document is where that manual step is tracked, since no code
 change here can verify or enforce it.
+
+Privileged-account MFA is likewise not yet enforced or live-verified and
+remains a separate go-live blocker; ordinary permit routes must not acquire an
+invented MFA requirement.
 
 ## Health vs. readiness
 
@@ -226,7 +257,7 @@ error detail.
 
 ## Structured logs
 
-Every request produces one JSON log line (method, path, status,
+Every request admitted by the application limiter produces one JSON log line (method, path, status,
 duration, a correlation `requestId` - also echoed back as the
 `X-Request-Id` response header). 401/403 responses additionally log an
 `auth_failure`/`authz_failure` event; 5xx responses log a

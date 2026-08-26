@@ -1,6 +1,7 @@
 import rateLimit, { ipKeyGenerator, type RateLimitRequestHandler } from 'express-rate-limit';
 import type { Request, Response } from 'express';
 import { env } from '../config/env.js';
+import { logEvent } from './requestLog.js';
 
 /**
  * Rate limiting is per-process, in-memory - `express-rate-limit`'s
@@ -22,7 +23,13 @@ import { env } from '../config/env.js';
  * `express-rate-limit` store) at that time - see DEPLOYMENT.md.
  */
 
-function sendRateLimited(_req: Request, res: Response): void {
+function sendRateLimited(req: Request, res: Response): void {
+  logEvent('rate_limit_exceeded', {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.path,
+    status: 429,
+  });
   res.status(429).json({
     error: 'rate_limited',
     message: 'Too many requests. Please try again later.',

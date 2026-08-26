@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { QueryFn } from '../../db/pool.js';
 import {
+  assertWhatsappProviderSafe,
   buildWhatsappPayload,
   disabledWhatsappProvider,
   enqueueWhatsappMessage,
@@ -158,7 +159,7 @@ test('processPendingWhatsappOutbox: a working provider marks the message SENT an
   const payload = buildWhatsappPayload('ISSUED', { permitNumber: '1', jsaNumber: '1', status: 'ISSUED', occurredAt: '2026-01-01T00:00:00.000Z' });
   await enqueueWhatsappMessage(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', eventType: 'ISSUED', payload });
 
-  const workingProvider: WhatsappProvider = { async send(): Promise<WhatsappSendResult> { return { ok: true }; } };
+  const workingProvider: WhatsappProvider = { deliveryGuarantee: 'PROVIDER_IDEMPOTENCY', requestTimeoutMs: 30_000, async send(): Promise<WhatsappSendResult> { return { ok: true }; } };
   const result = await processPendingWhatsappOutbox({ query: db.query }, workingProvider);
   assert.equal(result.sent, 1);
   assert.equal(db.rows[0]?.status, 'SENT');
@@ -172,7 +173,7 @@ test('processPendingWhatsappOutbox: retries a previously FAILED message', async 
   assert.equal(db.rows[0]?.status, 'FAILED');
   assert.equal(db.rows[0]?.attempt_count, 1);
 
-  const workingProvider: WhatsappProvider = { async send(): Promise<WhatsappSendResult> { return { ok: true }; } };
+  const workingProvider: WhatsappProvider = { deliveryGuarantee: 'PROVIDER_IDEMPOTENCY', requestTimeoutMs: 30_000, async send(): Promise<WhatsappSendResult> { return { ok: true }; } };
   await processPendingWhatsappOutbox({ query: db.query }, workingProvider);
   assert.equal(db.rows[0]?.status, 'SENT');
   assert.equal(db.rows[0]?.attempt_count, 2);
@@ -185,7 +186,7 @@ test('concurrent WhatsApp workers cannot send the same active claim twice and re
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const keys: string[] = [];
-  const provider: WhatsappProvider = { async send(_payload, context) { keys.push(context.idempotencyKey); await gate; return { ok: true }; } };
+  const provider: WhatsappProvider = { deliveryGuarantee: 'PROVIDER_IDEMPOTENCY', requestTimeoutMs: 30_000, async send(_payload, context) { keys.push(context.idempotencyKey); await gate; return { ok: true }; } };
   const first = processPendingWhatsappOutbox({ query: db.query }, provider);
   await new Promise((resolve) => setImmediate(resolve));
   const second = await processPendingWhatsappOutbox({ query: db.query }, provider);
@@ -202,7 +203,7 @@ test('stale WhatsApp claims are recoverable and an obsolete claimant cannot fina
   db.rows[0]!.status = 'PROCESSING';
   db.rows[0]!.claim_token = 'obsolete';
   db.rows[0]!.claimed_at = 'stale';
-  const provider: WhatsappProvider = { async send() { return { ok: true }; } };
+  const provider: WhatsappProvider = { deliveryGuarantee: 'PROVIDER_IDEMPOTENCY', requestTimeoutMs: 30_000, async send() { return { ok: true }; } };
   await processPendingWhatsappOutbox({ query: db.query }, provider);
   assert.equal(db.rows[0]?.status, 'SENT');
   const staleFinalize = await db.query("UPDATE whatsapp_outbox_messages SET status = 'SENT' WHERE id = $1 AND claim_token = $2 RETURNING id", ['outbox-1', 'obsolete']);
@@ -214,7 +215,25 @@ test('provider exceptions persist only a fixed safe category and never raw secre
   const payload = buildWhatsappPayload('ISSUED', { permitNumber: '1', jsaNumber: '1', status: 'ISSUED', occurredAt: '2026-01-01T00:00:00.000Z' });
   await enqueueWhatsappMessage(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', eventType: 'ISSUED', payload });
   const hostile = 'https://secret.example/?token=SUPER_SECRET_TOKEN Authorization: Bearer abc123 sb_secret_FAKE_SECRET';
-  await processPendingWhatsappOutbox({ query: db.query }, { async send() { throw new Error(hostile); } });
+  await processPendingWhatsappOutbox({ query: db.query }, { deliveryGuarantee: 'PROVIDER_IDEMPOTENCY', requestTimeoutMs: 30_000, async send() { throw new Error(hostile); } });
   assert.equal(db.rows[0]?.last_error, 'WHATSAPP_DELIVERY_FAILED');
   assert.doesNotMatch(JSON.stringify(db.rows), /SUPER_SECRET_TOKEN|abc123|sb_secret_FAKE_SECRET/);
+});
+
+test('production provider contract refuses non-idempotent delivery and a timeout that can outlive its claim lease', () => {
+  assert.throws(() => assertWhatsappProviderSafe({
+    deliveryGuarantee: 'UNSUPPORTED' as never,
+    requestTimeoutMs: 30_000,
+    async send() { return { ok: true }; },
+  }));
+  assert.throws(() => assertWhatsappProviderSafe({
+    deliveryGuarantee: 'PROVIDER_IDEMPOTENCY',
+    requestTimeoutMs: 300_000,
+    async send() { return { ok: true }; },
+  }));
+  assert.doesNotThrow(() => assertWhatsappProviderSafe({
+    deliveryGuarantee: 'PROVIDER_IDEMPOTENCY',
+    requestTimeoutMs: 299_999,
+    async send() { return { ok: true }; },
+  }));
 });

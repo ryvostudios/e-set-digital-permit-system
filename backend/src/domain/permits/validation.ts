@@ -91,9 +91,13 @@ export const updatePermitBodySchema = z
     companyOther: z.string().trim().min(1).max(200).optional(),
   })
   .strict()
-  .refine((body) => body.company !== 'OTHER' || Boolean(body.companyOther), {
-    message: 'companyOther is required when company is OTHER',
-    path: ['companyOther'],
+  .superRefine((body, ctx) => {
+    if (body.company === 'OTHER' && !body.companyOther) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'companyOther is required when company is OTHER', path: ['companyOther'] });
+    }
+    if (body.company !== undefined && body.company !== 'OTHER' && body.companyOther !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'companyOther is only allowed when company is OTHER', path: ['companyOther'] });
+    }
   });
 
 export const submitPermitBodySchema = z

@@ -12,6 +12,28 @@ function isPostgresConnectionString(value: string): boolean {
   }
 }
 
+function isSecureUrlWithoutUserInfo(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+export function canonicalProductionOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== 'https:' || url.username || url.password || url.search || url.hash ||
+      (url.pathname !== '/' && url.pathname !== '')
+    ) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 function isValidTimeZone(value: string): boolean {
   try {
     // Constructing is the validation; it throws RangeError for an unknown zone.
@@ -70,6 +92,9 @@ export const envSchema = z
       .refine(isPostgresConnectionString, {
         message: 'DATABASE_URL must be a postgresql:// or postgres:// connection string',
       }),
+    MIGRATION_DATABASE_URL: z.string().min(1).refine(isPostgresConnectionString, {
+      message: 'MIGRATION_DATABASE_URL must be a postgresql:// or postgres:// connection string',
+    }).optional(),
     DB_SSL: booleanFlag.default(true),
     // Path to a PEM-encoded CA certificate to trust for the database TLS
     // connection (e.g. Supabase's CA). Optional; when unset and DB_SSL is
@@ -93,28 +118,18 @@ export const envSchema = z
     SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
     SUPABASE_PUBLISHABLE_KEY: z.string().min(1, 'SUPABASE_PUBLISHABLE_KEY is required'),
 
-    // Privileged Supabase Admin API credential - server-only, NEVER sent
-    // to the frontend. Optional: the server must start and the full
-    // permit workflow must keep working without it (issuance never
-    // depends on an external file/service being available). Only two
-    // things actually need it - both explicitly manual/operator-run, not
-    // part of normal request handling: the CEO bootstrap CLI
-    // (src/scripts/bootstrapCeo.ts, which creates/resolves the first CEO
-    // via the Supabase Admin API) and the Supabase Storage document
-    // adapter (domain/permits/documents.ts, which uploads the immutable
-    // issued Permit+JSA PDF to a private bucket). When unset, both stay
-    // in their documented "manual configuration pending" state rather
-    // than failing anything - see DEPLOYMENT.md.
+    // Privileged Auth Admin credential. Used only by the operator-run CEO
+    // bootstrap; normal API/Storage code must never import it.
     SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
-
-    // The private Supabase Storage bucket the issued Permit+JSA PDF is
-    // uploaded to. Only meaningful together with
-    // SUPABASE_SERVICE_ROLE_KEY above; a default name is provided so an
-    // operator who has already configured the service-role key doesn't
-    // also have to invent a bucket name, but the bucket itself must
-    // still be created (private, not public) in the Supabase project -
-    // this backend does not create buckets.
-    SUPABASE_STORAGE_BUCKET: z.string().min(1).default('issued-permit-documents'),
+    // Supabase Storage S3-compatible server credentials. These are
+    // independent of Auth Admin/service-role authority and never exposed
+    // to the frontend. All are optional for ordinary API startup; the
+    // document worker/download path fails closed until all are present.
+    SUPABASE_STORAGE_ENDPOINT: z.string().url().optional(),
+    SUPABASE_STORAGE_REGION: z.string().min(1).optional(),
+    SUPABASE_STORAGE_ACCESS_KEY_ID: z.string().min(1).optional(),
+    SUPABASE_STORAGE_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+    SUPABASE_DOCUMENT_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).default('issued-permit-documents'),
 
     // The IANA time zone permit validity is evaluated in (next-midnight
     // expiry). No default - the site's actual timezone must be configured
@@ -199,6 +214,20 @@ export const envSchema = z
       });
     }
 
+    const storageValues = [
+      value.SUPABASE_STORAGE_ENDPOINT,
+      value.SUPABASE_STORAGE_REGION,
+      value.SUPABASE_STORAGE_ACCESS_KEY_ID,
+      value.SUPABASE_STORAGE_SECRET_ACCESS_KEY,
+    ];
+    if (storageValues.some(Boolean) && !storageValues.every(Boolean)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SUPABASE_STORAGE_ENDPOINT'],
+        message: 'all Supabase Storage S3 credential settings must be configured together',
+      });
+    }
+
     if (value.NODE_ENV === 'production' && !value.DB_SSL) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -208,19 +237,31 @@ export const envSchema = z
     }
 
     if (value.NODE_ENV === 'production') {
+      if (!isSecureUrlWithoutUserInfo(value.SUPABASE_URL)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['SUPABASE_URL'],
+          message: 'SUPABASE_URL must be an HTTPS URL without credentials in production',
+        });
+      }
+      if (value.SUPABASE_STORAGE_ENDPOINT && !isSecureUrlWithoutUserInfo(value.SUPABASE_STORAGE_ENDPOINT)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['SUPABASE_STORAGE_ENDPOINT'],
+          message: 'SUPABASE_STORAGE_ENDPOINT must be an HTTPS URL without credentials in production',
+        });
+      }
       if (!value.CORS_ALLOWED_ORIGINS?.trim()) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['CORS_ALLOWED_ORIGINS'],
           message: 'CORS_ALLOWED_ORIGINS is required in production',
         });
-      } else if (
-        value.CORS_ALLOWED_ORIGINS.split(',').some((origin) => origin.trim() === '*')
-      ) {
+      } else if (value.CORS_ALLOWED_ORIGINS.split(',').some((origin) => canonicalProductionOrigin(origin.trim()) === null)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['CORS_ALLOWED_ORIGINS'],
-          message: 'CORS_ALLOWED_ORIGINS must not contain "*" in production',
+          message: 'CORS_ALLOWED_ORIGINS must contain only canonical HTTPS origins without credentials, paths, query strings, or fragments in production',
         });
       }
     }

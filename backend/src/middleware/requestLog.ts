@@ -38,11 +38,16 @@ function logLine(fields: Record<string, unknown>): void {
  * information SECURITY.md's authorization requirements call for being
  * observable, without duplicating a general-purpose audit log.
  */
-export function requestLog(req: Request, res: Response, next: NextFunction): void {
+/** Assigns correlation identity before any middleware (including the global limiter) can terminate the response. */
+export function requestId(req: Request, res: Response, next: NextFunction): void {
   const inboundId = req.header(REQUEST_ID_HEADER);
   req.requestId = inboundId && SAFE_REQUEST_ID.test(inboundId) ? inboundId : randomUUID();
   res.setHeader('X-Request-Id', req.requestId);
+  next();
+}
 
+/** Attaches the full completion logger only after the global limiter accepts the request. */
+export function requestLog(req: Request, res: Response, next: NextFunction): void {
   const startedAtMs = Date.now();
   res.on('finish', () => {
     const durationMs = Date.now() - startedAtMs;

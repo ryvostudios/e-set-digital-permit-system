@@ -415,6 +415,7 @@ export interface UpdateDraftInput {
 export type UpdateDraftOutcome =
   | { outcome: 'not_found' }
   | { outcome: 'conflict'; reason: 'not_editable' | 'stale_version' }
+  | { outcome: 'invalid'; reason: 'invalid_company_fields' }
   | { outcome: 'ok'; permit: PermitRow };
 
 // A permit is editable by its creator in exactly two statuses: DRAFT
@@ -451,7 +452,13 @@ export async function updateDraftPermit(
     if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
 
     const nextCompany = input.company ?? existing.company;
-    const nextCompanyOther = input.company !== undefined ? (input.companyOther ?? null) : existing.company_other;
+    const nextCompanyOther = input.company !== undefined
+      ? (input.company === 'OTHER' ? (input.companyOther ?? existing.company_other) : null)
+      : (input.companyOther ?? existing.company_other);
+    if (
+      (nextCompany === 'OTHER' && (!nextCompanyOther || nextCompanyOther.trim() === '')) ||
+      (nextCompany !== 'OTHER' && nextCompanyOther !== null)
+    ) return { outcome: 'invalid', reason: 'invalid_company_fields' };
 
     const updateResult = await client.query<PermitRow>(
       `UPDATE permits

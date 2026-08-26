@@ -27,6 +27,7 @@ const AUTHENTICATED_USER_ID = 'route-test-user-id';
 const SOME_PERMIT_ID = '00000000-0000-0000-0000-000000000000';
 
 let grantedCapabilities: string[] = [];
+let appAccessState: 'ACTIVE' | 'DISABLED' | null = 'ACTIVE';
 // Controllable canned results for the new read queries, keyed by which
 // query issues them (see the `Pool.prototype.query` stub below) - reset
 // per test in `beforeEach`.
@@ -91,6 +92,9 @@ before(() => {
   Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
     const sql = String(text).trim();
     capturedQueries.push({ sql, params });
+    if (sql.startsWith('SELECT state FROM app_user_access')) {
+      return { rows: appAccessState ? [{ state: appAccessState }] : [] };
+    }
     if (sql.startsWith('SELECT DISTINCT c.name')) {
       return { rows: grantedCapabilities.map((name) => ({ name })) };
     }
@@ -151,7 +155,7 @@ before(() => {
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits p JOIN jsas j')) {
       return { rows: [{ count: String(mockSearchPermitRows.length) }] };
     }
-    if (sql.startsWith('SELECT s.*, j.id AS job_id')) {
+    if (sql.startsWith('SELECT s.*, i.hash_version')) {
       return { rows: mockDocumentLookupRow ? [mockDocumentLookupRow] : [] };
     }
     return { rows: [] };
@@ -176,6 +180,7 @@ after(() => {
 });
 
 beforeEach(() => {
+  appAccessState = 'ACTIVE';
   grantedCapabilities = [];
   mockOwnPermitRows = [];
   mockQueuePermitRows = [];
@@ -220,6 +225,21 @@ function postRequest(url: string, path: string, token: string | undefined, body:
   if (token) headers.authorization = `Bearer ${token}`;
   return fetch(`${url}/api/v1${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
 }
+
+test('a DISABLED user with a valid token cannot read own permits or perform capability-authorized mutations', async () => {
+  appAccessState = 'DISABLED';
+  grantedCapabilities = ['permit.close'];
+  const { url, close } = await startServer();
+  try {
+    const read = await getRequest(url, '/permits/mine', VALID_TOKEN);
+    const mutation = await closeRequest(url, VALID_TOKEN);
+    assert.equal(read.status, 401);
+    assert.equal(mutation.status, 401);
+    assert.equal(capturedQueries.some(({ sql }) => sql.includes('FROM permits')), false);
+  } finally {
+    await close();
+  }
+});
 
 test('POST /permits/:id/close denies an unauthenticated request (401)', async () => {
   const { url, close } = await startServer();

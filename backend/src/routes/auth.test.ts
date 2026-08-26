@@ -17,6 +17,7 @@ const VALID_TOKEN = 'auth-me-test-valid-token';
 const AUTHENTICATED_USER_ID = 'auth-me-test-user-id';
 
 let grantedCapabilities: string[] = [];
+let appAccessState: 'ACTIVE' | 'DISABLED' | null = 'ACTIVE';
 
 const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
@@ -29,8 +30,10 @@ before(() => {
     return { data: { claims: { sub: AUTHENTICATED_USER_ID, email: 'user@example.com' } }, error: null };
   }) as typeof supabase.auth.getClaims;
 
-  Pool.prototype.query = (async () => ({
-    rows: grantedCapabilities.map((name) => ({ name })),
+  Pool.prototype.query = (async (text: unknown) => ({
+    rows: String(text).includes('FROM app_user_access')
+      ? (appAccessState ? [{ state: appAccessState }] : [])
+      : grantedCapabilities.map((name) => ({ name })),
   })) as unknown as typeof Pool.prototype.query;
 });
 
@@ -41,6 +44,7 @@ after(() => {
 
 beforeEach(() => {
   grantedCapabilities = [];
+  appAccessState = 'ACTIVE';
 });
 
 async function startServer(): Promise<{ url: string; close: () => Promise<void> }> {
@@ -86,6 +90,29 @@ test('GET /auth/me returns an empty capabilities array for a user with none (def
     assert.equal(res.status, 200);
     const body = (await res.json()) as { capabilities: string[] };
     assert.deepEqual(body.capabilities, []);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /auth/me immediately rejects a valid token for a DISABLED user even if capabilities exist', async () => {
+  appAccessState = 'DISABLED';
+  grantedCapabilities = ['permit.create'];
+  const { url, close } = await startServer();
+  try {
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    assert.equal(res.status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('GET /auth/me fails closed when application access state is missing', async () => {
+  appAccessState = null;
+  const { url, close } = await startServer();
+  try {
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    assert.equal(res.status, 401);
   } finally {
     await close();
   }

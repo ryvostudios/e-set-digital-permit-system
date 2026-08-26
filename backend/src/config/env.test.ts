@@ -276,7 +276,7 @@ test('envSchema RATE_LIMIT_MUTATION_MAX: rejects above the maximum, fractional, 
   assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MUTATION_MAX: String(Number.MAX_SAFE_INTEGER) })).success, false);
 });
 
-// --- SUPABASE_SERVICE_ROLE_KEY / SUPABASE_STORAGE_BUCKET (CEO bootstrap + PDF storage) ---
+// --- Auth-admin and Storage credentials ---
 
 test('envSchema: SUPABASE_SERVICE_ROLE_KEY is optional - the backend starts and the permit workflow works without it', () => {
   const result = envSchema.safeParse(baseEnv());
@@ -296,12 +296,41 @@ test('envSchema: SUPABASE_SERVICE_ROLE_KEY must not be the same value as SUPABAS
   assert.equal(result.success, false);
 });
 
-test('envSchema: SUPABASE_STORAGE_BUCKET defaults when unset and accepts an override', () => {
+test('envSchema: SUPABASE_DOCUMENT_BUCKET defaults when unset and accepts an override', () => {
   const defaultResult = envSchema.safeParse(baseEnv());
   assert.equal(defaultResult.success, true);
-  if (defaultResult.success) assert.equal(defaultResult.data.SUPABASE_STORAGE_BUCKET, 'issued-permit-documents');
+  if (defaultResult.success) assert.equal(defaultResult.data.SUPABASE_DOCUMENT_BUCKET, 'issued-permit-documents');
 
-  const overridden = envSchema.safeParse(baseEnv({ SUPABASE_STORAGE_BUCKET: 'my-custom-bucket' }));
+  const overridden = envSchema.safeParse(baseEnv({ SUPABASE_DOCUMENT_BUCKET: 'my-custom-bucket' }));
   assert.equal(overridden.success, true);
-  if (overridden.success) assert.equal(overridden.data.SUPABASE_STORAGE_BUCKET, 'my-custom-bucket');
+  if (overridden.success) assert.equal(overridden.data.SUPABASE_DOCUMENT_BUCKET, 'my-custom-bucket');
+});
+
+test('production Supabase URL and CORS allow only canonical credential-free HTTPS origins', () => {
+  const production = { NODE_ENV: 'production', CORS_ALLOWED_ORIGINS: 'https://app.example.com' };
+  assert.equal(envSchema.safeParse(baseEnv(production)).success, true);
+  for (const SUPABASE_URL of [
+    'http://project.supabase.co',
+    'https://user:password@project.supabase.co',
+  ]) assert.equal(envSchema.safeParse(baseEnv({ ...production, SUPABASE_URL })).success, false);
+  for (const CORS_ALLOWED_ORIGINS of [
+    'http://app.example.com',
+    'https://user:password@app.example.com',
+    'https://app.example.com/path',
+    'https://app.example.com?x=1',
+    'https://app.example.com#fragment',
+  ]) assert.equal(envSchema.safeParse(baseEnv({ ...production, CORS_ALLOWED_ORIGINS })).success, false);
+  const canonical = envSchema.safeParse(baseEnv({ ...production, CORS_ALLOWED_ORIGINS: 'https://APP.EXAMPLE.COM:443/' }));
+  assert.equal(canonical.success, true);
+});
+
+test('development keeps localhost HTTP usable while storage S3 credentials are all-or-none', () => {
+  assert.equal(envSchema.safeParse(baseEnv({ CORS_ALLOWED_ORIGINS: 'http://localhost:5173' })).success, true);
+  assert.equal(envSchema.safeParse(baseEnv({ SUPABASE_STORAGE_ENDPOINT: 'https://storage.example.com' })).success, false);
+  assert.equal(envSchema.safeParse(baseEnv({
+    SUPABASE_STORAGE_ENDPOINT: 'https://storage.example.com',
+    SUPABASE_STORAGE_REGION: 'local',
+    SUPABASE_STORAGE_ACCESS_KEY_ID: 'storage-access',
+    SUPABASE_STORAGE_SECRET_ACCESS_KEY: 'storage-secret',
+  })).success, true);
 });

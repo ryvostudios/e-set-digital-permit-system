@@ -6,7 +6,7 @@ import { env } from './config/env.js';
 import { parseTrustProxyCidrs } from './config/trustProxy.js';
 import { toSafeDbErrorMessage } from './db/pool.js';
 import { globalApiLimiter } from './middleware/rateLimit.js';
-import { requestLog } from './middleware/requestLog.js';
+import { requestId, requestLog } from './middleware/requestLog.js';
 import { authRouter } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
 import { notificationsRouter } from './routes/notifications.js';
@@ -40,10 +40,14 @@ export function createApp(): Express {
   // No framework fingerprinting/unnecessary response headers.
   app.disable('x-powered-by');
 
+  // Assign correlation identity before anything can terminate a response,
+  // then reject abusive floods before attaching full per-response completion
+  // listeners. Limiter rejections emit one lightweight sanitized event.
+  app.use(requestId);
+  app.use(globalApiLimiter);
   app.use(requestLog);
   app.use(helmet());
   app.use(cors(corsOptions));
-  app.use(globalApiLimiter);
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
   app.use('/api/v1', healthRouter);
   app.use('/api/v1', authRouter);

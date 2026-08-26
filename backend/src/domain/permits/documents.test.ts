@@ -5,10 +5,13 @@ import {
   buildIssuedPermitSnapshot,
   computeFileHash,
   computeSnapshotHash,
+  computeVersionedSnapshotHash,
   createIssuedDocumentSnapshot,
   generateIssuedPermitPdf,
   getDocumentForPermit,
   hasExpectedFileHash,
+  hasValidSnapshotHash,
+  isValidPrivateDocumentBucket,
   processPendingDocumentJobs,
   unconfiguredDocumentStorageAdapter,
   type DocumentStorageAdapter,
@@ -66,7 +69,8 @@ function makeJsa(overrides: Partial<JsaRow> = {}): JsaRow {
 
 class FakeDocumentsDb {
   snapshots: Array<{ id: string; permit_id: string; source_event_id: string; snapshot: IssuedPermitSnapshot; snapshot_hash: string; created_at: string }> = [];
-  jobs: Array<{ id: string; snapshot_id: string; status: 'PENDING' | 'PROCESSING' | 'GENERATED' | 'FAILED'; storage_path: string | null; file_hash: string | null; generated_at: string | null; attempt_count: number; claim_token: string | null; claimed_at: string | null; next_attempt_at: string; last_error: string | null; created_at: string; updated_at: string }> = [];
+  integrity = new Map<string, string>();
+  jobs: Array<{ id: string; snapshot_id: string; status: 'PENDING' | 'PROCESSING' | 'GENERATED' | 'FAILED'; storage_path: string | null; file_hash: string | null; generated_at: string | null; attempt_count: number; claim_token: string | null; claimed_at: string | null; next_attempt_at: string; last_error: string | null; created_at: string; updated_at: string; renderer_version: string | null; expected_file_hash: string | null }> = [];
   private snapshotCounter = 0;
   private jobCounter = 0;
 
@@ -88,10 +92,14 @@ class FakeDocumentsDb {
       this.snapshots.push(row);
       return { rows: [{ id: row.id }] };
     }
-    if (sql.startsWith('SELECT id FROM issued_document_snapshots WHERE permit_id = $1')) {
+    if (sql.startsWith('INSERT INTO issued_document_snapshot_integrity')) {
+      this.integrity.set(String(params[0]), String(params[1]));
+      return { rows: [] };
+    }
+    if (sql.startsWith('SELECT s.id, s.source_event_id')) {
       const [permitId] = params as [string];
       const row = this.snapshots.find((s) => s.permit_id === permitId);
-      return { rows: row ? [{ id: row.id }] : [] };
+      return { rows: row ? [{ ...row, hash_version: this.integrity.get(row.id) }] : [] };
     }
     if (sql.startsWith('INSERT INTO permit_document_jobs')) {
       const [snapshotId] = params as [string];
@@ -111,10 +119,12 @@ class FakeDocumentsDb {
         last_error: null,
         created_at: '2026-01-01T09:00:00.000Z',
         updated_at: '2026-01-01T09:00:00.000Z',
+        renderer_version: null,
+        expected_file_hash: null,
       });
       return { rows: [] };
     }
-    if (sql.startsWith('SELECT s.*, j.id AS job_id')) {
+    if (sql.startsWith('SELECT s.*, i.hash_version')) {
       const [permitId] = params as [string];
       const snapshot = this.snapshots.find((s) => s.permit_id === permitId);
       if (!snapshot) return { rows: [] };
@@ -124,6 +134,7 @@ class FakeDocumentsDb {
         rows: [
           {
             ...snapshot,
+            hash_version: this.integrity.get(snapshot.id),
             job_id: job.id,
             job_status: job.status,
             job_storage_path: job.storage_path,
@@ -136,6 +147,8 @@ class FakeDocumentsDb {
             job_last_error: job.last_error,
             job_created_at: job.created_at,
             job_updated_at: job.updated_at,
+            job_renderer_version: job.renderer_version,
+            job_expected_file_hash: job.expected_file_hash,
           },
         ],
       };
@@ -151,9 +164,17 @@ class FakeDocumentsDb {
           j.claimed_at = '2026-01-01T09:00:00.000Z';
           j.attempt_count += 1;
           const snapshot = this.snapshots.find((s) => s.id === j.snapshot_id)!;
-          return { id: j.id, snapshot_id: j.snapshot_id, snapshot: snapshot.snapshot, permit_id: snapshot.permit_id };
+          return { id: j.id, snapshot_id: j.snapshot_id, snapshot: snapshot.snapshot, snapshot_hash: snapshot.snapshot_hash, hash_version: this.integrity.get(snapshot.id), permit_id: snapshot.permit_id, renderer_version: j.renderer_version, expected_file_hash: j.expected_file_hash };
         });
       return { rows };
+    }
+    if (sql.startsWith('UPDATE permit_document_jobs') && sql.includes('renderer_version = COALESCE')) {
+      const [id, claimToken, fileHash] = params as [string, string, string];
+      const job = this.jobs.find((j) => j.id === id);
+      if (!job || job.status !== 'PROCESSING' || job.claim_token !== claimToken) return { rows: [] };
+      if ((job.renderer_version && job.renderer_version !== 'PDFKIT_V1') || (job.expected_file_hash && job.expected_file_hash !== fileHash)) return { rows: [] };
+      job.renderer_version = 'PDFKIT_V1'; job.expected_file_hash = fileHash;
+      return { rows: [{ id }] };
     }
     if (sql.startsWith('UPDATE permit_document_jobs') && sql.includes("status = 'GENERATED'")) {
       const [id, storagePath, fileHash, claimToken] = params as [string, string, string, string];
@@ -243,6 +264,27 @@ test('computeSnapshotHash differs when the snapshot content differs', () => {
   assert.notEqual(computeSnapshotHash(a), computeSnapshotHash(b));
 });
 
+test('snapshot hash versions verify current and legacy contracts, reject mutation/unknown versions, and canonicalize key order', () => {
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const reordered = Object.fromEntries(Object.entries(snapshot).reverse()) as unknown as IssuedPermitSnapshot;
+  const current = computeVersionedSnapshotHash(snapshot, 'SORTED_JSON_SHA256_V1');
+  const legacy = computeVersionedSnapshotHash(snapshot, 'PG_JSONB_SHA256_V1');
+  assert.equal(hasValidSnapshotHash(reordered, current, 'SORTED_JSON_SHA256_V1'), true);
+  assert.equal(hasValidSnapshotHash(reordered, legacy, 'PG_JSONB_SHA256_V1'), true);
+  assert.equal(hasValidSnapshotHash({ ...snapshot, company: 'ZPL' }, current, 'SORTED_JSON_SHA256_V1'), false);
+  assert.equal(hasValidSnapshotHash(snapshot, current, 'UNKNOWN'), false);
+});
+
+test('private document bucket validation fails closed for missing/public/wrong/unsafe configuration', () => {
+  const valid = { id: 'issued-permit-documents', public: false, file_size_limit: 1_000_000, allowed_mime_types: ['application/pdf'] };
+  assert.equal(isValidPrivateDocumentBucket(valid, valid.id), true);
+  assert.equal(isValidPrivateDocumentBucket(undefined, valid.id), false);
+  assert.equal(isValidPrivateDocumentBucket({ ...valid, public: true }, valid.id), false);
+  assert.equal(isValidPrivateDocumentBucket({ ...valid, id: 'wrong' }, valid.id), false);
+  assert.equal(isValidPrivateDocumentBucket({ ...valid, file_size_limit: null }, valid.id), false);
+  assert.equal(isValidPrivateDocumentBucket({ ...valid, allowed_mime_types: ['image/png'] }, valid.id), false);
+});
+
 test('download integrity accepts exactly the immutable PDF hash and rejects missing/mismatched hashes', () => {
   const bytes = Buffer.from('immutable pdf bytes');
   const hash = computeFileHash(bytes);
@@ -286,11 +328,37 @@ test('createIssuedDocumentSnapshot is idempotent - a retried/racing issuance nev
   assert.equal(db.jobs.length, 1);
 });
 
+test('snapshot idempotency accepts only exact event/hash/content equivalence', async () => {
+  for (const tamper of ['event', 'hash', 'content'] as const) {
+    const db = new FakeDocumentsDb();
+    const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+    await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
+    if (tamper === 'event') db.snapshots[0]!.source_event_id = 'wrong-event';
+    if (tamper === 'hash') db.snapshots[0]!.snapshot_hash = 'wrong-hash';
+    if (tamper === 'content') db.snapshots[0]!.snapshot = { ...snapshot, company: 'ZPL' };
+    await assert.rejects(
+      createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot }),
+      { name: 'SnapshotIntegrityConflictError' },
+    );
+    assert.equal(db.snapshots.length, 1);
+    assert.equal(db.jobs.length, 1);
+  }
+});
+
 test('generateIssuedPermitPdf produces a real PDF buffer containing the Permit Number and JSA Number', async () => {
   const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
   const pdf = await generateIssuedPermitPdf(snapshot);
   assert.ok(pdf.length > 0);
   assert.equal(pdf.subarray(0, 5).toString('utf8'), '%PDF-');
+});
+
+test('two independent PDF renders of one immutable snapshot have identical bytes and SHA-256 identity', async () => {
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent());
+  const first = await generateIssuedPermitPdf(snapshot);
+  const second = await generateIssuedPermitPdf(snapshot);
+  assert.notStrictEqual(first, second);
+  assert.deepEqual(first, second);
+  assert.equal(computeFileHash(first), computeFileHash(second));
 });
 
 test('getDocumentForPermit returns null when no snapshot exists for the permit', async () => {

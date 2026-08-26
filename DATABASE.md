@@ -122,6 +122,20 @@ just a storage layer. Design work should plan for:
   Supabase `function_search_path_mutable` warnings. It did not change
   their bodies, triggers, permissions, RLS, grants, or policies.
 
+## Migration 0015 (applied and live-verified)
+
+`0015_backend_integrity_hardening.sql` adds backend-only user access state,
+the Company/Other check, immutable snapshot hash-version metadata, intended
+PDF render identity, monotonic notification receipts, immutable WhatsApp
+business fields, and cross-table lifecycle attribution. New public tables
+use RLS without browser-role grants/policies; new trigger functions are
+SECURITY INVOKER with `search_path=pg_catalog`.
+
+Live verification confirmed migration id 15, complete ACTIVE backfill for the
+existing Auth population, RLS/default-deny on both new tables, zero browser-role
+grants or policies, active constraints/triggers, no invalid Company/Other or
+snapshot-integrity rows, and removal of the temporary migration hash helper.
+
 ## What Is Deliberately Not Decided Here
 
 - Actual table names, columns, and types.

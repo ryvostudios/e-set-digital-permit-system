@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
  * Operator-run PDF generation/upload worker - `npm run documents:process`.
  * Not invoked automatically (same reasoning as
  * scripts/processWhatsappOutbox.ts). Safe to run even without
- * `SUPABASE_SERVICE_ROLE_KEY`/Storage configured - every job simply
+ * Storage-scoped S3 credentials configured - every job simply
  * fails with a clear "Storage is not configured" reason and stays
  * retryable; issuance itself already succeeded regardless (see
  * domain/permits/documents.ts's doc comments).

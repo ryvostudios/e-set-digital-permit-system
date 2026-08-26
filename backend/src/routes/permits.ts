@@ -427,6 +427,11 @@ permitsRouter.get('/permits/:id/pdf', requireAuth, async (req: Request, res: Res
   }
 
   const storage = resolveDocumentStorageAdapter();
+  const preflight = storage.preflight ? await storage.preflight() : { ok: true as const };
+  if (!preflight.ok) {
+    res.status(503).json({ error: 'storage_unavailable', message: 'The permit document could not be retrieved right now' });
+    return;
+  }
   const download = await storage.download(lookup.job.storage_path);
   if (!download.ok) {
     res.status(503).json({ error: 'storage_unavailable', message: 'The permit document could not be retrieved right now' });
@@ -484,6 +489,10 @@ permitsRouter.patch(
     }
     if (result.outcome === 'conflict') {
       sendConflict(res, result.reason);
+      return;
+    }
+    if (result.outcome === 'invalid') {
+      res.status(400).json({ error: 'invalid_request', message: 'Invalid company fields', reason: result.reason });
       return;
     }
     res.status(200).json({ permit: serializePermit(result.permit) });

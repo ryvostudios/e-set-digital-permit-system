@@ -842,6 +842,7 @@ class FakeDb {
       this.documentJobs.push(row);
       return { rows: [row] };
     }
+    if (sql.startsWith('INSERT INTO issued_document_snapshot_integrity')) return { rows: [] };
     if (sql.startsWith('SELECT s.*, j.id AS job_id')) {
       const [permitId] = params as [string];
       const snapshot = this.documentSnapshots.find((s) => s.permit_id === permitId);
@@ -2962,7 +2963,7 @@ test('submitPermit notifies every CRO-capability holder, de-duplicated across mu
 
 test('resubmitPermit notifies CRO recipients with a distinct notification type from the original submission', async () => {
   const db = new FakeDb();
-  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('cro-a', 'permit.close');
   const { permit } = await createDraftPermit('applicant-1', 'UTC', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
   const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
@@ -2999,7 +3000,7 @@ test('forwardToHseReview notifies every HSE-capability holder', async () => {
 
 test('hseApprove issuance: notifies the applicant AND every CRO recipient, creates the immutable issued-document snapshot, its PDF job, and the ISSUED WhatsApp outbox message - all atomically', async () => {
   const db = new FakeDb();
-  db.grantCapability('cro-a', 'permit.close');
+  db.grantCapability('cro-a', 'permit.cro_review');
   const pending = await createPendingHsePermit(db, 'applicant-1');
 
   const approved = await hseApprove('hse-1', pending.id, { expectedVersion: pending.version }, db.deps());
@@ -3170,8 +3171,9 @@ test('resubmitPermit fails closed and rolls back when no CRO recipient exists', 
   assert.equal(db.lifecycleEvents.length, beforeEvents);
 });
 
-test('forward and HSE send-back fail closed when the destination responsibility has no recipient', async () => {
+test('fallback-only CRO is not an HSE recipient: forward rolls back every field and side effect', async () => {
   const forwardDb = new FakeDb();
+  forwardDb.grantCapability('fallback-cro', 'permit.fallback_approve');
   const { permit } = await createDraftPermit('applicant', 'UTC', forwardDb.deps());
   await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, forwardDb.deps());
   const submitted = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, forwardDb.deps());
@@ -3180,9 +3182,16 @@ test('forward and HSE send-back fail closed when the destination responsibility 
   const forwardEvents = forwardDb.lifecycleEvents.length;
   const forward = await forwardToHseReview('cro', permit.id, { expectedVersion: submitted.permit.version }, forwardDb.deps());
   assert.deepEqual(forward, { outcome: 'conflict', reason: 'no_responsible_recipient', responsibility: 'HSE' });
-  assert.equal(forwardDb.permits.get(permit.id)?.status, 'PENDING_CRO');
+  const unchanged = forwardDb.permits.get(permit.id);
+  assert.equal(unchanged?.status, 'PENDING_CRO');
+  assert.equal(unchanged?.version, submitted.permit.version);
+  assert.equal(unchanged?.hse_review_started_at, null);
+  assert.equal(unchanged?.hse_review_deadline_at, null);
   assert.equal(forwardDb.lifecycleEvents.length, forwardEvents);
+  assert.equal(forwardDb.notifications.filter((row) => row.notification_type === 'PERMIT_FORWARDED_HSE').length, 0);
+});
 
+test('HSE send-back fails closed when no real CRO reviewer exists', async () => {
   const sendBackDb = new FakeDb();
   const pendingHse = await createPendingHsePermit(sendBackDb, 'applicant');
   sendBackDb.denyRecipientsFor('permit.cro_review', 'permit.forward_hse', 'permit.send_back', 'permit.close', 'permit.hold', 'permit.cancel');

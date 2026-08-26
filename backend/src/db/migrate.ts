@@ -1,6 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { Client } from 'pg';
 import { env } from '../config/env.js';
 import { buildSslConfig, toSafeDbErrorMessage } from './pool.js';
@@ -67,9 +68,32 @@ async function applyMigration(client: Client, file: string): Promise<void> {
   }
 }
 
-async function runMigrations(): Promise<void> {
+export function getMigrationDatabaseUrl(config: Pick<typeof env, 'DATABASE_URL' | 'MIGRATION_DATABASE_URL'> = env): string {
+  if (!config.MIGRATION_DATABASE_URL) throw new Error('MIGRATION_DATABASE_URL is required to run migrations');
+  const runtime = new URL(config.DATABASE_URL);
+  const migration = new URL(config.MIGRATION_DATABASE_URL);
+
+  const databaseIdentity = (url: URL) => ({
+    hostname: url.hostname.toLowerCase(),
+    port: url.port || '5432',
+    database: decodeURIComponent(url.pathname),
+    role: decodeURIComponent(url.username),
+  });
+  const runtimeIdentity = databaseIdentity(runtime);
+  const migrationIdentity = databaseIdentity(migration);
+  const sameDatabaseRole = runtimeIdentity.hostname === migrationIdentity.hostname &&
+    runtimeIdentity.port === migrationIdentity.port &&
+    runtimeIdentity.database === migrationIdentity.database &&
+    runtimeIdentity.role === migrationIdentity.role;
+  if (sameDatabaseRole) {
+    throw new Error('Runtime and migration database credentials must use different PostgreSQL roles.');
+  }
+  return config.MIGRATION_DATABASE_URL;
+}
+
+export async function runMigrations(): Promise<void> {
   const client = new Client({
-    connectionString: env.DATABASE_URL,
+    connectionString: getMigrationDatabaseUrl(),
     ssl: buildSslConfig(),
   });
 
@@ -107,11 +131,13 @@ async function runMigrations(): Promise<void> {
   }
 }
 
-runMigrations().catch((err: unknown) => {
-  if (err instanceof MigrationDirectoryError) {
-    console.error('Migration run failed:', err.message);
-  } else {
-    console.error('Migration run failed:', toSafeDbErrorMessage(err));
-  }
-  process.exit(1);
-});
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  runMigrations().catch((err: unknown) => {
+    if (err instanceof MigrationDirectoryError || (err instanceof Error && err.message.startsWith('MIGRATION_DATABASE_URL'))) {
+      console.error('Migration run failed:', err.message);
+    } else {
+      console.error('Migration run failed:', toSafeDbErrorMessage(err));
+    }
+    process.exit(1);
+  });
+}

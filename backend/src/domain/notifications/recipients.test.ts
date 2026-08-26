@@ -15,7 +15,7 @@ function fakeCapabilityQuery(holders: Record<string, string[]>): QueryFn {
   }) as QueryFn;
 }
 
-test('resolveCroRecipients returns every user holding at least one CRO-side capability, deduplicated', async () => {
+test('resolveCroRecipients preserves established CRO workflow recipients and deduplicates assignments', async () => {
   const queryFn = fakeCapabilityQuery({
     'permit.cro_review': ['cro-1', 'cro-2'],
     'permit.forward_hse': ['cro-1'],
@@ -25,13 +25,13 @@ test('resolveCroRecipients returns every user holding at least one CRO-side capa
   assert.deepEqual([...new Set(recipients)].sort(), ['cro-1', 'cro-2', 'cro-3']);
 });
 
-test('resolveHseRecipients returns every user holding at least one HSE-side capability', async () => {
+test('resolveHseRecipients requires the real HSE review capability and excludes CRO fallback authority', async () => {
   const queryFn = fakeCapabilityQuery({
     'permit.hse_review': ['hse-1'],
     'permit.fallback_approve': ['cro-1'],
   });
   const recipients = await resolveHseRecipients(queryFn);
-  assert.deepEqual([...new Set(recipients)].sort(), ['cro-1', 'hse-1']);
+  assert.deepEqual([...new Set(recipients)].sort(), ['hse-1']);
 });
 
 test('CRO and HSE recipient capability lists are disjoint from each other and non-empty', () => {

@@ -97,6 +97,17 @@ export async function bootstrapInitialCeo(
     );
     if (reservation.rows[0]?.auth_user_id !== auth.userId || (await findActiveCeo(client.query.bind(client)))) return false;
     await client.query(
+      `INSERT INTO app_user_access (user_id, state)
+       VALUES ($1, 'ACTIVE')
+       ON CONFLICT (user_id) DO NOTHING`,
+      [auth.userId],
+    );
+    const access = await client.query<{ state: 'ACTIVE' | 'DISABLED' }>(
+      'SELECT state FROM app_user_access WHERE user_id = $1',
+      [auth.userId],
+    );
+    if (access.rows[0]?.state !== 'ACTIVE') return false;
+    await client.query(
       `INSERT INTO privileged_access_events (user_id, role, action, actor_user_id, reason)
        VALUES ($1, 'CEO', 'GRANTED', NULL, $2)`,
       [auth.userId, `Initial CEO bootstrap via bootstrap:ceo CLI${input.name ? ` (${input.name})` : ''}`],
