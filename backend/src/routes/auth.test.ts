@@ -18,6 +18,8 @@ const AUTHENTICATED_USER_ID = 'auth-me-test-user-id';
 
 let grantedCapabilities: string[] = [];
 let appAccessState: 'ACTIVE' | 'DISABLED' | null = 'ACTIVE';
+let mockMustChangePassword = false;
+let mockProfileRows: Record<string, unknown>[] = [];
 
 const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
@@ -32,8 +34,10 @@ before(() => {
 
   Pool.prototype.query = (async (text: unknown) => ({
     rows: String(text).includes('FROM app_user_access')
-      ? (appAccessState ? [{ state: appAccessState }] : [])
-      : grantedCapabilities.map((name) => ({ name })),
+      ? (appAccessState ? [{ state: appAccessState, must_change_password: mockMustChangePassword }] : [])
+      : String(text).includes('FROM workforce_profiles')
+        ? mockProfileRows
+        : grantedCapabilities.map((name) => ({ name })),
   })) as unknown as typeof Pool.prototype.query;
 });
 
@@ -45,6 +49,8 @@ after(() => {
 beforeEach(() => {
   grantedCapabilities = [];
   appAccessState = 'ACTIVE';
+  mockMustChangePassword = false;
+  mockProfileRows = [];
 });
 
 async function startServer(): Promise<{ url: string; close: () => Promise<void> }> {

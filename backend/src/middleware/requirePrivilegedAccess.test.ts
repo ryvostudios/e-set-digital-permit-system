@@ -40,7 +40,7 @@ test('requirePrivilegedAccess denies a request with no authenticated identity (4
 
 test('requirePrivilegedAccess denies when the resolved set is empty (default-deny)', async () => {
   const middleware = requirePrivilegedAccess('CEO', async () => new Set());
-  const req = mockRequest({ id: 'user-1', email: null });
+  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
   const mock = new MockResponse();
   let nextCalled = false;
 
@@ -55,7 +55,7 @@ test('requirePrivilegedAccess denies when the resolved set is empty (default-den
 
 test('requirePrivilegedAccess denies a Site Manager when CEO is required (no implicit escalation)', async () => {
   const middleware = requirePrivilegedAccess('CEO', async () => new Set(['SITE_MANAGER']));
-  const req = mockRequest({ id: 'user-1', email: null });
+  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
   const mock = new MockResponse();
   let nextCalled = false;
 
@@ -69,7 +69,7 @@ test('requirePrivilegedAccess denies a Site Manager when CEO is required (no imp
 
 test('requirePrivilegedAccess calls next() when the resolved set grants the required role', async () => {
   const middleware = requirePrivilegedAccess('SITE_MANAGER', async () => new Set(['CEO', 'SITE_MANAGER']));
-  const req = mockRequest({ id: 'user-1', email: null });
+  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
   const mock = new MockResponse();
   let nextCalled = false;
 
@@ -85,7 +85,7 @@ test('requirePrivilegedAccess fails closed (403) when resolution throws', async 
   const middleware = requirePrivilegedAccess('CEO', async () => {
     throw new Error('simulated database failure');
   });
-  const req = mockRequest({ id: 'user-1', email: null });
+  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
   const mock = new MockResponse();
   let nextCalled = false;
 

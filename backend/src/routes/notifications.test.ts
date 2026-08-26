@@ -46,7 +46,7 @@ before(() => {
     const sql = String(text).trim();
     capturedQueries.push({ sql, params });
 
-    if (sql.startsWith('SELECT state FROM app_user_access')) return { rows: [{ state: 'ACTIVE' }] };
+    if (sql.includes('FROM app_user_access')) return { rows: [{ state: 'ACTIVE', must_change_password: false }] };
 
     if (sql.startsWith('SELECT * FROM notifications WHERE recipient_user_id')) {
       return { rows: mockNotificationRows };

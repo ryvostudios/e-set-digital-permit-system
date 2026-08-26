@@ -1,0 +1,652 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { after, before, beforeEach, test } from 'node:test';
+import { Pool, type PoolClient } from 'pg';
+import { createApp } from '../app.js';
+import { supabase } from '../lib/supabase.js';
+
+/**
+ * Route wiring for account management and the forced first-login
+ * password change, over real HTTP against the real Express app.
+ *
+ * Only the two genuine external boundaries are stubbed: Supabase token
+ * verification and the Postgres connection. `requireAuth`,
+ * `requireAuthDuringPasswordChange`, the account-management
+ * authorization (capability + privileged access), the protected-target
+ * guard, the Zod bodies, and the route definitions all run for real.
+ *
+ * `SUPABASE_SERVICE_ROLE_KEY` is intentionally NOT configured in the test
+ * environment, so the Auth Admin client is absent and every request that
+ * gets far enough to need it lands on the explicit "unavailable" branch.
+ * That is exactly what proves authorization runs BEFORE any Auth Admin
+ * work is attempted: a denied caller gets 403, never 503.
+ */
+
+const VALID_TOKEN = 'accounts-test-valid-token';
+const MANAGER_ID = '10000000-0000-4000-8000-000000000002';
+const EMPLOYEE_ID = '10000000-0000-4000-8000-000000000003';
+const CEO_ID = '10000000-0000-4000-8000-000000000001';
+const TEAM_POSITION_ID = '40000000-0000-4000-8000-000000000001';
+
+const FAKE_TEMPORARY_PASSWORD = 'FAKE-temporary-password-for-tests';
+
+/**
+ * A DISTINCT authenticated identity per test. The account limiter is a
+ * per-process, per-actor budget (deliberately strict), so sharing one
+ * identity across the whole file would measure the limiter rather than
+ * the routes. Each test therefore gets its own actor, exactly as
+ * separate humans would.
+ */
+let actorCounter = 0;
+function nextActorId(): string {
+  actorCounter += 1;
+  return `20000000-0000-4000-8000-${String(actorCounter).padStart(12, '0')}`;
+}
+
+let authenticatedUserId = MANAGER_ID;
+let grantedCapabilities: string[] = [];
+/** userId -> currently GRANTED privileged roles, as `privileged_access_events` would resolve them. */
+let privilegedGrants: Record<string, string[]> = {};
+let mustChangePassword = false;
+let knownTeamPositions: string[] = [];
+let knownAccessRows: string[] = [];
+let capturedQueries: Array<{ sql: string; params: unknown[] }> = [];
+
+const originalGetClaims = supabase.auth.getClaims;
+const originalPoolQuery = Pool.prototype.query;
+const originalPoolConnect = Pool.prototype.connect;
+
+before(() => {
+  supabase.auth.getClaims = (async (token: string) => {
+    if (token !== VALID_TOKEN) return { data: null, error: new Error('invalid token') };
+    return { data: { claims: { sub: authenticatedUserId, email: null } }, error: null };
+  }) as typeof supabase.auth.getClaims;
+
+  Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
+    const sql = String(text).trim();
+    capturedQueries.push({ sql, params });
+
+    if (sql.includes('FROM app_user_access') && sql.startsWith('SELECT state')) {
+      return { rows: [{ state: 'ACTIVE', must_change_password: mustChangePassword }] };
+    }
+    if (sql.startsWith('SELECT user_id FROM app_user_access')) {
+      return { rows: knownAccessRows.includes(String(params[0])) ? [{ user_id: params[0] }] : [] };
+    }
+    if (sql.startsWith('SELECT DISTINCT c.name')) {
+      return { rows: grantedCapabilities.map((name) => ({ name })) };
+    }
+    if (sql.includes('FROM privileged_access_events')) {
+      const roles = privilegedGrants[String(params[0])] ?? [];
+      return { rows: roles.map((role) => ({ role, action: 'GRANTED' })) };
+    }
+    if (sql.includes('FROM team_positions') && sql.includes('site_manager_assignable = TRUE')) {
+      return { rows: knownTeamPositions.includes(String(params[0])) ? [{ exists: true }] : [] };
+    }
+    if (sql.includes('FROM workforce_profiles')) return { rows: [] };
+    return { rows: [] };
+  }) as unknown as typeof Pool.prototype.query;
+
+  Pool.prototype.connect = (async () =>
+    ({ query: async () => ({ rows: [] }), release: () => {} }) as unknown as PoolClient) as typeof Pool.prototype.connect;
+});
+
+after(() => {
+  supabase.auth.getClaims = originalGetClaims;
+  Pool.prototype.query = originalPoolQuery;
+  Pool.prototype.connect = originalPoolConnect;
+});
+
+beforeEach(() => {
+  authenticatedUserId = nextActorId();
+  grantedCapabilities = [];
+  privilegedGrants = {};
+  mustChangePassword = false;
+  knownTeamPositions = [TEAM_POSITION_ID];
+  knownAccessRows = [EMPLOYEE_ID];
+  capturedQueries = [];
+});
+
+/** A fully authorized Site Manager: both required authorities. */
+function authorizeSiteManager(): void {
+  grantedCapabilities = ['employee.create', 'employee.reset_password'];
+  privilegedGrants = { [authenticatedUserId]: ['SITE_MANAGER'] };
+}
+
+async function startServer(): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = http.createServer(createApp());
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+  };
+}
+
+function post(url: string, path: string, token: string | undefined, body: unknown): Promise<Response> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  return fetch(`${url}/api/v1${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
+}
+
+function get(url: string, path: string, token?: string): Promise<Response> {
+  const headers: Record<string, string> = {};
+  if (token) headers.authorization = `Bearer ${token}`;
+  return fetch(`${url}/api/v1${path}`, { method: 'GET', headers });
+}
+
+const validCreateBody = {
+  email: 'employee@example.com',
+  temporaryPassword: FAKE_TEMPORARY_PASSWORD,
+  displayName: 'Ayesha Khan',
+  teamPositionId: TEAM_POSITION_ID,
+};
+
+// ---------------------------------------------------------------------
+// Authorization
+// ---------------------------------------------------------------------
+
+test('POST /admin/employees requires authentication', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await post(url, '/admin/employees', undefined, validCreateBody)).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('an ordinary employee cannot provision or reset accounts', async () => {
+  grantedCapabilities = ['permit.create', 'permit.close'];
+  privilegedGrants = {};
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 403);
+    assert.equal(
+      (await post(url, `/admin/employees/${EMPLOYEE_ID}/reset-password`, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD })).status,
+      403,
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('the capability alone does not authorize account management (privileged access is also required)', async () => {
+  grantedCapabilities = ['employee.create', 'employee.reset_password'];
+  privilegedGrants = {};
+  const { url, close } = await startServer();
+  try {
+    const response = await post(url, '/admin/employees', VALID_TOKEN, validCreateBody);
+    assert.equal(response.status, 403);
+    const body = (await response.json()) as { message: string };
+    // The denial never says WHICH authority was missing.
+    assert.doesNotMatch(body.message, /capability|privileg/i);
+  } finally {
+    await close();
+  }
+});
+
+test('privileged access alone does not authorize account management either', async () => {
+  grantedCapabilities = [];
+  privilegedGrants = { [authenticatedUserId]: ['SITE_MANAGER'] };
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('an authorized Site Manager passes authorization and reaches the provisioning step', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    // The Auth Admin credential is absent in tests, so a fully
+    // authorized request lands on the explicit unavailable branch -
+    // which is only reachable AFTER authorization succeeded.
+    const response = await post(url, '/admin/employees', VALID_TOKEN, validCreateBody);
+    assert.equal(response.status, 503);
+    const body = (await response.json()) as { error: string; message: string };
+    assert.equal(body.error, 'account_management_unavailable');
+    // The response never names the missing credential.
+    assert.doesNotMatch(JSON.stringify(body), /SERVICE_ROLE|service_role|key/i);
+  } finally {
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Protected targets
+// ---------------------------------------------------------------------
+
+test('a Site Manager cannot reset the CEO', async () => {
+  authorizeSiteManager();
+  privilegedGrants[CEO_ID] = ['CEO'];
+  knownAccessRows = [CEO_ID];
+  const { url, close } = await startServer();
+  try {
+    const response = await post(url, `/admin/employees/${CEO_ID}/reset-password`, VALID_TOKEN, {
+      temporaryPassword: FAKE_TEMPORARY_PASSWORD,
+    });
+    assert.equal(response.status, 403);
+    // Refused before ANY credential work was attempted.
+    assert.notEqual(response.status, 503);
+  } finally {
+    await close();
+  }
+});
+
+test('a Site Manager cannot reset another Site Manager (protected upper management)', async () => {
+  authorizeSiteManager();
+  const otherManager = '10000000-0000-4000-8000-000000000004';
+  privilegedGrants[otherManager] = ['SITE_MANAGER'];
+  knownAccessRows = [otherManager];
+  const { url, close } = await startServer();
+  try {
+    assert.equal(
+      (await post(url, `/admin/employees/${otherManager}/reset-password`, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD })).status,
+      403,
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('a Site Manager cannot reset their own account through the management endpoint', async () => {
+  authorizeSiteManager();
+  knownAccessRows = [authenticatedUserId];
+  const { url, close } = await startServer();
+  try {
+    assert.equal(
+      (await post(url, `/admin/employees/${authenticatedUserId}/reset-password`, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD })).status,
+      403,
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('a normal employee target passes the protected-identity guard', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    const response = await post(url, `/admin/employees/${EMPLOYEE_ID}/reset-password`, VALID_TOKEN, {
+      temporaryPassword: FAKE_TEMPORARY_PASSWORD,
+    });
+    // Reached the Auth Admin boundary, i.e. past every authorization gate.
+    assert.equal(response.status, 503);
+  } finally {
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Input contracts / mass assignment
+// ---------------------------------------------------------------------
+
+test('provisioning rejects any attempt to grant privilege, capabilities, state, or a chosen id', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    for (const extra of [
+      { role: 'CEO' },
+      { privilegedRole: 'SITE_MANAGER' },
+      { capabilities: ['permit.close'] },
+      { userId: CEO_ID },
+      { id: CEO_ID },
+      { state: 'ACTIVE' },
+      { mustChangePassword: false },
+      { must_change_password: false },
+      { siteManagerAssignable: true },
+      { site_manager_assignable: true },
+    ]) {
+      // Each payload is an independent attacker identity; this test is for
+      // strict mass-assignment rejection, not manager burst accounting.
+      authenticatedUserId = nextActorId();
+      authorizeSiteManager();
+      const response = await post(url, '/admin/employees', VALID_TOKEN, { ...validCreateBody, ...extra });
+      assert.equal(response.status, 400, `expected ${JSON.stringify(extra)} to be rejected`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('provisioning validates its inputs, including a weak temporary password', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    const rejectForIndependentActor = async (body: Record<string, unknown>): Promise<void> => {
+      authenticatedUserId = nextActorId();
+      authorizeSiteManager();
+      assert.equal((await post(url, '/admin/employees', VALID_TOKEN, body)).status, 400);
+    };
+    await rejectForIndependentActor({ ...validCreateBody, temporaryPassword: 'short' });
+    await rejectForIndependentActor({ ...validCreateBody, temporaryPassword: '            ' });
+    await rejectForIndependentActor({ ...validCreateBody, email: 'not-an-email' });
+    await rejectForIndependentActor({ ...validCreateBody, displayName: '   ' });
+    await rejectForIndependentActor({ ...validCreateBody, teamPositionId: 'not-a-uuid' });
+  } finally {
+    await close();
+  }
+});
+
+test('an unknown or unapproved Team + Position is refused before any Auth work', async () => {
+  authorizeSiteManager();
+  knownTeamPositions = [];
+  const { url, close } = await startServer();
+  try {
+    const response = await post(url, '/admin/employees', VALID_TOKEN, validCreateBody);
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { reason: string };
+    assert.equal(body.reason, 'team_position_not_assignable');
+    assert.equal(capturedQueries.some((query) => query.sql.includes('INSERT INTO')), false);
+  } finally {
+    await close();
+  }
+});
+
+test('reset rejects a non-UUID target and any extra body field', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await post(url, '/admin/employees/not-a-uuid/reset-password', VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD })).status, 400);
+    assert.equal(
+      (await post(url, `/admin/employees/${EMPLOYEE_ID}/reset-password`, VALID_TOKEN, {
+        temporaryPassword: FAKE_TEMPORARY_PASSWORD,
+        userId: CEO_ID,
+      })).status,
+      400,
+    );
+  } finally {
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Self-service password change
+// ---------------------------------------------------------------------
+
+test('change-password requires authentication and accepts only a new password', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await post(url, '/auth/change-password', undefined, { newPassword: 'FAKE-chosen-password' })).status, 401);
+
+    for (const body of [
+      { newPassword: 'FAKE-chosen-password', userId: CEO_ID },
+      { newPassword: 'FAKE-chosen-password', targetUserId: CEO_ID },
+      { newPassword: 'FAKE-chosen-password', email: 'someone@example.com' },
+      { newPassword: 'FAKE-chosen-password', mustChangePassword: false },
+      { newPassword: 'short' },
+      {},
+    ]) {
+      assert.equal(
+        (await post(url, '/auth/change-password', VALID_TOKEN, body)).status,
+        400,
+        `expected ${JSON.stringify(body)} to be rejected`,
+      );
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('change-password never requires a capability - any authenticated account may change its own', async () => {
+  grantedCapabilities = [];
+  privilegedGrants = {};
+  const { url, close } = await startServer();
+  try {
+    const response = await post(url, '/auth/change-password', VALID_TOKEN, { newPassword: 'FAKE-chosen-password' });
+    // Reached the Auth Admin boundary: authorization did not block it.
+    assert.equal(response.status, 503);
+  } finally {
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Forced first-login password change
+// ---------------------------------------------------------------------
+
+test('while a password change is outstanding, every normal application API is refused', async () => {
+  mustChangePassword = true;
+  grantedCapabilities = ['permit.create', 'permit.submit', 'permit.close'];
+  privilegedGrants = { [authenticatedUserId]: ['SITE_MANAGER'] };
+  const { url, close } = await startServer();
+  try {
+    for (const path of ['/permits/mine', '/permits/queue?status=PENDING_CRO', '/permits/search', '/notifications']) {
+      const response = await get(url, path, VALID_TOKEN);
+      assert.equal(response.status, 403, `${path} must be refused`);
+      const body = (await response.json()) as { reason: string; error: string };
+      assert.equal(body.reason, 'PASSWORD_CHANGE_REQUIRED');
+      assert.equal(body.error, 'password_change_required');
+    }
+
+    // Mutations and admin operations are refused by the same gate.
+    assert.equal((await post(url, '/permits', VALID_TOKEN, { permitType: 'WTG_WORK' })).status, 403);
+    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('the forced-change response never leaks credential detail', async () => {
+  mustChangePassword = true;
+  const { url, close } = await startServer();
+  try {
+    const response = await get(url, '/permits/mine', VALID_TOKEN);
+    const raw = JSON.stringify(await response.json());
+    assert.doesNotMatch(raw, /password.*=|temporary|token|credentials_changed_at|reset/i);
+    assert.match(raw, /PASSWORD_CHANGE_REQUIRED/);
+  } finally {
+    await close();
+  }
+});
+
+test('the two allowed endpoints stay reachable while a password change is outstanding', async () => {
+  mustChangePassword = true;
+  const { url, close } = await startServer();
+  try {
+    const me = await get(url, '/auth/me', VALID_TOKEN);
+    assert.equal(me.status, 200);
+    const body = (await me.json()) as { mustChangePassword: boolean };
+    assert.equal(body.mustChangePassword, true);
+
+    // The change endpoint itself is reachable (and gets as far as the
+    // absent Auth Admin credential, not a 403).
+    const change = await post(url, '/auth/change-password', VALID_TOKEN, { newPassword: 'FAKE-chosen-password' });
+    assert.equal(change.status, 503);
+  } finally {
+    await close();
+  }
+});
+
+test('a stale token issued before a manager reset loses normal access on its very next request', async () => {
+  // Same token, same verified identity - only the application-side
+  // account state changed, exactly as a manager reset changes it.
+  const { url, close } = await startServer();
+  try {
+    mustChangePassword = false;
+    assert.equal((await get(url, '/permits/mine', VALID_TOKEN)).status, 200);
+
+    mustChangePassword = true;
+    const afterReset = await get(url, '/permits/mine', VALID_TOKEN);
+    assert.equal(afterReset.status, 403);
+    assert.equal(((await afterReset.json()) as { reason: string }).reason, 'PASSWORD_CHANGE_REQUIRED');
+  } finally {
+    await close();
+  }
+});
+
+test('the account-state read that enforces this happens on every authenticated request', async () => {
+  const { url, close } = await startServer();
+  try {
+    await get(url, '/permits/mine', VALID_TOKEN);
+    const stateReads = capturedQueries.filter((q) => q.sql.includes('FROM app_user_access') && q.sql.startsWith('SELECT state'));
+    assert.equal(stateReads.length, 1, 'exactly one account-state read per request - no second lookup');
+    assert.deepEqual(stateReads[0]?.params, [authenticatedUserId], 'scoped to the verified identity');
+    assert.ok(
+      !capturedQueries.some((q) => q.sql.includes('auth.sessions')),
+      'enforcement never queries auth.sessions',
+    );
+  } finally {
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// /auth/me
+// ---------------------------------------------------------------------
+
+test('/auth/me exposes only safe state - never a credential, token, or admin detail', async () => {
+  grantedCapabilities = ['permit.create'];
+  const { url, close } = await startServer();
+  try {
+    const response = await get(url, '/auth/me', VALID_TOKEN);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as Record<string, unknown>;
+
+    assert.deepEqual(Object.keys(body).sort(), [
+      'accessState',
+      'auth',
+      'capabilities',
+      'mustChangePassword',
+      'profile',
+    ]);
+    assert.equal(body.mustChangePassword, false);
+    assert.equal(body.accessState, 'ACTIVE');
+    assert.deepEqual(body.capabilities, ['permit.create']);
+    // No profile is invented when none is provisioned.
+    assert.equal(body.profile, null);
+
+    // `mustChangePassword` is the ONE sanctioned credential-state field
+    // (a boolean). Nothing else credential-related may appear - and no
+    // value anywhere in the response may be a password or token.
+    const withoutSanctionedFlag = JSON.stringify({ ...body, mustChangePassword: undefined }).toLowerCase();
+    for (const forbidden of ['password', 'token', 'service_role', 'credentials_changed_at', 'secret', 'temporary']) {
+      assert.ok(!withoutSanctionedFlag.includes(forbidden), `/auth/me must not expose ${forbidden}`);
+    }
+    assert.equal(typeof body.mustChangePassword, 'boolean', 'the credential state is a bare boolean, never a value');
+  } finally {
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// Attacker-minded self-review, as executable assertions
+// ---------------------------------------------------------------------
+
+test('EVERY authenticated application route is behind the forced-password gate', async () => {
+  // Enumerated from the real routers rather than a hand-kept list, so a
+  // route added later without the gate fails this test.
+  mustChangePassword = true;
+  grantedCapabilities = ['permit.create', 'permit.submit', 'permit.close', 'employee.create', 'employee.reset_password'];
+  privilegedGrants = { [authenticatedUserId]: ['SITE_MANAGER'] };
+  const { url, close } = await startServer();
+  try {
+    const guarded: Array<[string, string]> = [
+      ['GET', '/permits/mine'],
+      ['GET', `/permits/${EMPLOYEE_ID}`],
+      ['GET', `/permits/${EMPLOYEE_ID}/history`],
+      ['GET', `/permits/${EMPLOYEE_ID}/pdf`],
+      ['GET', '/notifications'],
+      ['POST', '/permits'],
+      ['POST', `/permits/${EMPLOYEE_ID}/submit`],
+      ['POST', `/permits/${EMPLOYEE_ID}/close`],
+      ['POST', `/notifications/${EMPLOYEE_ID}/read`],
+      ['POST', '/admin/employees'],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/reset-password`],
+    ];
+    for (const [method, path] of guarded) {
+      const response = method === 'GET'
+        ? await get(url, path, VALID_TOKEN)
+        : await post(url, path, VALID_TOKEN, {});
+      assert.equal(response.status, 403, `${method} ${path} must be gated`);
+      assert.equal(((await response.json()) as { reason: string }).reason, 'PASSWORD_CHANGE_REQUIRED');
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('clearing the forced flag requires an actual Auth password change - there is no state-only endpoint', async () => {
+  // No route anywhere accepts `mustChangePassword` as input; the only
+  // way the flag clears is `changeOwnPassword`, which sets the Auth
+  // password FIRST and only then updates state (proved in
+  // domain/accounts/service.test.ts).
+  mustChangePassword = true;
+  const { url, close } = await startServer();
+  try {
+    for (const attempt of [
+      { path: '/auth/change-password', body: { mustChangePassword: false } },
+      { path: '/auth/change-password', body: { newPassword: 'FAKE-chosen-password', mustChangePassword: false } },
+    ]) {
+      assert.equal((await post(url, attempt.path, VALID_TOKEN, attempt.body)).status, 400);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('no account-management response ever carries a password, token, or service credential', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    const responses = [
+      await post(url, '/admin/employees', VALID_TOKEN, validCreateBody),
+      await post(url, `/admin/employees/${EMPLOYEE_ID}/reset-password`, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD }),
+      await post(url, '/auth/change-password', VALID_TOKEN, { newPassword: 'FAKE-chosen-password' }),
+      await post(url, '/admin/employees', VALID_TOKEN, { ...validCreateBody, email: 'bad' }),
+    ];
+    for (const response of responses) {
+      const raw = JSON.stringify(await response.json());
+      assert.ok(!raw.includes(FAKE_TEMPORARY_PASSWORD), 'a temporary password is never echoed');
+      assert.ok(!raw.includes('FAKE-chosen-password'), 'a chosen password is never echoed');
+      assert.doesNotMatch(raw, /service_role|SUPABASE_|Bearer |eyJ/i, 'no credential or token material');
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('a validation failure never echoes the submitted password back in its issues', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    // Zod reports the failing path, not the received value, for strings.
+    const response = await post(url, '/admin/employees', VALID_TOKEN, {
+      ...validCreateBody,
+      temporaryPassword: 'short',
+      email: 'not-an-email',
+    });
+    assert.equal(response.status, 400);
+    const raw = JSON.stringify(await response.json());
+    assert.ok(!raw.includes('short'), 'the rejected password value is not echoed');
+  } finally {
+    await close();
+  }
+});
+
+test('manager account operations have a three-request burst below the DB pool, independent of self-change', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    const resetPath = `/admin/employees/${EMPLOYEE_ID}/reset-password`;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await post(url, resetPath, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD });
+      assert.notEqual(response.status, 429, `manager attempt ${attempt + 1} remains within its budget`);
+    }
+    assert.equal(
+      (await post(url, resetPath, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD })).status,
+      429,
+      'a fourth manager operation cannot join the same bounded burst',
+    );
+
+    assert.notEqual(
+      (await post(url, '/auth/change-password', VALID_TOKEN, { newPassword: FAKE_TEMPORARY_PASSWORD })).status,
+      429,
+      'self-service recovery has an independent limiter budget',
+    );
+  } finally {
+    await close();
+  }
+});

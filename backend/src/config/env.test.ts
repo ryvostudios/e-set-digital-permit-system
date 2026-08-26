@@ -276,6 +276,18 @@ test('envSchema RATE_LIMIT_MUTATION_MAX: rejects above the maximum, fractional, 
   assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MUTATION_MAX: String(Number.MAX_SAFE_INTEGER) })).success, false);
 });
 
+test('envSchema gives manager Auth operations a small independently bounded burst', () => {
+  const defaulted = envSchema.safeParse(baseEnv());
+  assert.equal(defaulted.success, true);
+  if (defaulted.success) {
+    assert.equal(defaulted.data.RATE_LIMIT_ACCOUNT_MAX, 10);
+    assert.equal(defaulted.data.RATE_LIMIT_MANAGER_ACCOUNT_MAX, 3);
+  }
+  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_ACCOUNT_MAX: '0' })).success, false);
+  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_ACCOUNT_MAX: '21' })).success, false);
+  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_ACCOUNT_MAX: '5' })).success, true);
+});
+
 // --- Auth-admin and Storage credentials ---
 
 test('envSchema: SUPABASE_SERVICE_ROLE_KEY is optional - the backend starts and the permit workflow works without it', () => {
@@ -287,6 +299,18 @@ test('envSchema: SUPABASE_SERVICE_ROLE_KEY is optional - the backend starts and 
 test('envSchema: SUPABASE_SERVICE_ROLE_KEY accepts a configured value distinct from the publishable key', () => {
   const result = envSchema.safeParse(baseEnv({ SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_abcdef1234567890' }));
   assert.equal(result.success, true);
+});
+
+test('envSchema bounds the server-only Supabase Auth Admin timeout', () => {
+  const defaulted = envSchema.safeParse(baseEnv());
+  assert.equal(defaulted.success, true);
+  if (defaulted.success) assert.equal(defaulted.data.SUPABASE_AUTH_ADMIN_TIMEOUT_MS, 8_000);
+
+  assert.equal(envSchema.safeParse(baseEnv({ SUPABASE_AUTH_ADMIN_TIMEOUT_MS: '999' })).success, false);
+  assert.equal(envSchema.safeParse(baseEnv({ SUPABASE_AUTH_ADMIN_TIMEOUT_MS: '30001' })).success, false);
+  const configured = envSchema.safeParse(baseEnv({ SUPABASE_AUTH_ADMIN_TIMEOUT_MS: '5000' }));
+  assert.equal(configured.success, true);
+  if (configured.success) assert.equal(configured.data.SUPABASE_AUTH_ADMIN_TIMEOUT_MS, 5_000);
 });
 
 test('envSchema: SUPABASE_SERVICE_ROLE_KEY must not be the same value as SUPABASE_PUBLISHABLE_KEY (copy-paste guard)', () => {

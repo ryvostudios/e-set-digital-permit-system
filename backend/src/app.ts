@@ -7,6 +7,7 @@ import { parseTrustProxyCidrs } from './config/trustProxy.js';
 import { toSafeDbErrorMessage } from './db/pool.js';
 import { globalApiLimiter } from './middleware/rateLimit.js';
 import { requestId, requestLog } from './middleware/requestLog.js';
+import { accountsRouter } from './routes/accounts.js';
 import { authRouter } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
 import { notificationsRouter } from './routes/notifications.js';
@@ -51,6 +52,7 @@ export function createApp(): Express {
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
   app.use('/api/v1', healthRouter);
   app.use('/api/v1', authRouter);
+  app.use('/api/v1', accountsRouter);
   app.use('/api/v1', permitsRouter);
   app.use('/api/v1', notificationsRouter);
 

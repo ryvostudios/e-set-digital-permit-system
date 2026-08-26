@@ -114,3 +114,35 @@ export const mutationLimiter = buildRateLimiter({
   limit: env.RATE_LIMIT_MUTATION_MAX,
   keyed: true,
 });
+
+/**
+ * Applied to every account-management endpoint (employee provisioning,
+ * Site Manager password reset, self-service password change), in
+ * addition to `globalApiLimiter`, after `requireAuth`/
+ * `requireAuthDuringPasswordChange` - so it keys by authenticated actor
+ * (see `keyByAuthOrIp`) and a caller cannot reset their own budget by
+ * changing network.
+ *
+ * Stricter than `mutationLimiter` on purpose: these are the closest
+ * thing this backend has to authentication endpoints (SECURITY.md's
+ * "particularly on authentication... endpoints"), and repeated calls are
+ * exactly what password-reset abuse and scripted account creation look
+ * like. Legitimate use is a few calls per window.
+ */
+export const accountLimiter = buildRateLimiter({
+  windowMs: env.RATE_LIMIT_WINDOW_MS,
+  limit: env.RATE_LIMIT_ACCOUNT_MAX,
+  keyed: true,
+});
+
+/**
+ * Privileged employee creation/reset has a smaller independent budget than
+ * self-service password change. In particular, the default burst (3) stays
+ * well below the default DB pool size (10), even while an Auth outage makes
+ * each reset consume its full bounded timeout.
+ */
+export const managerAccountLimiter = buildRateLimiter({
+  windowMs: env.RATE_LIMIT_WINDOW_MS,
+  limit: env.RATE_LIMIT_MANAGER_ACCOUNT_MAX,
+  keyed: true,
+});

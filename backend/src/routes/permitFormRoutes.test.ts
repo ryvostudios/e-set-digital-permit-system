@@ -82,7 +82,7 @@ before(() => {
   Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
     const sql = String(text).trim();
     capturedQueries.push({ sql, params });
-    if (sql.startsWith('SELECT state FROM app_user_access')) return { rows: [{ state: 'ACTIVE' }] };
+    if (sql.includes('FROM app_user_access')) return { rows: [{ state: 'ACTIVE', must_change_password: false }] };
     if (sql.startsWith('SELECT DISTINCT c.name')) return { rows: grantedCapabilities.map((name) => ({ name })) };
     if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE created_by = $1 ORDER BY')) {
       return { rows: mockOwnPermitRows };

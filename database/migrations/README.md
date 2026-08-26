@@ -16,7 +16,7 @@ Versioned, plain SQL migration files, applied in filename order by
 
 ## Live migration state
 
-- `0001`-`0015`: applied and live-verified.
+- `0001`-`0016`: applied and live-verified.
 - `0013_notifications_outbox_documents.sql`: live verification confirmed
   RLS on every new application table, no direct `anon`/`authenticated`
   grants, no new policies, and active immutable-snapshot protections. The
@@ -35,23 +35,40 @@ Versioned, plain SQL migration files, applied in filename order by
   paths, active constraints, clean existing data, and no remaining temporary
   hash helper. `0001`-`0015` are now immutable applied history.
 
-- `0016_permit_jsa_business_forms.sql`: **CREATED / UNAPPLIED / NOT
-  LIVE-VERIFIED**. Adds the workforce signing-identity model
+- `0016_permit_jsa_business_forms.sql`: **APPLIED / LIVE-VERIFIED**. Adds
+  the workforce signing-identity model
   (`workforce_profiles`), permit/JSA business form content (permit
   template + versioned, strictly-validated JSONB payloads plus derived
   relational projections), authoritative digital signatures
   (`permit_signatures`), and widens the document renderer allowlist to
-  include `PDFKIT_V2`. It has NOT been run against any environment and
-  no live verification has been performed. Two preconditions apply when
-  it is eventually applied:
+  include `PDFKIT_V2`. Its live application and integrity checks were
+  verified. Its deployment established these continuing invariants:
   1. It **aborts** if any permit is already beyond `DRAFT` - those rows
      predate the form model and their form content cannot be invented.
-     Remove such pre-go-live test records first.
+     This guard remains part of immutable applied history.
   2. It seeds **no** workforce profiles. Until a user is provisioned
      with a profile and a valid primary Team + Position, every action
      that would produce a signature (submit, resubmit, CRO forward, HSE
      approve, CRO fallback approve, renew) fails closed. Provisioning is
      an explicit, separate step performed after this migration.
+
+- `0017_employee_account_password_management.sql`: **APPLIED / LIVE-VERIFIED**. Adds `app_user_access.must_change_password`
+  (default FALSE, so no existing identity is retroactively locked out),
+  DB-authoritative credential timestamps, monotonic credential versions,
+  and a reset-pending marker; extends migration 0015's
+  `app_user_access_authoritative_timestamps()` so the credential
+  timestamp is database-authoritative too (all pre-existing behaviour
+  preserved); adds the append-only, free-text-free `account_audit_events`
+  table with DB-authoritative event time; adds default-false explicit
+  Site Manager assignability to Team + Positions; and seeds the
+  `employee.create` / `employee.reset_password` capability NAMES. It
+  marks no assignment TRUE and creates no organization data - no team, position,
+  team_position, workforce profile, employee, or privileged grant. It has
+  NOT been run against any environment and no live verification has been
+  performed.
+
+  After applying it, the restricted `app_runtime` role needs a small
+  privilege delta before account management works - see DEPLOYMENT.md.
 
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in

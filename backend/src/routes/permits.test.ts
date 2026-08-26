@@ -92,8 +92,8 @@ before(() => {
   Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
     const sql = String(text).trim();
     capturedQueries.push({ sql, params });
-    if (sql.startsWith('SELECT state FROM app_user_access')) {
-      return { rows: appAccessState ? [{ state: appAccessState }] : [] };
+    if (sql.includes('FROM app_user_access')) {
+      return { rows: appAccessState ? [{ state: appAccessState, must_change_password: false }] : [] };
     }
     if (sql.startsWith('SELECT DISTINCT c.name')) {
       return { rows: grantedCapabilities.map((name) => ({ name })) };

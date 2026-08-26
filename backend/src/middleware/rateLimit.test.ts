@@ -116,7 +116,7 @@ test('buildRateLimiter (unkeyed / IP-based) applies the same budget regardless o
   // Simulates requireAuth having already run and attached an identity -
   // the point being that the IP-based (unkeyed) limiter ignores it.
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    req.auth = { id: 'some-authenticated-user', email: null };
+    req.auth = { id: 'some-authenticated-user', email: null, mustChangePassword: false };
     next();
   });
   app.use(limiter);
@@ -137,7 +137,7 @@ test('buildRateLimiter (keyed: true) gives each authenticated identity its own i
   const app = express();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const userId = req.header('x-test-user-id');
-    if (userId) req.auth = { id: userId, email: null };
+    if (userId) req.auth = { id: userId, email: null, mustChangePassword: false };
     next();
   });
   app.use(limiter);

@@ -119,8 +119,13 @@ export const envSchema = z
     SUPABASE_PUBLISHABLE_KEY: z.string().min(1, 'SUPABASE_PUBLISHABLE_KEY is required'),
 
     // Privileged Auth Admin credential. Used only by the operator-run CEO
-    // bootstrap; normal API/Storage code must never import it.
+    // bootstrap and the tightly authorized employee-account adapter;
+    // ordinary API/Storage code must never import it.
     SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
+    // Hard HTTP cancellation deadline for server-only Supabase Auth Admin
+    // calls. Kept short because manager password reset deliberately holds a
+    // serialized credential-operation row lock across the Auth mutation.
+    SUPABASE_AUTH_ADMIN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(30_000).default(8_000),
     // Supabase Storage S3-compatible server credentials. These are
     // independent of Auth Admin/service-role authority and never exposed
     // to the frontend. All are optional for ordinary API startup; the
@@ -186,6 +191,17 @@ export const envSchema = z
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(15 * 60 * 1000),
     RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().min(1).max(10_000).default(300),
     RATE_LIMIT_MUTATION_MAX: z.coerce.number().int().min(1).max(1_000).default(30),
+    // Account management (employee provisioning, manager password reset,
+    // self-service password change) is deliberately far stricter than an
+    // ordinary mutation: these are the endpoints where brute-force,
+    // reset abuse, or scripted account creation would do the most
+    // damage, and their legitimate human use is a handful of calls per
+    // window, not dozens.
+    RATE_LIMIT_ACCOUNT_MAX: z.coerce.number().int().min(1).max(200).default(10),
+    // Manager operations can invoke privileged Auth Admin work. Keep their
+    // burst below the default DB pool size; self password change retains the
+    // separate account limit above.
+    RATE_LIMIT_MANAGER_ACCOUNT_MAX: z.coerce.number().int().min(1).max(20).default(3),
   })
   .superRefine((value, ctx) => {
     const invalidProxyTokens = findInvalidTrustProxyTokens(parseTrustProxyCidrs(value.TRUST_PROXY_CIDRS));

@@ -52,7 +52,7 @@ class FakeBootstrapSystem {
       return { rows: this.reservation?.status === 'RESERVED' && this.reservation.token === params[0] ? [{ auth_user_id: this.reservation.authUserId }] : [] };
     }
     if (sql.startsWith('INSERT INTO app_user_access')) { if (!this.access.has(String(params[0]))) this.access.set(String(params[0]), 'ACTIVE'); return { rows: [] }; }
-    if (sql.startsWith('SELECT state FROM app_user_access')) { const state = this.access.get(String(params[0])); return { rows: state ? [{ state }] : [] }; }
+    if (sql.includes('FROM app_user_access') && sql.startsWith('SELECT')) { const state = this.access.get(String(params[0])); return { rows: state ? [{ state, must_change_password: false }] : [] }; }
     if (sql.startsWith('INSERT INTO privileged_access_events')) { this.ceos.add(String(params[0])); return { rows: [] }; }
     if (sql.startsWith('UPDATE initial_ceo_bootstrap') && sql.includes("status = 'COMPLETED'")) {
       if (this.reservation?.status === 'RESERVED' && this.reservation.token === params[0]) {

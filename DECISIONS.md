@@ -324,7 +324,7 @@ confirmed.
   batch. Building the outbox foundation is not the same as resolving that
   decision.
 
-### Permit Templates and Form Content (implemented; migration 0016 unapplied)
+### Permit Templates and Form Content (implemented; migration 0016 applied and live-verified)
 - V1 ships exactly four permit templates - `WTG_WORK`, `COLD_WORK`,
   `HOT_WORK`, `CONFINED_SPACE_ENTRY` - plus one shared `JSA_V1`. A
   permit's template is fixed when the draft is created and can never be
@@ -353,7 +353,7 @@ confirmed.
 - Opening a record shows Permit, JSA, and History. List/search responses
   are summaries and never carry a form payload; only permit detail does.
 
-### Digital Signatures and Workforce Identity (implemented; migration 0016 unapplied)
+### Digital Signatures and Workforce Identity (implemented; migration 0016 applied and live-verified)
 - A signature is never typed, chosen, or uploaded. The applicant signs by
   performing the authenticated submission; CRO signs by performing the
   authenticated CRO authorization (forward to HSE); HSE signs by
@@ -384,6 +384,77 @@ confirmed.
   byte-identical bytes. Renewal reuses the same JSA and inherits the
   previous permit's frozen signatures, adding the renewing CRO's own
   renewal signature; nothing is re-resolved from a live profile.
+
+### Employee Accounts and Password Management (implemented; migration 0017 applied and live-verified)
+- A Site Manager provisions a normal employee account with an email, a
+  real display name, a Team + Position assignment, and a temporary
+  password. The temporary password is set directly on the Supabase Auth
+  identity and is NEVER stored in any PostgreSQL application table,
+  returned by any API, or written to any log.
+- Authorization requires BOTH authorities, and neither is grantable
+  through this API: the explicit account-management capability
+  (`employee.create` / `employee.reset_password`, seeded by migration
+  0017 and derived from Team + Position) AND CEO or Site Manager
+  privileged access (derived from the append-only
+  `privileged_access_events` log). A capability alone cannot mint
+  accounts - Team + Position never confers management authority - and a
+  privileged role alone does not silently confer every future management
+  action.
+- The normal-employee endpoints fail closed for protected identities: a
+  target holding ANY privileged grant (CEO or Site Manager) can never be
+  provisioned or reset through them, and a manager may not act on their
+  own account there. Protection is derived from `privileged_access_events`,
+  never from `user_metadata`, an email pattern, or any client hint. These
+  endpoints never write `privileged_access_events` or
+  `team_position_capabilities` at all, so they cannot create a CEO, grant
+  privileged access, or grant arbitrary capabilities. Employee provisioning
+  may use only a Team + Position explicitly approved out of band with
+  `site_manager_assignable = TRUE`; migration 0017 defaults every existing
+  and future assignment to FALSE and exposes no endpoint for changing it.
+- A provisioned or reset account carries `must_change_password = TRUE`
+  (`app_user_access`, migration 0017). The BACKEND enforces the
+  consequence: `requireAuth` refuses every application route with
+  `PASSWORD_CHANGE_REQUIRED` until the change completes, and only
+  `GET /auth/me` and `POST /auth/change-password` opt out (via
+  `requireAuthDuringPasswordChange`). Enforcement is fail-closed by
+  default - a route added later is covered automatically, because
+  skipping the gate requires naming a different middleware.
+- Because `app_user_access` is already read on every authenticated
+  request, a Site Manager reset takes effect on the NEXT request made
+  with an already-issued access token: Supabase JWTs stay
+  cryptographically valid until they expire, so application-side
+  credential state - not Supabase logout - is what actually withdraws
+  access immediately. No request ever queries `auth.sessions`.
+- Auth and PostgreSQL are not one transaction, so each operation commits
+  in an order whose only reachable intermediate state is a SAFE one:
+  provisioning creates the Auth identity first (an identity with no
+  `app_user_access` row can reach nothing) and compensates by deleting it
+  if the single PostgreSQL transaction fails. A manager reset first commits
+  `must_change_password = TRUE`, a pending-reset marker, and a monotonically
+  increasing credential version, then performs the version-serialized Auth
+  update. Failures never reopen access. Self-change captures that version and
+  clears the gate only when no newer/pending manager reset exists. Operations
+  that call Supabase Auth use an AbortSignal-backed hard HTTP timeout (8-second
+  default). The serialized manager-reset transaction applies local lock,
+  statement, and idle-in-transaction guards, while manager account operations
+  have a separate default burst limit of three, below the default pool size.
+  All partial failures remain safely retryable without pretending the two
+  systems are atomic.
+- Account actions are audited in `account_audit_events`
+  (EMPLOYEE_ACCOUNT_CREATED, EMPLOYEE_PASSWORD_RESET_BY_MANAGER,
+  EMPLOYEE_PASSWORD_CHANGED) - append-only, and with NO free-text column,
+  so a password or token is structurally impossible to record.
+
+### Remember Me (frontend requirement - NOT implemented in this batch)
+- The login screen must offer a `[ ] Remember me` checkbox. CHECKED: the
+  Supabase session may persist across a browser restart. UNCHECKED: the
+  session is browser-session scoped. Default UNCHECKED.
+- This is purely a frontend session-storage behaviour; the backend is
+  already compatible with either and needs no change. Remember Me must
+  never bypass JWT verification, the ACTIVE/DISABLED check,
+  `must_change_password`, capability authorization, or the credential
+  reset restrictions - all of which are enforced server-side on every
+  request regardless of how the session was stored.
 
 ### Data Integrity
 - No silent overwrite: stale writes (e.g. editing an outdated version)

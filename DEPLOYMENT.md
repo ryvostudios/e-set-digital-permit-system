@@ -21,10 +21,11 @@ missing or invalid for the current `NODE_ENV` - see
 
 `MIGRATION_DATABASE_URL` is required only by `npm run migrate`; it must use
 a deployment-owner login distinct from the restricted `DATABASE_URL`
-runtime login. `SUPABASE_SERVICE_ROLE_KEY` is required only by the
-operator-run CEO bootstrap. PDF access uses the separate Storage-scoped
-S3 variables in `.env.example`; normal API startup needs neither admin
-credential and fails closed only at the unavailable feature boundary.
+runtime login. `SUPABASE_SERVICE_ROLE_KEY` is required by the operator-run
+CEO bootstrap and by trusted request-side employee account management; it
+remains server-only and those endpoints fail closed when it is absent. PDF
+access uses the separate Storage-scoped S3 variables in `.env.example`.
+Normal API startup does not require either privileged credential.
 
 ## Manual production configuration decisions
 
@@ -47,6 +48,51 @@ they depend on the actual deployment topology:
   tables. For private-bucket preflight only, it has `USAGE` on `storage` and
   `SELECT` on `storage.buckets`. Browser `anon` and `authenticated` roles
   remain intentionally default-deny with zero direct application-table grants.
+- **Employee account management (required before the feature works).**
+  Migration `0017` seeds only capability NAMES. For a Site Manager to
+  actually provision or reset employee accounts, an operator must, once:
+  (1) grant that person CEO or Site Manager privileged access via
+  `privileged_access_events` (the CEO bootstrap CLI does this for the
+  first CEO; Site Manager grants remain an operator/CEO action - there is
+  still no grant service), and (2) attach `employee.create` /
+  `employee.reset_password` to the Team + Position they hold, via
+  `team_position_capabilities`. BOTH are required: neither authority
+  alone authorizes account management, and neither is grantable through
+  the API. Account management also requires `SUPABASE_SERVICE_ROLE_KEY`
+  to be configured server-side; without it the endpoints return an
+  explicit "unavailable" response rather than partially succeeding.
+  Configure `SUPABASE_AUTH_ADMIN_TIMEOUT_MS` between 1,000 and 30,000ms
+  (default 8,000ms). It is a hard AbortSignal-backed HTTP deadline, not a
+  passive Promise timeout. Manager reset additionally uses transaction-local
+  lock/statement/idle guards; at defaults, lock acquisition is bounded to 2
+  seconds, Auth holds an acquired row lock for at most 8 seconds, and the DB
+  terminates an unexpectedly idle reset transaction after 10 seconds.
+  An operator/CEO must also explicitly set
+  `team_positions.site_manager_assignable = TRUE` for each assignment that
+  ordinary employee provisioning may use. The default is FALSE, migration
+  `0017` marks none assignable, and no account-management endpoint can change
+  this policy flag.
+
+  The restricted `app_runtime` role needs this exact privilege delta
+  after `0017` (verify each against the live role - several may already
+  be granted):
+  ```sql
+  GRANT SELECT, INSERT, UPDATE ON TABLE public.app_user_access TO app_runtime;
+  GRANT INSERT ON TABLE public.account_audit_events TO app_runtime;
+  GRANT USAGE ON SEQUENCE public.account_audit_events_ordinal_seq TO app_runtime;
+  GRANT SELECT, INSERT ON TABLE public.user_team_positions TO app_runtime;
+  GRANT SELECT, INSERT ON TABLE public.workforce_profiles TO app_runtime;
+  GRANT SELECT ON TABLE public.privileged_access_events TO app_runtime;
+  ```
+  No ownership, no DDL, no schema `CREATE`, no `DELETE`, no `TRUNCATE`,
+  and no `schema_migrations` access is added. Supabase Auth Admin actions
+  use the server-only Auth Admin credential, never the database runtime
+  role.
+  Manager employee-create/reset endpoints use the independent per-actor
+  `RATE_LIMIT_MANAGER_ACCOUNT_MAX` budget (default 3 per configured window),
+  below the default ten-connection pool. Self password change retains
+  `RATE_LIMIT_ACCOUNT_MAX` so the manager bound does not impair recovery.
+
 - **Private PDF Storage.** Create the configured bucket manually as
   private (`public=false`), restrict MIME types to `application/pdf`, and
   set a sensible non-null size limit. Configure the four Storage S3

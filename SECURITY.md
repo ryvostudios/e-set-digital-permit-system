@@ -185,8 +185,14 @@ production-hardening batch:
 - **Credential separation**: the API pool reads only the restricted runtime
   `DATABASE_URL`; migration execution requires distinct
   `MIGRATION_DATABASE_URL`. Auth Admin service-role authority is confined to
-  CEO bootstrap. PDF Storage uses separate Storage-scoped S3 credentials and
-  verifies the exact private bucket configuration before I/O.
+  CEO bootstrap and the capability-plus-privileged-authority protected employee
+  account-management adapter. PDF Storage uses separate Storage-scoped S3
+  credentials and verifies the exact private bucket configuration before I/O.
+  Every privileged Auth Admin HTTP request is cancellation-bounded by the
+  server-only `SUPABASE_AUTH_ADMIN_TIMEOUT_MS` setting (8 seconds by default).
+  Manager reset's serialized DB phase has transaction-local lock, statement,
+  and idle-in-transaction timeouts and a separate three-operation default
+  rate-limit budget, preventing an Auth outage from monopolizing the pool.
   This split is live-verified: `DATABASE_URL` uses `app_runtime`, which has no
   schema ownership/DDL, migration-ledger/bootstrap access, application-table
   DELETE/TRUNCATE, or browser-role grants. Required lookup access includes
