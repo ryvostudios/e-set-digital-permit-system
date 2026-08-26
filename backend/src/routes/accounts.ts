@@ -3,9 +3,9 @@ import {
   authorizeAccountManagement,
   isManageableTarget,
   teamPositionIsSiteManagerAssignable,
-  type AccountManagementCapability,
 } from '../authz/accountManagement.js';
 import { createSupabaseAccountAdmin } from '../domain/accounts/admin.js';
+import { resolveProvisioningCompany } from '../domain/accounts/companies.js';
 import {
   changeOwnPassword,
   createEmployeeAccount,
@@ -71,19 +71,18 @@ function resolveDeps(): AccountsServiceDeps | null {
 }
 
 /**
- * Both authorities must hold (capability AND CEO/Site Manager privileged
- * access - see authz/accountManagement.ts). A denial is always the same
- * generic 403: which of the two was missing is not disclosed.
+ * The caller must hold CEO or E-SET SITE_MANAGER privileged access - the
+ * authority account management comes from (see
+ * authz/accountManagement.ts). Team + Position capabilities are
+ * deliberately NOT consulted: a privileged system account has no Team and
+ * no Position at all. A denial is always the same generic 403, which
+ * never says what was missing.
  */
-async function authorize(
-  req: Request,
-  res: Response,
-  capability: AccountManagementCapability,
-): Promise<string | null> {
+async function authorize(req: Request, res: Response): Promise<string | null> {
   const userId = getAuthenticatedUserId(req, res);
   if (!userId) return null;
   try {
-    const authorization = await authorizeAccountManagement(userId, capability);
+    const authorization = await authorizeAccountManagement(userId);
     if (!authorization.authorized) {
       sendForbidden(res);
       return null;
@@ -145,7 +144,12 @@ accountsRouter.post(
 );
 
 /**
- * Site Manager provisions a normal employee account.
+ * CEO or E-SET Site Manager provisions a NORMAL employee account: a
+ * Company, a Team + Position, a display name, an email, and a temporary
+ * password. This endpoint can only ever create a normal organizational
+ * employee - it writes `app_user_access`, `user_team_positions` and
+ * `workforce_profiles`, and never `privileged_access_events`, so it
+ * cannot mint a CEO, a Site Manager, or any other privileged account.
  *
  * `requireAuth` (not the password-change variant) is deliberate: a
  * manager who themselves owe a password change may not provision
@@ -156,12 +160,25 @@ accountsRouter.post(
   requireAuth,
   managerAccountLimiter,
   async (req: Request, res: Response) => {
-    const actorUserId = await authorize(req, res, 'employee.create');
+    const actorUserId = await authorize(req, res);
     if (!actorUserId) return;
 
     const body = createEmployeeBodySchema.safeParse(req.body);
     if (!body.success) {
       sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    // The client supplies only a strict V1 code. Resolve the authoritative
+    // id/name before the privileged Auth client, so missing or unknown company
+    // data cannot leave an Auth identity behind.
+    const company = await resolveProvisioningCompany(body.data.companyCode);
+    if (!company) {
+      res.status(400).json({
+        error: 'invalid_request',
+        reason: 'company_not_found',
+        message: 'The requested company is not available for employee provisioning',
+      });
       return;
     }
 
@@ -171,7 +188,7 @@ accountsRouter.post(
     // reaches the privileged client at all. This endpoint never creates
     // a Team + Position, and never writes `team_position_capabilities`
     // or `privileged_access_events` - so provisioning can only ever
-    // place a new employee into an assignment the organization has not
+    // place a new employee into an assignment the organization HAS
     // explicitly approved for this provisioning flow.
     if (!(await teamPositionIsSiteManagerAssignable(body.data.teamPositionId))) {
       res.status(400).json({
@@ -188,7 +205,13 @@ accountsRouter.post(
       return;
     }
 
-    const result = await createEmployeeAccount(actorUserId, body.data, deps);
+    const result = await createEmployeeAccount(actorUserId, {
+      email: body.data.email,
+      temporaryPassword: body.data.temporaryPassword,
+      displayName: body.data.displayName,
+      companyId: company.id,
+      teamPositionId: body.data.teamPositionId,
+    }, deps);
 
     if (result.outcome === 'conflict') {
       res.status(409).json({ error: 'conflict', reason: result.reason, message: 'That email cannot be used' });
@@ -230,7 +253,7 @@ accountsRouter.post(
   requireAuth,
   managerAccountLimiter,
   async (req: Request, res: Response) => {
-    const actorUserId = await authorize(req, res, 'employee.reset_password');
+    const actorUserId = await authorize(req, res);
     if (!actorUserId) return;
 
     const params = employeeIdParamsSchema.safeParse(req.params);

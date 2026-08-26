@@ -227,7 +227,14 @@ class FakeDb {
   // tests - which are about transitions, not identity - need no setup,
   // while the fail-closed tests can still express "this user has no
   // profile" and "this user's primary assignment is not one they hold".
-  workforceProfiles = new Map<string, { display_name: string; primary_team_position_id: string; team_name: string; position_name: string }>();
+  workforceProfiles = new Map<string, {
+    display_name: string;
+    company_code: string;
+    company_name: string;
+    primary_team_position_id: string;
+    team_name: string;
+    position_name: string;
+  }>();
   usersWithoutSigningIdentity = new Set<string>();
   permitSignatures: Array<{
     id: string;
@@ -267,7 +274,7 @@ class FakeDb {
     userId: string,
     profile: { display_name: string; primary_team_position_id: string; team_name: string; position_name: string },
   ): void {
-    this.workforceProfiles.set(userId, profile);
+    this.workforceProfiles.set(userId, { company_code: 'E_SET', company_name: 'E-SET', ...profile });
   }
 
   /** Test fixture setup: removes a signing identity, so any signing action by that user must fail closed. Covers both "no profile row" and "the profile's primary assignment is not one this user holds" - the resolver's join returns no row either way. */
@@ -848,6 +855,8 @@ class FakeDb {
       if (this.usersWithoutSigningIdentity.has(userId)) return { rows: [] };
       const profile = this.workforceProfiles.get(userId) ?? {
         display_name: `Display Name of ${userId}`,
+        company_code: 'E_SET',
+        company_name: 'E-SET',
         primary_team_position_id: `tp-${userId}`,
         team_name: `Team of ${userId}`,
         position_name: `Position of ${userId}`,

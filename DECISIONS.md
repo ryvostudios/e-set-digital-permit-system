@@ -391,15 +391,27 @@ confirmed.
   password. The temporary password is set directly on the Supabase Auth
   identity and is NEVER stored in any PostgreSQL application table,
   returned by any API, or written to any log.
-- Authorization requires BOTH authorities, and neither is grantable
-  through this API: the explicit account-management capability
-  (`employee.create` / `employee.reset_password`, seeded by migration
-  0017 and derived from Team + Position) AND CEO or Site Manager
-  privileged access (derived from the append-only
-  `privileged_access_events` log). A capability alone cannot mint
-  accounts - Team + Position never confers management authority - and a
-  privileged role alone does not silently confer every future management
-  action.
+- Authorization is the CEO / E-SET SITE_MANAGER privileged system role
+  itself, derived from the append-only `privileged_access_events` log and
+  not grantable through this API. It is deliberately NOT additionally
+  gated on a Team + Position capability: CEO and E-SET Site Manager are
+  privileged system accounts with no Company, Team, or Position at all, so
+  requiring `employee.create` / `employee.reset_password` (which can only
+  come from a Team + Position) could be satisfied only by fabricating an
+  organizational assignment for them - which the identity model forbids -
+  and would otherwise leave account management unreachable for the only
+  accounts entitled to perform it. This does not let Team + Position
+  confer management authority: a capability is not merely insufficient
+  here, it is not consulted at all, and capability authorization is
+  untouched everywhere else (permits, JSA, review queues), where it
+  governs normal employees. The `employee.create` /
+  `employee.reset_password` capability NAMES seeded by migration 0017
+  remain in the catalogue but gate nothing; migration 0017 is applied
+  history and is not edited.
+- CEO remains strictly above Site Manager, and multiple active E-SET Site
+  Managers are allowed, each holding the same full Site Manager authority.
+  Granting or revoking SITE_MANAGER itself is a CEO-only act, and no
+  grant/revoke service exists yet (see migration 0004).
 - The normal-employee endpoints fail closed for protected identities: a
   target holding ANY privileged grant (CEO or Site Manager) can never be
   provisioned or reset through them, and a manager may not act on their
@@ -444,6 +456,104 @@ confirmed.
   (EMPLOYEE_ACCOUNT_CREATED, EMPLOYEE_PASSWORD_RESET_BY_MANAGER,
   EMPLOYEE_PASSWORD_CHANGED) - append-only, and with NO free-text column,
   so a password or token is structurally impossible to record.
+
+### Company Membership and Privileged System Identities (implemented foundation; migration 0018 applied and live-verified)
+- There are two account categories, and they are not the same kind of
+  thing. A NORMAL EMPLOYEE is an organizational identity: Company, Team,
+  Position, name, email, credentials. A PRIVILEGED SYSTEM ACCOUNT (CEO,
+  E-SET SITE_MANAGER) is not an organizational employee for authorization
+  purposes at all.
+- Every normal employee belongs to EXACTLY ONE company, through the single
+  `workforce_profiles.company_id` reference. The confirmed initial
+  companies are exactly `E_SET` / E-SET, `ZPL` / ZPL, and `SGRE` / SGRE.
+  Because `workforce_profiles` is keyed by `user_id` and `company_id` is
+  NOT NULL, zero companies and multiple companies are unrepresentable, not
+  merely rejected - there is no join table that could hold a second
+  membership.
+- Company is authoritative server-side data. It is never inferred from an
+  email address or its domain, Supabase `user_metadata`, a permit payload,
+  client state, a Team name, or a Position name. Employee provisioning
+  accepts one strict company CODE, resolves it against the backend-only
+  `companies` table, and fails closed on an unknown or missing company
+  BEFORE any Supabase Auth identity is created, so an invalid company can
+  never leave a half-provisioned Auth user behind. The client cannot
+  supply a company name, a company object, a database identifier, or a
+  list of companies (`.strict()` request schema). No endpoint can create a
+  company.
+- CEO and E-SET SITE_MANAGER have NO Company, NO Team and NO Position, and
+  no fabricated membership is created to satisfy database constraints.
+  This needs no nullable column: `workforce_profiles` has been the
+  ORGANIZATIONAL employee store since migration 0016, whose composite
+  foreign key already requires a Team + Position the same user actually
+  holds - so a privileged identity has no row there at all. Migration 0018
+  enforces that direction in the DATABASE: a user holding an active
+  CEO/SITE_MANAGER grant cannot be given a workforce profile.
+- A ZPL "Site Manager" is an ordinary ZPL organizational POSITION and is
+  completely different from the privileged E-SET SITE_MANAGER system
+  authority. Privileged status is read only from `privileged_access_events`
+  - never from a Position name, a Team name, an email pattern, or
+  `user_metadata` - so the two can never be confused.
+- E-SET privileged Site Managers are granted and revoked by the CEO;
+  multiple active E-SET Site Managers are allowed and each holds the same
+  full Site Manager authority; a Site Manager cannot grant CEO authority.
+  The grant/revoke service itself is still unimplemented (migration 0004).
+- `/auth/me` exposes the caller's own authoritative `company` (code and
+  name) inside `profile` for a normal employee, and `privilegedRoles` for
+  their own active privileged grants. A privileged system account
+  therefore reports `profile: null` with a non-empty `privilegedRoles` - it
+  is never presented as a normal E-SET company member.
+- This is identity/profile foundation only. Permit workflow authorization
+  is unchanged by 0018: CRO approval remains E-SET E-BOP -> CRO only, HSE
+  approval remains E-SET HSE -> Team Lead / Paramedic only, ZPL HSE has no
+  permit approval authority, and hold/resume/cancel/close/renew remain
+  CRO-only. No company-specific permit rule is introduced.
+- Migration 0018 guesses no membership. It aborts before creating any
+  object when a workforce profile already exists, so an operator must
+  supply an explicit reviewed mapping rather than have one invented. It
+  was applied against a database holding zero workforce profiles and zero
+  active privileged grants, so no mapping was required and none was
+  invented.
+
+### Confirmed organization structure (reference data - NOT inserted by any migration yet)
+- E-SET teams and positions: Admin (Admin Lead, Assistant Admin); Civil
+  (Team Lead, Supervisor, Worker); WTG (Team Lead, Engineer, Technician);
+  E-BOP (Team Lead, CRO, Technician); HSE (Team Lead, Paramedic).
+- ZPL: one organizational team containing Site Manager, Asset Manager,
+  Engineer, HSE.
+- SGRE: one organizational team containing Team Lead.
+- All of these are normal Team + Positions an E-SET Site Manager may
+  assign when creating employees, including E-BOP CRO. Migration 0018
+  deliberately inserts NO organization data - teams, positions,
+  team_positions and their `site_manager_assignable` approval remain
+  operator-provisioned, and no capability mapping is invented for them.
+
+### Not yet implemented, and deliberately out of scope for migration 0018
+- **Privileged permit application.** CEO and E-SET SITE_MANAGER may apply
+  for permits, with the E-SET business context derived server-side (never
+  client-selectable) and with ONLY their personal name shown in the
+  applicant identity field and on the PDF - no "CEO", "Site Manager" or
+  "E-SET" beside it. This is NOT implemented. It requires an authoritative
+  privileged display-name store and a signature identity that carries no
+  Team + Position, and `permit_signatures` (migration 0016) requires both
+  today, so it needs its own migration. Until then a privileged account
+  has no signing identity and every action that would produce a signature
+  fails closed for them.
+- **Server-derived permit applicant identity.** For normal employees the
+  applicant name and Company must come from the authenticated authoritative
+  profile and be uneditable by the applicant, with the paper wording
+  `Mr. [NAME] of Company [COMPANY]`. Today `permits.company` is still the
+  client-supplied `ESET` / `SGRE` / `ZPL` / `OTHER` form field from
+  migration 0006, whose values are a different vocabulary from the 0018
+  company CODES (`E_SET` / `ZPL` / `SGRE`). Reconciling the two and
+  deriving the field server-side is a separate task with its own
+  migration; issued snapshots and PDFs stay immutable, so no historical
+  record is rewritten.
+- **View-all-permits permission.** A persistent, grantable/revocable
+  "view all permits" access for a normal employee of any company, on top
+  of the existing own-permits default and the authorized workflow review
+  queues. The capability does not exist in the schema today and 0018 does
+  not touch permit access, so it needs its own migration and is the next
+  task, not part of the company foundation.
 
 ### Remember Me (frontend requirement - NOT implemented in this batch)
 - The login screen must offer a `[ ] Remember me` checkbox. CHECKED: the

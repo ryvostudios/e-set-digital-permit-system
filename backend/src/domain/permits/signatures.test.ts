@@ -13,6 +13,8 @@ import {
 
 interface ProfileRow {
   display_name: string;
+  company_code: string;
+  company_name: string;
   primary_team_position_id: string;
   team_name: string;
   position_name: string;
@@ -61,6 +63,8 @@ function buildQuery(profiles: Record<string, ProfileRow>, inserted: Record<strin
 
 const CRO_PROFILE: ProfileRow = {
   display_name: 'Bilal Ahmed',
+  company_code: 'E_SET',
+  company_name: 'E-SET',
   primary_team_position_id: 'tp-2',
   team_name: 'Operations',
   position_name: 'Control Room Operator',
@@ -88,6 +92,8 @@ test('resolveSigningIdentity returns the authoritative name and signing designat
   assert.deepEqual(identity, {
     userId: 'cro-1',
     displayName: 'Bilal Ahmed',
+    companyCode: 'E_SET',
+    companyName: 'E-SET',
     teamPositionId: 'tp-2',
     teamName: 'Operations',
     positionName: 'Control Room Operator',
@@ -119,6 +125,8 @@ test('a profile whose primary assignment the user does not hold FAILS CLOSED (th
 test('a blank display name or designation FAILS CLOSED rather than printing an empty signature', async () => {
   for (const broken of [
     { ...CRO_PROFILE, display_name: '   ' },
+    { ...CRO_PROFILE, company_code: '' },
+    { ...CRO_PROFILE, company_name: '  ' },
     { ...CRO_PROFILE, team_name: '' },
     { ...CRO_PROFILE, position_name: '  ' },
   ]) {

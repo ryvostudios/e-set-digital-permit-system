@@ -16,6 +16,7 @@ const MANAGER = '10000000-0000-4000-8000-000000000002';
 const NEW_USER = '10000000-0000-4000-8000-000000000009';
 const EMPLOYEE = '10000000-0000-4000-8000-000000000003';
 const TEAM_POSITION = '40000000-0000-4000-8000-000000000001';
+const COMPANY_ID = '18000000-0000-4000-8000-000000000001';
 
 /** A deliberately fake, clearly-labelled test constant - never a real credential. */
 const FAKE_TEMPORARY_PASSWORD = 'FAKE-temporary-password-for-tests';
@@ -41,7 +42,12 @@ class FakeAccounts {
     credential_reset_pending?: boolean;
   }>();
   assignments: Array<{ user_id: string; team_position_id: string }> = [];
-  profiles: Array<{ user_id: string; display_name: string; primary_team_position_id: string }> = [];
+  profiles: Array<{
+    user_id: string;
+    display_name: string;
+    primary_team_position_id: string;
+    company_id: string;
+  }> = [];
   auditRows: Array<{ event_type: string; actor_user_id: string; target_user_id: string }> = [];
   authCalls: FakeAuthCall[] = [];
   /** Every SQL statement and every bound parameter the service sent to PostgreSQL. */
@@ -120,6 +126,7 @@ class FakeAccounts {
         user_id: String(params[0]),
         display_name: String(params[1]),
         primary_team_position_id: String(params[2]),
+        company_id: String(params[3]),
       });
       return { rows: [] };
     }
@@ -228,6 +235,7 @@ test('provisioning creates the Auth identity, access row, assignment, profile an
       email: 'employee@example.com',
       temporaryPassword: FAKE_TEMPORARY_PASSWORD,
       displayName: 'Ayesha Khan',
+      companyId: COMPANY_ID,
       teamPositionId: TEAM_POSITION,
     },
     db.deps(),
@@ -238,8 +246,14 @@ test('provisioning creates the Auth identity, access row, assignment, profile an
   assert.equal(db.accessRows.get(NEW_USER)?.must_change_password, true, 'a provisioned account owes a password change');
   assert.deepEqual(db.assignments, [{ user_id: NEW_USER, team_position_id: TEAM_POSITION }]);
   assert.deepEqual(db.profiles, [
-    { user_id: NEW_USER, display_name: 'Ayesha Khan', primary_team_position_id: TEAM_POSITION },
+    {
+      user_id: NEW_USER,
+      display_name: 'Ayesha Khan',
+      primary_team_position_id: TEAM_POSITION,
+      company_id: COMPANY_ID,
+    },
   ]);
+  assert.equal(db.profiles[0]?.company_id, COMPANY_ID);
   // The profile's primary assignment is exactly the assignment created
   // for the same user - migration 0016's composite foreign key can never
   // be violated by this flow.
@@ -258,6 +272,7 @@ test('the temporary password is never written to PostgreSQL, in any statement', 
       email: 'employee@example.com',
       temporaryPassword: FAKE_TEMPORARY_PASSWORD,
       displayName: 'Ayesha Khan',
+      companyId: COMPANY_ID,
       teamPositionId: TEAM_POSITION,
     },
     db.deps(),
@@ -283,6 +298,7 @@ test('a database failure after Auth creation is COMPENSATED - no half-provisione
       email: 'employee@example.com',
       temporaryPassword: FAKE_TEMPORARY_PASSWORD,
       displayName: 'Ayesha Khan',
+      companyId: COMPANY_ID,
       teamPositionId: TEAM_POSITION,
     },
     db.deps(),
@@ -308,6 +324,7 @@ test('when compensation itself fails, the orphan is reported and still has NO ap
       email: 'employee@example.com',
       temporaryPassword: FAKE_TEMPORARY_PASSWORD,
       displayName: 'Ayesha Khan',
+      companyId: COMPANY_ID,
       teamPositionId: TEAM_POSITION,
     },
     db.deps(),
@@ -334,6 +351,7 @@ test('an existing email is refused, never adopted onto the existing Auth identit
       email: 'ceo@example.com',
       temporaryPassword: FAKE_TEMPORARY_PASSWORD,
       displayName: 'Impostor',
+      companyId: COMPANY_ID,
       teamPositionId: TEAM_POSITION,
     },
     db.deps(),
@@ -353,6 +371,7 @@ test('a duplicate provisioning race cannot create two accounts for one email', a
     email: 'employee@example.com',
     temporaryPassword: FAKE_TEMPORARY_PASSWORD,
     displayName: 'Ayesha Khan',
+    companyId: COMPANY_ID,
     teamPositionId: TEAM_POSITION,
   };
 
@@ -612,6 +631,7 @@ test('no password ever reaches a log line, even on the orphan-compensation path'
         email: 'employee@example.com',
         temporaryPassword: FAKE_TEMPORARY_PASSWORD,
         displayName: 'Ayesha Khan',
+        companyId: COMPANY_ID,
         teamPositionId: TEAM_POSITION,
       },
       db.deps(),

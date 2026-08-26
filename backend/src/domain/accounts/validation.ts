@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { COMPANY_CODES } from './companies.js';
 
 /**
  * Request contracts for account management.
@@ -56,6 +57,7 @@ export const createEmployeeBodySchema = z
     email: z.string().trim().email().max(254),
     temporaryPassword: passwordSchema,
     displayName: z.string().trim().min(1).max(120),
+    companyCode: z.enum(COMPANY_CODES),
     teamPositionId: z.string().uuid(),
   })
   .strict();

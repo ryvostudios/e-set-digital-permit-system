@@ -32,9 +32,11 @@ test('real PostgreSQL transaction rolls back fallback-only CRO forward when no H
       CREATE TABLE teams (id uuid PRIMARY KEY, name text NOT NULL);
       CREATE TABLE positions (id uuid PRIMARY KEY, name text NOT NULL);
       CREATE TABLE team_positions (id uuid PRIMARY KEY, team_id uuid NOT NULL REFERENCES teams(id), position_id uuid NOT NULL REFERENCES positions(id));
+      CREATE TABLE companies (id uuid PRIMARY KEY, code text NOT NULL UNIQUE, name text NOT NULL);
       CREATE TABLE workforce_profiles (
         user_id uuid PRIMARY KEY REFERENCES app_users(id), display_name text NOT NULL,
-        primary_team_position_id uuid NOT NULL REFERENCES team_positions(id)
+        primary_team_position_id uuid NOT NULL REFERENCES team_positions(id),
+        company_id uuid NOT NULL REFERENCES companies(id)
       );
       CREATE TABLE permit_signatures (
         id uuid PRIMARY KEY DEFAULT '50000000-0000-4000-8000-000000000003',
@@ -74,8 +76,10 @@ test('real PostgreSQL transaction rolls back fallback-only CRO forward when no H
         '70000000-0000-4000-8000-000000000001',
         '80000000-0000-4000-8000-000000000001'
       );
+      INSERT INTO companies VALUES ('18000000-0000-4000-8000-000000000001', 'E_SET', 'E-SET');
       INSERT INTO workforce_profiles VALUES (
-        '10000000-0000-4000-8000-000000000001', 'Bilal Ahmed', '40000000-0000-4000-8000-000000000001'
+        '10000000-0000-4000-8000-000000000001', 'Bilal Ahmed',
+        '40000000-0000-4000-8000-000000000001', '18000000-0000-4000-8000-000000000001'
       );
     `);
 

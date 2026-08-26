@@ -35,6 +35,8 @@ export type SignatureRole = (typeof SIGNATURE_ROLES)[number];
 export interface SigningIdentity {
   userId: string;
   displayName: string;
+  companyCode: string;
+  companyName: string;
   teamPositionId: string;
   teamName: string;
   positionName: string;
@@ -77,12 +79,17 @@ export class SigningIdentityUnavailableError extends Error {
 export async function resolveSigningIdentity(queryFn: QueryFn, userId: string): Promise<SigningIdentity> {
   const result = await queryFn<{
     display_name: string;
+    company_code: string;
+    company_name: string;
     primary_team_position_id: string;
     team_name: string;
     position_name: string;
   }>(
-    `SELECT wp.display_name, wp.primary_team_position_id, t.name AS team_name, p.name AS position_name
+    `SELECT wp.display_name, wp.primary_team_position_id,
+            c.code AS company_code, c.name AS company_name,
+            t.name AS team_name, p.name AS position_name
        FROM workforce_profiles wp
+       JOIN companies c ON c.id = wp.company_id
        JOIN user_team_positions utp
          ON utp.user_id = wp.user_id AND utp.team_position_id = wp.primary_team_position_id
        JOIN team_positions tp ON tp.id = wp.primary_team_position_id
@@ -96,6 +103,8 @@ export async function resolveSigningIdentity(queryFn: QueryFn, userId: string): 
   if (
     !row ||
     row.display_name.trim() === '' ||
+    row.company_code.trim() === '' ||
+    row.company_name.trim() === '' ||
     row.team_name.trim() === '' ||
     row.position_name.trim() === ''
   ) {
@@ -105,6 +114,8 @@ export async function resolveSigningIdentity(queryFn: QueryFn, userId: string): 
   return {
     userId,
     displayName: row.display_name,
+    companyCode: row.company_code,
+    companyName: row.company_name,
     teamPositionId: row.primary_team_position_id,
     teamName: row.team_name,
     positionName: row.position_name,

@@ -92,6 +92,7 @@ export interface CreateEmployeeInput {
   email: string;
   temporaryPassword: string;
   displayName: string;
+  companyId: string;
   teamPositionId: string;
 }
 
@@ -163,9 +164,9 @@ export async function createEmployeeAccount(
       // construction and the signing designation can never point at an
       // assignment this user does not hold.
       await client.query(
-        `INSERT INTO workforce_profiles (user_id, display_name, primary_team_position_id)
-         VALUES ($1, $2, $3)`,
-        [userId, input.displayName, input.teamPositionId],
+        `INSERT INTO workforce_profiles (user_id, display_name, primary_team_position_id, company_id)
+         VALUES ($1, $2, $3, $4)`,
+        [userId, input.displayName, input.teamPositionId, input.companyId],
       );
       await recordAccountAudit(client.query.bind(client), {
         eventType: 'EMPLOYEE_ACCOUNT_CREATED',

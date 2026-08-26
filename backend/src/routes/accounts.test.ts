@@ -12,8 +12,9 @@ import { supabase } from '../lib/supabase.js';
  * Only the two genuine external boundaries are stubbed: Supabase token
  * verification and the Postgres connection. `requireAuth`,
  * `requireAuthDuringPasswordChange`, the account-management
- * authorization (capability + privileged access), the protected-target
- * guard, the Zod bodies, and the route definitions all run for real.
+ * authorization (CEO / E-SET SITE_MANAGER privileged access), the
+ * protected-target guard, the authoritative company resolution, the Zod
+ * bodies, and the route definitions all run for real.
  *
  * `SUPABASE_SERVICE_ROLE_KEY` is intentionally NOT configured in the test
  * environment, so the Auth Admin client is absent and every request that
@@ -27,6 +28,7 @@ const MANAGER_ID = '10000000-0000-4000-8000-000000000002';
 const EMPLOYEE_ID = '10000000-0000-4000-8000-000000000003';
 const CEO_ID = '10000000-0000-4000-8000-000000000001';
 const TEAM_POSITION_ID = '40000000-0000-4000-8000-000000000001';
+const COMPANY_ID = '18000000-0000-4000-8000-000000000001';
 
 const FAKE_TEMPORARY_PASSWORD = 'FAKE-temporary-password-for-tests';
 
@@ -49,6 +51,7 @@ let grantedCapabilities: string[] = [];
 let privilegedGrants: Record<string, string[]> = {};
 let mustChangePassword = false;
 let knownTeamPositions: string[] = [];
+let knownCompanyCodes: string[] = [];
 let knownAccessRows: string[] = [];
 let capturedQueries: Array<{ sql: string; params: unknown[] }> = [];
 
@@ -82,6 +85,13 @@ before(() => {
     if (sql.includes('FROM team_positions') && sql.includes('site_manager_assignable = TRUE')) {
       return { rows: knownTeamPositions.includes(String(params[0])) ? [{ exists: true }] : [] };
     }
+    if (sql.includes('FROM companies')) {
+      return {
+        rows: knownCompanyCodes.includes(String(params[0]))
+          ? [{ id: COMPANY_ID, code: params[0], name: params[0] === 'E_SET' ? 'E-SET' : params[0] }]
+          : [],
+      };
+    }
     if (sql.includes('FROM workforce_profiles')) return { rows: [] };
     return { rows: [] };
   }) as unknown as typeof Pool.prototype.query;
@@ -102,14 +112,25 @@ beforeEach(() => {
   privilegedGrants = {};
   mustChangePassword = false;
   knownTeamPositions = [TEAM_POSITION_ID];
+  knownCompanyCodes = ['E_SET', 'ZPL', 'SGRE'];
   knownAccessRows = [EMPLOYEE_ID];
   capturedQueries = [];
 });
 
-/** A fully authorized Site Manager: both required authorities. */
+/**
+ * A fully authorized E-SET Site Manager. Note what is NOT set: no
+ * capability, and no Team + Position. A privileged system account has
+ * neither, and account management no longer asks for either.
+ */
 function authorizeSiteManager(): void {
-  grantedCapabilities = ['employee.create', 'employee.reset_password'];
+  grantedCapabilities = [];
   privilegedGrants = { [authenticatedUserId]: ['SITE_MANAGER'] };
+}
+
+/** A fully authorized CEO - the same authority, from the higher tier. */
+function authorizeCeo(): void {
+  grantedCapabilities = [];
+  privilegedGrants = { [authenticatedUserId]: ['CEO'] };
 }
 
 async function startServer(): Promise<{ url: string; close: () => Promise<void> }> {
@@ -139,6 +160,7 @@ const validCreateBody = {
   email: 'employee@example.com',
   temporaryPassword: FAKE_TEMPORARY_PASSWORD,
   displayName: 'Ayesha Khan',
+  companyCode: 'E_SET',
   teamPositionId: TEAM_POSITION_ID,
 };
 
@@ -170,7 +192,10 @@ test('an ordinary employee cannot provision or reset accounts', async () => {
   }
 });
 
-test('the capability alone does not authorize account management (privileged access is also required)', async () => {
+test('a Team + Position capability can never confer account management', async () => {
+  // Even an employee holding both account-management capability NAMES,
+  // but no privileged grant, is refused: capabilities are not consulted
+  // by this authority at all.
   grantedCapabilities = ['employee.create', 'employee.reset_password'];
   privilegedGrants = {};
   const { url, close } = await startServer();
@@ -178,19 +203,65 @@ test('the capability alone does not authorize account management (privileged acc
     const response = await post(url, '/admin/employees', VALID_TOKEN, validCreateBody);
     assert.equal(response.status, 403);
     const body = (await response.json()) as { message: string };
-    // The denial never says WHICH authority was missing.
+    // The denial never says WHAT was missing.
     assert.doesNotMatch(body.message, /capability|privileg/i);
   } finally {
     await close();
   }
 });
 
-test('privileged access alone does not authorize account management either', async () => {
+test('an E-SET Site Manager with NO Team, Position or capability is authorized', async () => {
+  // The privileged role is the whole authority. No fake Team + Position
+  // has to exist for a Site Manager to provision employees.
   grantedCapabilities = [];
+  knownTeamPositions = [TEAM_POSITION_ID];
   privilegedGrants = { [authenticatedUserId]: ['SITE_MANAGER'] };
   const { url, close } = await startServer();
   try {
-    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 403);
+    // 503 = the Auth Admin boundary, i.e. past every authorization gate.
+    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 503);
+  } finally {
+    await close();
+  }
+});
+
+test('a CEO holds the same account-management authority', async () => {
+  authorizeCeo();
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 503);
+    authenticatedUserId = nextActorId();
+    authorizeCeo();
+    assert.equal(
+      (await post(url, `/admin/employees/${EMPLOYEE_ID}/reset-password`, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD })).status,
+      503,
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('a ZPL organizational "Site Manager" position confers no account-management authority', async () => {
+  // The ZPL job title exists only as Team + Position data. Authorization
+  // never reads a position or team name, so this normal ZPL employee is
+  // refused exactly like any other employee - the privileged E-SET
+  // SITE_MANAGER role is a completely separate thing.
+  grantedCapabilities = ['permit.create'];
+  privilegedGrants = {};
+  const { url, close } = await startServer();
+  try {
+    assert.equal(
+      (await post(url, '/admin/employees', VALID_TOKEN, { ...validCreateBody, companyCode: 'ZPL' })).status,
+      403,
+    );
+    // Privileged status was resolved from the append-only grant log,
+    // bound to the user id alone - no team, position, or name is read.
+    const privilegedReads = capturedQueries.filter(({ sql }) => sql.includes('privileged_access_events'));
+    assert.ok(privilegedReads.length > 0);
+    for (const read of privilegedReads) {
+      assert.deepEqual(read.params, [authenticatedUserId]);
+      assert.doesNotMatch(read.sql, /positions|teams|display_name|metadata|email/i);
+    }
   } finally {
     await close();
   }
@@ -296,6 +367,10 @@ test('provisioning rejects any attempt to grant privilege, capabilities, state, 
       { state: 'ACTIVE' },
       { mustChangePassword: false },
       { must_change_password: false },
+      { companyId: COMPANY_ID },
+      { companyName: 'E-SET' },
+      { company: { code: 'E_SET', name: 'E-SET' } },
+      { companies: ['E_SET', 'ZPL'] },
       { siteManagerAssignable: true },
       { site_manager_assignable: true },
     ]) {
@@ -325,6 +400,10 @@ test('provisioning validates its inputs, including a weak temporary password', a
     await rejectForIndependentActor({ ...validCreateBody, email: 'not-an-email' });
     await rejectForIndependentActor({ ...validCreateBody, displayName: '   ' });
     await rejectForIndependentActor({ ...validCreateBody, teamPositionId: 'not-a-uuid' });
+    const withoutCompany: Record<string, unknown> = { ...validCreateBody };
+    delete withoutCompany.companyCode;
+    await rejectForIndependentActor(withoutCompany);
+    await rejectForIndependentActor({ ...validCreateBody, companyCode: 'UNKNOWN' });
   } finally {
     await close();
   }
@@ -510,11 +589,13 @@ test('/auth/me exposes only safe state - never a credential, token, or admin det
       'auth',
       'capabilities',
       'mustChangePassword',
+      'privilegedRoles',
       'profile',
     ]);
     assert.equal(body.mustChangePassword, false);
     assert.equal(body.accessState, 'ACTIVE');
     assert.deepEqual(body.capabilities, ['permit.create']);
+    assert.deepEqual(body.privilegedRoles, []);
     // No profile is invented when none is provisioned.
     assert.equal(body.profile, null);
 
@@ -563,6 +644,56 @@ test('EVERY authenticated application route is behind the forced-password gate',
       assert.equal(response.status, 403, `${method} ${path} must be gated`);
       assert.equal(((await response.json()) as { reason: string }).reason, 'PASSWORD_CHANGE_REQUIRED');
     }
+  } finally {
+    await close();
+  }
+});
+
+test('/auth/me presents a privileged system account as privileged, never as a company member', async () => {
+  // A CEO / E-SET Site Manager has no workforce profile at all, so no
+  // Company, Team or Position is reported - and none is invented to fill
+  // the gap. `privilegedRoles` is what tells the frontend who they are.
+  authorizeCeo();
+  const { url, close } = await startServer();
+  try {
+    const body = (await (await get(url, '/auth/me', VALID_TOKEN)).json()) as Record<string, unknown>;
+    assert.equal(body.profile, null);
+    assert.deepEqual(body.privilegedRoles, ['CEO']);
+    assert.doesNotMatch(JSON.stringify(body), /E_SET|E-SET|ZPL|SGRE/);
+  } finally {
+    await close();
+  }
+});
+
+test('a normal employee provisioning request can never mint a privileged account', async () => {
+  // The endpoint writes app_user_access, user_team_positions and
+  // workforce_profiles only. Nothing in this flow inserts into
+  // privileged_access_events or team_position_capabilities, so no
+  // request body, however shaped, can escalate.
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    await post(url, '/admin/employees', VALID_TOKEN, validCreateBody);
+    for (const { sql } of capturedQueries) {
+      assert.doesNotMatch(sql, /INSERT\s+INTO\s+privileged_access_events/i);
+      assert.doesNotMatch(sql, /INSERT\s+INTO\s+team_position_capabilities/i);
+      assert.doesNotMatch(sql, /INSERT\s+INTO\s+companies/i);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('an authoritative company is required and resolved before any Auth Admin work', async () => {
+  authorizeSiteManager();
+  knownCompanyCodes = [];
+  const { url, close } = await startServer();
+  try {
+    const response = await post(url, '/admin/employees', VALID_TOKEN, validCreateBody);
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as { reason: string }).reason, 'company_not_found');
+    assert.equal(capturedQueries.some(({ sql }) => sql.includes('INSERT INTO')), false);
+    assert.equal(capturedQueries.some(({ sql }) => sql.includes('FROM companies')), true);
   } finally {
     await close();
   }

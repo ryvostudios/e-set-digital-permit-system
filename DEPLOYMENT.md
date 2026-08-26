@@ -49,16 +49,24 @@ they depend on the actual deployment topology:
   `SELECT` on `storage.buckets`. Browser `anon` and `authenticated` roles
   remain intentionally default-deny with zero direct application-table grants.
 - **Employee account management (required before the feature works).**
-  Migration `0017` seeds only capability NAMES. For a Site Manager to
-  actually provision or reset employee accounts, an operator must, once:
-  (1) grant that person CEO or Site Manager privileged access via
-  `privileged_access_events` (the CEO bootstrap CLI does this for the
-  first CEO; Site Manager grants remain an operator/CEO action - there is
-  still no grant service), and (2) attach `employee.create` /
-  `employee.reset_password` to the Team + Position they hold, via
-  `team_position_capabilities`. BOTH are required: neither authority
-  alone authorizes account management, and neither is grantable through
-  the API. Account management also requires `SUPABASE_SERVICE_ROLE_KEY`
+  For a Site Manager to provision or reset employee accounts, an operator
+  must, once, grant that person CEO or E-SET SITE_MANAGER privileged
+  access via `privileged_access_events` (the CEO bootstrap CLI does this
+  for the first CEO; Site Manager grants remain an operator/CEO action -
+  there is still no grant service). That privileged role IS the account-
+  management authority and is not grantable through the API.
+
+  Do NOT additionally attach `employee.create` / `employee.reset_password`
+  to a Team + Position for a privileged account, and do NOT create a Team,
+  Position, or company membership for a CEO or Site Manager in order to
+  give them one: a privileged system account has no Company, Team or
+  Position, migration `0018` refuses in the database to give one a
+  workforce profile, and the endpoints do not consult capabilities. The
+  capability NAMES that migration `0017` seeds remain in the catalogue but
+  now gate nothing; attaching them to an ordinary employee's Team +
+  Position grants that employee no account-management authority whatsoever.
+
+  Account management also requires `SUPABASE_SERVICE_ROLE_KEY`
   to be configured server-side; without it the endpoints return an
   explicit "unavailable" response rather than partially succeeding.
   Configure `SUPABASE_AUTH_ADMIN_TIMEOUT_MS` between 1,000 and 30,000ms
@@ -92,6 +100,44 @@ they depend on the actual deployment topology:
   `RATE_LIMIT_MANAGER_ACCOUNT_MAX` budget (default 3 per configured window),
   below the default ten-connection pool. Self password change retains
   `RATE_LIMIT_ACCOUNT_MAX` so the manager bound does not impair recovery.
+
+- **Employee company membership (migration 0018 applied and live-verified).**
+  Every NORMAL employee's workforce profile must reference exactly one
+  authoritative company. The migration seeds only the confirmed `E_SET` /
+  E-SET, `ZPL` / ZPL, and `SGRE` / SGRE reference rows, and creates no team,
+  position, team_position, profile, employee, or privileged grant. It
+  intentionally aborts before creating any 0018 object if a workforce
+  profile already exists, because no company may be inferred from email,
+  Supabase metadata, Team, or Position. It was applied against zero
+  workforce profiles and zero active privileged grants, so no mapping was
+  needed; should it ever be re-run elsewhere, inspect the live profile
+  population first and never bypass the guard with a guessed company.
+
+  0018 also adds a database guard: a user holding an active CEO or
+  SITE_MANAGER grant cannot be given a workforce profile at all. If a live
+  privileged identity somehow already has one, that row must be resolved as
+  a governance decision before applying 0018 - never by relaxing the guard.
+  Note this means a privileged account has no display name, Company, Team,
+  or Position anywhere in the schema, and therefore still no signing
+  identity; privileged permit application is a separate, unimplemented task.
+
+  The exact **new** `app_runtime` privilege 0018 requires - already applied
+  and live-verified in the same maintenance window - is:
+  ```sql
+  GRANT SELECT ON TABLE public.companies TO app_runtime;
+  ```
+  That is the entire delta. It is not optional: `resolveSigningIdentity` and
+  `/auth/me` both join `companies`, so the grant must land with the
+  migration. Verified through the real runtime pool: `app_runtime` reads the
+  three companies, while INSERT, UPDATE, DELETE and TRUNCATE on `companies`
+  and all access to `schema_migrations` are denied. Existing 0017 privileges already cover inserting
+  `company_id` as part of a workforce-profile row, and the new guard reads
+  `privileged_access_events`, on which `app_runtime` already holds SELECT.
+  Do not grant `app_runtime` INSERT, UPDATE, DELETE, or TRUNCATE on
+  `companies`, sequence privileges, EXECUTE on the new trigger functions,
+  ownership, DDL, schema `CREATE`, or migration-ledger access. Browser
+  `anon` and `authenticated` roles remain default-deny with no table grants
+  and no policies.
 
 - **Private PDF Storage.** Create the configured bucket manually as
   private (`public=false`), restrict MIME types to `application/pdf`, and

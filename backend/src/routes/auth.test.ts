@@ -20,6 +20,7 @@ let grantedCapabilities: string[] = [];
 let appAccessState: 'ACTIVE' | 'DISABLED' | null = 'ACTIVE';
 let mockMustChangePassword = false;
 let mockProfileRows: Record<string, unknown>[] = [];
+let mockPrivilegedRoles: string[] = [];
 
 const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
@@ -32,13 +33,17 @@ before(() => {
     return { data: { claims: { sub: AUTHENTICATED_USER_ID, email: 'user@example.com' } }, error: null };
   }) as typeof supabase.auth.getClaims;
 
-  Pool.prototype.query = (async (text: unknown) => ({
-    rows: String(text).includes('FROM app_user_access')
-      ? (appAccessState ? [{ state: appAccessState, must_change_password: mockMustChangePassword }] : [])
-      : String(text).includes('FROM workforce_profiles')
-        ? mockProfileRows
-        : grantedCapabilities.map((name) => ({ name })),
-  })) as unknown as typeof Pool.prototype.query;
+  Pool.prototype.query = (async (text: unknown) => {
+    const sql = String(text);
+    if (sql.includes('FROM app_user_access')) {
+      return { rows: appAccessState ? [{ state: appAccessState, must_change_password: mockMustChangePassword }] : [] };
+    }
+    if (sql.includes('FROM workforce_profiles')) return { rows: mockProfileRows };
+    if (sql.includes('FROM privileged_access_events')) {
+      return { rows: mockPrivilegedRoles.map((role) => ({ role, action: 'GRANTED' })) };
+    }
+    return { rows: grantedCapabilities.map((name) => ({ name })) };
+  }) as unknown as typeof Pool.prototype.query;
 });
 
 after(() => {
@@ -51,6 +56,7 @@ beforeEach(() => {
   appAccessState = 'ACTIVE';
   mockMustChangePassword = false;
   mockProfileRows = [];
+  mockPrivilegedRoles = [];
 });
 
 async function startServer(): Promise<{ url: string; close: () => Promise<void> }> {
@@ -76,13 +82,34 @@ test('GET /auth/me denies an unauthenticated request (401)', async () => {
 
 test('GET /auth/me returns identity plus the caller\'s currently resolved capabilities', async () => {
   grantedCapabilities = ['permit.create', 'permit.submit'];
+  mockProfileRows = [{
+    display_name: 'Ayesha Khan',
+    company_code: 'E_SET',
+    company_name: 'E-SET',
+    team_name: 'Maintenance',
+    position_name: 'Technician',
+  }];
   const { url, close } = await startServer();
   try {
     const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { auth: { id: string }; capabilities: string[] };
+    const body = (await res.json()) as {
+      auth: { id: string };
+      profile: unknown;
+      privilegedRoles: string[];
+      capabilities: string[];
+    };
     assert.equal(body.auth.id, AUTHENTICATED_USER_ID);
     assert.deepEqual(body.capabilities.sort(), ['permit.create', 'permit.submit']);
+    // The authoritative company travels with the profile, exactly as the
+    // signing identity resolves it - never an email domain or a guess.
+    assert.deepEqual(body.profile, {
+      displayName: 'Ayesha Khan',
+      company: { code: 'E_SET', name: 'E-SET' },
+      teamName: 'Maintenance',
+      positionName: 'Technician',
+    });
+    assert.deepEqual(body.privilegedRoles, []);
   } finally {
     await close();
   }
@@ -119,6 +146,50 @@ test('GET /auth/me fails closed when application access state is missing', async
   try {
     const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
     assert.equal(res.status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('a privileged system account reports its roles and NO company, team or position', async () => {
+  // CEO and E-SET SITE_MANAGER have no workforce profile at all, so
+  // `/auth/me` reports a null profile rather than pretending they are
+  // normal E-SET company members.
+  mockProfileRows = [];
+  mockPrivilegedRoles = ['SITE_MANAGER'];
+  const { url, close } = await startServer();
+  try {
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const body = (await res.json()) as { profile: unknown; privilegedRoles: string[] };
+    assert.equal(body.profile, null);
+    assert.deepEqual(body.privilegedRoles, ['SITE_MANAGER']);
+  } finally {
+    await close();
+  }
+});
+
+test('a ZPL employee whose POSITION is called "Site Manager" holds no privileged role', async () => {
+  // The position name is organizational data on the profile. Privileged
+  // status comes only from the append-only grant log, which is empty
+  // here - so the two can never be confused.
+  mockProfileRows = [{
+    display_name: 'Imran Malik',
+    company_code: 'ZPL',
+    company_name: 'ZPL',
+    team_name: 'ZPL',
+    position_name: 'Site Manager',
+  }];
+  mockPrivilegedRoles = [];
+  const { url, close } = await startServer();
+  try {
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const body = (await res.json()) as {
+      profile: { company: { code: string }; positionName: string };
+      privilegedRoles: string[];
+    };
+    assert.equal(body.profile.positionName, 'Site Manager');
+    assert.equal(body.profile.company.code, 'ZPL');
+    assert.deepEqual(body.privilegedRoles, [], 'a position NAME never grants privileged access');
   } finally {
     await close();
   }

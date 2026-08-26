@@ -1,69 +1,64 @@
 import { query, type QueryFn } from '../db/pool.js';
-import { resolveUserCapabilities } from './capabilities.js';
 import { resolvePrivilegedAccess, type PrivilegedRole } from './privilegedAccess.js';
 
 /**
  * Authorization for employee account management.
  *
- * TWO INDEPENDENT AUTHORITIES ARE REQUIRED, and both are resolved from
- * authoritative application tables - never from a role label, a token
- * claim, or client-editable `user_metadata`:
+ * THE AUTHORITY IS THE PRIVILEGED SYSTEM ROLE ITSELF - CEO or E-SET
+ * SITE_MANAGER - resolved from the authoritative, append-only
+ * `privileged_access_events` log, never from a role label, a token
+ * claim, a Position NAME, or client-editable `user_metadata`.
  *
- *   1. The explicit account-management capability
- *      (`employee.create` / `employee.reset_password`), resolved through
- *      the existing Team + Position -> Capabilities model.
- *   2. CEO or Site Manager privileged access, resolved from the
- *      append-only `privileged_access_events` log.
+ * WHY NOT ALSO A TEAM + POSITION CAPABILITY. CEO and E-SET SITE_MANAGER
+ * are privileged SYSTEM accounts, not organizational employees: by
+ * confirmed business rule they have no Company, no Team and no Position.
+ * Capabilities are derived exclusively from Team + Position
+ * (`authz/capabilities.ts`), so requiring `employee.create` /
+ * `employee.reset_password` in addition to the privileged role could only
+ * ever be satisfied by inventing a fake Team + Position for a privileged
+ * identity - precisely the fabricated membership the model forbids -
+ * which would in turn have made account management unreachable for the
+ * only accounts entitled to perform it.
  *
- * Requiring both is deliberate. Account management is a MANAGEMENT
- * authority, and DECISIONS.md is explicit that "Team + Position never
- * automatically grants CEO or Site Manager authority" - so a capability
- * alone must not be able to mint accounts. Equally, holding a privileged
- * role alone does not silently confer every future management action;
- * the capability names what may actually be done. An attacker who
- * obtains one of the two still cannot provision or reset an account.
+ * This does NOT loosen the governance model, and in particular does not
+ * let Team + Position confer management authority - the opposite
+ * direction is what DECISIONS.md forbids ("Team + Position never
+ * automatically grants CEO or Site Manager authority"), and a capability
+ * on its own is now not merely insufficient but irrelevant here.
+ * Capability authorization is untouched everywhere else (permits, JSA,
+ * review queues), where it governs normal employees.
  *
- * Neither authority is self-grantable through this API: nothing in this
- * codebase writes `privileged_access_events` (outside the operator-run
- * CEO bootstrap CLI) or `team_position_capabilities` at all.
+ * The authority is not self-grantable through this API: nothing in this
+ * codebase writes `privileged_access_events` outside the operator-run
+ * CEO bootstrap CLI.
  */
-
-export type AccountManagementCapability = 'employee.create' | 'employee.reset_password';
 
 /** The privileged tiers whose holders may manage normal employee accounts. */
 const ACCOUNT_MANAGEMENT_ROLES: readonly PrivilegedRole[] = ['CEO', 'SITE_MANAGER'];
 
-export type AccountManagementDenial =
-  | 'missing_capability'
-  | 'missing_privileged_access';
+export type AccountManagementDenial = 'missing_privileged_access';
 
 export type AccountManagementAuthorization =
   | { authorized: true; roles: Set<PrivilegedRole> }
   | { authorized: false; reason: AccountManagementDenial };
 
 export interface AccountManagementDeps {
-  resolveCapabilities: (userId: string) => Promise<Set<string>>;
   resolvePrivileged: (userId: string) => Promise<Set<PrivilegedRole>>;
 }
 
 const defaultDeps: AccountManagementDeps = {
-  resolveCapabilities: resolveUserCapabilities,
   resolvePrivileged: resolvePrivilegedAccess,
 };
 
 /**
- * Default-deny: a missing capability, a missing privileged grant, or a
- * resolution failure all deny. The caller decides the HTTP shape; this
- * only answers whether the authority exists.
+ * Default-deny: no active CEO/SITE_MANAGER grant - or a resolution
+ * failure at the caller - denies. The caller decides the HTTP shape;
+ * this only answers whether the authority exists.
  */
 export async function authorizeAccountManagement(
   actorUserId: string,
-  capability: AccountManagementCapability,
   deps: AccountManagementDeps = defaultDeps,
 ): Promise<AccountManagementAuthorization> {
-  const capabilities = await deps.resolveCapabilities(actorUserId);
-  if (!capabilities.has(capability)) return { authorized: false, reason: 'missing_capability' };
-
   const roles = await deps.resolvePrivileged(actorUserId);
   if (!ACCOUNT_MANAGEMENT_ROLES.some((role) => roles.has(role))) {
     return { authorized: false, reason: 'missing_privileged_access' };
@@ -86,7 +81,9 @@ export type TargetEligibility =
  * protected: the normal-employee flow may never provision, reset, or
  * otherwise reach a governed identity, so existing CEO authority cannot
  * be bypassed by resetting a privileged account's password and signing
- * in as it. Protection is derived from `privileged_access_events` - the
+ * in as it. This is also what keeps CEO strictly above Site Manager -
+ * one Site Manager cannot reach another, and neither can reach the CEO.
+ * Protection is derived from `privileged_access_events` - the
  * authoritative, append-only governance log - never from
  * `user_metadata`, an email pattern, or any client-supplied hint.
  *
@@ -114,6 +111,12 @@ export async function isManageableTarget(
  * capabilities. Migration 0017 defaults every combination to FALSE and
  * this API exposes no way to change the flag. Capabilities remain governed
  * separately; assignability itself grants nothing.
+ *
+ * Note that this is an ORGANIZATIONAL assignment in every case - a ZPL
+ * "Site Manager" position is an ordinary ZPL job title and confers no
+ * privileged SITE_MANAGER authority whatsoever, because privileged
+ * status is read only from `privileged_access_events`, never from a
+ * Position name.
  */
 export async function teamPositionIsSiteManagerAssignable(
   teamPositionId: string,
