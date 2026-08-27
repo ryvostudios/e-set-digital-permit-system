@@ -90,14 +90,21 @@ function StateBadge({ state }: { state: EmployeeDetail['state'] }) {
 export function EmployeeDetailPage() {
   const { id = '' } = useParams<{ id: string }>();
   const { capabilities } = useCurrentUser();
+  // CEO-only. Gates BOTH the request and the section: a Site Manager must
+  // not even ask for the administrative audit, so there is no 403 to
+  // render and nothing on screen hinting a withheld panel exists.
+  const canViewAudit = capabilities.canViewAdministrativeAudit;
   const navigate = useNavigate();
   const toast = useToast();
   const organization = useOrganization();
 
   const resource = useApiResource<{ employee: EmployeeDetail }>((signal) => getEmployee(id, signal), [id]);
   const history = useApiResource<EmployeeHistoryResponse>(
-    (signal) => getEmployeeHistory(id, { pageSize: 25 }, signal),
-    [id],
+    async (signal) =>
+      canViewAudit
+        ? getEmployeeHistory(id, { pageSize: 25 }, signal)
+        : { items: [], page: 1, pageSize: 0, totalCount: 0, totalPages: 0 },
+    [id, canViewAudit],
   );
 
   const [dialog, setDialog] = useState<DialogId>(null);
@@ -317,15 +324,17 @@ export function EmployeeDetailPage() {
           </Card>
         ) : null}
 
-        <Card title="Administrative history" flush>
-          {history.initialLoading ? (
-            <SkeletonRows rows={4} />
-          ) : history.error ? (
-            <ErrorState error={history.error} onRetry={history.reload} />
-          ) : (
-            <EmployeeHistory entries={history.data?.items ?? []} />
-          )}
-        </Card>
+        {canViewAudit ? (
+          <Card title="Administrative history" flush>
+            {history.initialLoading ? (
+              <SkeletonRows rows={4} />
+            ) : history.error ? (
+              <ErrorState error={history.error} onRetry={history.reload} />
+            ) : (
+              <EmployeeHistory entries={history.data?.items ?? []} />
+            )}
+          </Card>
+        ) : null}
       </div>
 
       {/* ---------------------------------------------------------------- */}

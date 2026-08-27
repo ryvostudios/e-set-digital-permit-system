@@ -13,7 +13,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "tsx --test \"src/**/*.test.ts\"",
+    "test": "tsx --import ./src/test/envIsolation.ts --test \"src/**/*.test.ts\"",
     "migrate": "tsx src/db/migrate.ts",
     "bootstrap:ceo": "tsx src/scripts/bootstrapCeo.ts",
     "outbox:whatsapp:process": "tsx src/scripts/processWhatsappOutbox.ts",

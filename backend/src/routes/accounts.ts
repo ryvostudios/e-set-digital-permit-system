@@ -880,13 +880,30 @@ accountsRouter.delete(
   },
 );
 
-/** One employee's administrative history. Managers only; never the employee themselves. */
+/**
+ * One employee's ADMINISTRATIVE/SECURITY audit trail - who created the
+ * account, who reset its password, when it was disabled.
+ *
+ * CEO ONLY, deliberately narrower than every other endpoint on this
+ * router. A Site Manager performs routine employee administration and
+ * therefore APPEARS in this log as an actor; letting them read it would
+ * let the administered watch the record of their own administration.
+ * That is a different question from whether they may administer, so it
+ * gets a different gate: `authorizeCeo`, resolved from the append-only
+ * grant log on every request, never from a JWT claim.
+ *
+ * This is NOT permit workflow history. A permit's own lifecycle
+ * (`permit_lifecycle_events` - created, submitted, reviewed, issued) is
+ * business information the people working the permit legitimately need,
+ * and is served by the permit routes under permit authorization. Only
+ * the account/security audit is restricted here.
+ */
 accountsRouter.get(
   '/admin/employees/:id/history',
   requireAuth,
   managerAccountLimiter,
   async (req: Request, res: Response) => {
-    const actorUserId = await authorize(req, res);
+    const actorUserId = await authorizeCeo(req, res);
     if (!actorUserId) return;
     const params = employeeIdParamsSchema.safeParse(req.params);
     if (!params.success) {

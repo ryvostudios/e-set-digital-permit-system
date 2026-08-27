@@ -129,9 +129,18 @@ export async function bootstrapInitialCeo(
       [token],
     );
     if (reservation.rows[0]?.auth_user_id !== auth.userId || (await findActiveCeo(client.query.bind(client)))) return false;
+    // `must_change_password` is TRUE for exactly the same reason it is on
+    // every employee (service.ts) and every Site Manager
+    // (privilegedManagement.ts): the password that reaches this point was
+    // chosen by an OPERATOR and typed into an environment variable, so it
+    // is a temporary credential someone other than the CEO has seen. The
+    // CEO was previously the single account exempt from that rule - the
+    // one account where it matters most. `credentials_changed_at` is a
+    // signal only; migration 0017's trigger overwrites it with the
+    // database's own now().
     await client.query(
-      `INSERT INTO app_user_access (user_id, state)
-       VALUES ($1, 'ACTIVE')
+      `INSERT INTO app_user_access (user_id, state, must_change_password, credentials_changed_at)
+       VALUES ($1, 'ACTIVE', TRUE, now())
        ON CONFLICT (user_id) DO NOTHING`,
       [auth.userId],
     );
@@ -201,7 +210,7 @@ async function main(): Promise<void> {
   );
   if (result.outcome !== 'ok') throw new Error(`bootstrap refused: ${result.reason}`);
   console.log(`bootstrap:ceo: success for ${parsed.data.BOOTSTRAP_CEO_EMAIL}`);
-  console.log('bootstrap:ceo: require first-login password change, enable production MFA, then remove bootstrap credentials.');
+  console.log('bootstrap:ceo: first-login password change is ENFORCED for this account; enable production MFA, then remove bootstrap credentials.');
 }
 
 export async function runBootstrapCeoCli(deps: {

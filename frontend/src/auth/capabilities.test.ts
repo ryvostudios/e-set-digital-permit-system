@@ -66,6 +66,11 @@ describe('privileged identity', () => {
     expect(deriveCapabilities(ceo()).canManageSiteManagers).toBe(true);
     expect(deriveCapabilities(siteManager()).canDeleteEmployees).toBe(false);
     expect(deriveCapabilities(siteManager()).canManageSiteManagers).toBe(false);
+    // The ADMINISTRATIVE/SECURITY audit is CEO-only. A Site Manager
+    // performs the actions it records, so they appear in it as an actor -
+    // which is exactly why they may not read it.
+    expect(deriveCapabilities(ceo()).canViewAdministrativeAudit).toBe(true);
+    expect(deriveCapabilities(siteManager()).canViewAdministrativeAudit).toBe(false);
   });
 
   it('is NOT automatically a CRO or an HSE approver', () => {
@@ -92,6 +97,7 @@ describe('the ZPL "Site Manager" position is a NORMAL employee', () => {
     expect(capabilities.canManageEmployees).toBe(false);
     expect(capabilities.canManageSiteManagers).toBe(false);
     expect(capabilities.canDeleteEmployees).toBe(false);
+    expect(capabilities.canViewAdministrativeAudit).toBe(false);
   });
 
   it('is an ordinary applicant with an ordinary applicant line', () => {

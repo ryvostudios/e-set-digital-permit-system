@@ -729,10 +729,90 @@ test('audit history pagination is bounded', async () => {
   try {
     for (const qs of ['?pageSize=101', '?page=0', '?pageSize=0', '?page=99999999', '?unknown=1']) {
       authenticatedUserId = nextActorId();
-      authorizeSiteManager();
+      // CEO, not a Site Manager: the audit is CEO-only, and authorization
+      // runs BEFORE query validation - so a Site Manager would be refused
+      // 403 here and this would stop testing paging at all.
+      authorizeCeo();
       const response = await get(url, `/admin/employees/${EMPLOYEE_ID}/history${qs}`, VALID_TOKEN);
       assert.equal(response.status, 400, `expected ${qs} to be rejected`);
     }
+  } finally {
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// The ADMINISTRATIVE/SECURITY audit is CEO-only
+// ---------------------------------------------------------------------
+
+test('the administrative audit refuses EVERY role except CEO - including the Site Manager who administers the account', async () => {
+  const { url, close } = await startServer();
+  try {
+    // A Site Manager holds full employee administration and APPEARS in
+    // this log as an actor. Reading it would let the administered watch
+    // the record of their own administration, so it is refused - and
+    // refused with the same generic 403 as anyone else, which never
+    // reveals that the caller was close to authorized.
+    authenticatedUserId = nextActorId();
+    authorizeSiteManager();
+    assert.equal(
+      (await get(url, `/admin/employees/${EMPLOYEE_ID}/history`, VALID_TOKEN)).status,
+      403,
+      'an E-SET Site Manager must not read the administrative audit',
+    );
+
+    // Nobody reaches it through a capability, a broad permit permission,
+    // or a position that merely sounds senior.
+    for (const capabilities of [
+      [],
+      ['permit.view_all'],
+      ['permit.create', 'permit.submit'],
+      ['permit.cro_review'],
+      ['permit.hse_review'],
+      ['employee.create', 'employee.reset_password'],
+    ]) {
+      authenticatedUserId = nextActorId();
+      grantedCapabilities = capabilities;
+      privilegedGrants = {};
+      assert.equal(
+        (await get(url, `/admin/employees/${EMPLOYEE_ID}/history`, VALID_TOKEN)).status,
+        403,
+        `capabilities ${JSON.stringify(capabilities)} must not reach the administrative audit`,
+      );
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('the CEO passes the audit gate - the refusal above is authorization, not a broken route', async () => {
+  const { url, close } = await startServer();
+  try {
+    authenticatedUserId = nextActorId();
+    authorizeCeo();
+    const response = await get(url, `/admin/employees/${EMPLOYEE_ID}/history`, VALID_TOKEN);
+    // The stubbed database holds no such employee, so the CEO lands on
+    // 404. What matters is that it is NOT 403: the gate opened.
+    assert.notEqual(response.status, 403, 'the CEO must pass the administrative audit gate');
+    assert.equal(response.status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test('permit workflow history is NOT the administrative audit and is not swept up by this rule', async () => {
+  // A permit's own lifecycle is business information for the people
+  // working it. It lives on the permit routes under permit
+  // authorization, so restricting the account audit must not have made
+  // it privileged-only. A plain applicant still reaches it as before -
+  // 404 here (no such permit in the stub), never 403.
+  const { url, close } = await startServer();
+  try {
+    authenticatedUserId = nextActorId();
+    grantedCapabilities = ['permit.create', 'permit.submit'];
+    privilegedGrants = {};
+    const response = await get(url, `/permits/${EMPLOYEE_ID}/history`, VALID_TOKEN);
+    assert.notEqual(response.status, 403, 'permit workflow history must not become privileged-only');
   } finally {
     await close();
   }

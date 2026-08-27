@@ -378,7 +378,7 @@ describe('View all permits', () => {
 
 describe('administrative history', () => {
   it('reads as friendly events, with no ordinal or actor id', async () => {
-    renderEmployee(employeeDetail(), siteManager(), {
+    renderEmployee(employeeDetail(), ceo(), {
       'GET /api/v1/admin/employees/employee-1/history': {
         body: {
           items: [
@@ -420,8 +420,30 @@ describe('administrative history', () => {
     expect(text).not.toContain('EMPLOYEE_COMPANY_CHANGED');
   });
 
+  it('is hidden from a Site Manager, who is never even asked for it', async () => {
+    // A Site Manager performs employee administration and so APPEARS in
+    // this log as an actor. Reading it would let the administered watch
+    // the record of their own administration, so the section is not
+    // rendered - and no request is issued, so there is no failed call to
+    // hint that a withheld panel exists.
+    const { calls } = renderEmployee(employeeDetail(), siteManager());
+
+    // Wait for the page to actually render before asserting an absence.
+    expect(await screen.findByRole('button', { name: /disable account/i })).toBeInTheDocument();
+    expect(screen.queryByText(/administrative history/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no administrative changes have been recorded/i)).not.toBeInTheDocument();
+
+    await waitFor(() => expect(calls.some((call) => call.url.includes('/admin/employees/employee-1'))).toBe(true));
+    expect(calls.some((call) => call.url.includes('/history'))).toBe(false);
+  });
+
+  it('is shown to the CEO', async () => {
+    renderEmployee(employeeDetail(), ceo());
+    expect(await screen.findByText(/administrative history/i)).toBeInTheDocument();
+  });
+
   it('shows an explicit empty state', async () => {
-    renderEmployee();
+    renderEmployee(employeeDetail(), ceo());
     expect(await screen.findByText(/no administrative changes have been recorded/i)).toBeInTheDocument();
   });
 });

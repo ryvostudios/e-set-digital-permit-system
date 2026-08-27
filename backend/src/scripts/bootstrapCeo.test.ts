@@ -14,6 +14,8 @@ class FakeBootstrapSystem {
   createCalls = 0;
   failAuthPersistenceOnce = false;
   access = new Map<string, 'ACTIVE' | 'DISABLED'>();
+  /** The literal SQL used to create the access row, so its flags can be asserted. */
+  accessInsertSql: string | null = null;
 
   admin: BootstrapAdmin = {
     createUser: async ({ email }) => {
@@ -54,7 +56,7 @@ class FakeBootstrapSystem {
     if (sql.startsWith('SELECT auth_user_id FROM initial_ceo_bootstrap')) {
       return { rows: this.reservation?.status === 'RESERVED' && this.reservation.token === params[0] ? [{ auth_user_id: this.reservation.authUserId }] : [] };
     }
-    if (sql.startsWith('INSERT INTO app_user_access')) { if (!this.access.has(String(params[0]))) this.access.set(String(params[0]), 'ACTIVE'); return { rows: [] }; }
+    if (sql.startsWith('INSERT INTO app_user_access')) { this.accessInsertSql = sql; if (!this.access.has(String(params[0]))) this.access.set(String(params[0]), 'ACTIVE'); return { rows: [] }; }
     if (sql.includes('FROM app_user_access') && sql.startsWith('SELECT')) { const state = this.access.get(String(params[0])); return { rows: state ? [{ state, must_change_password: false }] : [] }; }
     if (sql.startsWith('SELECT user_id FROM workforce_profiles')) {
       return { rows: this.workforceEmployees.has(String(params[0])) ? [{ user_id: params[0] }] : [] };
@@ -165,4 +167,19 @@ test('the bootstrap REFUSES to adopt an Auth identity that belongs to a normal e
   assert.equal(system.ceos.size, 0);
   assert.equal(system.privilegedIdentities.size, 0);
   assert.ok(system.workforceEmployees.has('auth-existing-employee'));
+});
+
+test('the bootstrapped CEO OWES a first-login password change, like every other account', async () => {
+  // The bootstrap password is chosen by an operator and typed into an
+  // environment variable, so someone other than the CEO has seen it. The
+  // CEO used to be the single account exempt from replacing it - the one
+  // account where that matters most. Employee provisioning
+  // (domain/accounts/service.ts) and Site Manager provisioning
+  // (domain/accounts/privilegedManagement.ts) have always set this.
+  const system = new FakeBootstrapSystem();
+  const result = await bootstrapInitialCeo(input, system.deps('claim-force-change'));
+  assert.equal(result.outcome, 'ok');
+  assert.ok(system.accessInsertSql, 'the bootstrap must create the access row');
+  assert.match(system.accessInsertSql, /must_change_password/);
+  assert.match(system.accessInsertSql, /TRUE/);
 });
