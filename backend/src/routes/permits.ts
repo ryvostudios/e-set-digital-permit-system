@@ -61,6 +61,7 @@ import {
   updateJsaBodySchema,
   updatePermitBodySchema,
 } from '../domain/permits/validation.js';
+import { buildFormCatalogue } from '../domain/permits/catalogueApi.js';
 import { getPermitSignatures } from '../domain/permits/signatures.js';
 import { query } from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -292,6 +293,26 @@ permitsRouter.get('/permits/search', requireAuth, async (req: Request, res: Resp
   );
 
   res.status(200).json({ permits: page.items.map(serializePermitSummary), pagination: serializePagination(page) });
+});
+
+/**
+ * The authoritative permit/JSA FORM DEFINITION - the printed sections,
+ * questions, options and tick semantics the browser needs to render the
+ * real documents.
+ *
+ * REGISTERED BEFORE `/permits/:id` on purpose: Express matches in order,
+ * so a later registration would let `:id` swallow "catalogue".
+ *
+ * Static and identical for every caller. It carries no permit, no person,
+ * no company and no authorization decision - only printed form text and
+ * the stable keys answers are stored under, which is exactly what the
+ * paper pad on site already shows. Authentication is still required
+ * because an unauthenticated caller has no business enumerating it. Reads
+ * nothing from the database, so there is no query and nothing to
+ * authorize beyond being signed in.
+ */
+permitsRouter.get('/permits/catalogue', requireAuth, (_req: Request, res: Response) => {
+  res.status(200).json(buildFormCatalogue());
 });
 
 /**

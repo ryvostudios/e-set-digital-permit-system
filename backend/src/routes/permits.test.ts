@@ -1471,3 +1471,121 @@ test('GET /permits/:id/pdf performs neither document nor Storage lookup for an u
     assert.equal(downloads, 0);
   } finally { await close(); }
 });
+
+// ---------------------------------------------------------------------
+// The authoritative form catalogue endpoint
+// ---------------------------------------------------------------------
+
+test('the form catalogue requires authentication', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, '/permits/catalogue')).status, 401);
+    assert.equal((await getRequest(url, '/permits/catalogue', 'not-a-valid-token')).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('the form catalogue is served to an authenticated caller with NO capability at all', async () => {
+  // It is printed form text, identical for everyone - the same content as
+  // the paper pad on site. Being signed in is the whole gate.
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    const response = await getRequest(url, '/permits/catalogue', VALID_TOKEN);
+    assert.equal(response.status, 200);
+  } finally {
+    await close();
+  }
+});
+
+test('the form catalogue defines all four permits and BOTH JSA pages', async () => {
+  const { url, close } = await startServer();
+  try {
+    const body = (await (await getRequest(url, '/permits/catalogue', VALID_TOKEN)).json()) as {
+      permits: Record<string, { formVersion: string; checklistSections: { id: string; items: unknown[] }[] }>;
+      jsa: {
+        formVersion: string;
+        page1: { pageLabel: string; requiredPermits: { options: unknown[]; hasOther: boolean }; hseChecklistCategories: unknown[] };
+        page2: { pageLabel: string; taskAnalysisColumns: unknown[]; energySourceLegend: unknown[] };
+      };
+    };
+
+    assert.deepEqual(Object.keys(body.permits).sort(), [
+      'COLD_WORK', 'CONFINED_SPACE_ENTRY', 'HOT_WORK', 'WTG_WORK',
+    ]);
+    assert.equal(body.permits.WTG_WORK!.formVersion, 'WTG_WORK_V2');
+
+    // The JSA is two pages, and says so.
+    assert.equal(body.jsa.formVersion, 'JSA_V2');
+    assert.equal(body.jsa.page1.pageLabel, 'PAGE 1 OF 2');
+    assert.equal(body.jsa.page2.pageLabel, 'PAGE 2 OF 2');
+
+    // The two gaps this stage closes.
+    assert.equal(body.jsa.page1.requiredPermits.options.length, 8);
+    assert.equal(body.jsa.page1.requiredPermits.hasOther, true);
+    assert.equal(body.jsa.page2.taskAnalysisColumns.length, 5);
+
+    // The full HSE checklist travels to the browser.
+    assert.equal(body.jsa.page1.hseChecklistCategories.length, 16);
+    assert.equal(body.jsa.page2.energySourceLegend.length, 8);
+  } finally {
+    await close();
+  }
+});
+
+test('the served catalogue keeps Hot Work and Cold Work distinct', async () => {
+  const { url, close } = await startServer();
+  try {
+    const body = (await (await getRequest(url, '/permits/catalogue', VALID_TOKEN)).json()) as {
+      permits: Record<string, {
+        natureOfWork?: { options: { label: string }[] };
+        checklistSections: { id: string; items: { label: string }[] }[];
+      }>;
+    };
+
+    const hotNature = body.permits.HOT_WORK!.natureOfWork!.options.map((o) => o.label);
+    const coldNature = body.permits.COLD_WORK!.natureOfWork!.options.map((o) => o.label);
+    assert.equal(hotNature.length, 4, 'Hot Work prints four');
+    assert.equal(coldNature.length, 5, 'Cold Work prints five, including INSPECTION');
+    assert.ok(!hotNature.includes('INSPECTION'));
+
+    const general = (permitKey: string): string[] =>
+      body.permits[permitKey]!.checklistSections.find((s) => s.id === 'general_requirements')!.items.map((i) => i.label);
+    assert.ok(general('HOT_WORK').includes('METAL THICKNESS FOR WELDING'));
+    assert.ok(!general('COLD_WORK').includes('METAL THICKNESS FOR WELDING'));
+    assert.notDeepEqual(general('HOT_WORK'), general('COLD_WORK'));
+  } finally {
+    await close();
+  }
+});
+
+test('the catalogue exposes no secret, no database detail and no permit data', async () => {
+  const { url, close } = await startServer();
+  try {
+    const raw = await (await getRequest(url, '/permits/catalogue', VALID_TOKEN)).text();
+    for (const forbidden of [
+      'postgres', 'postgresql', 'DATABASE_URL', 'service_role', 'SUPABASE', 'app_runtime',
+      'privileged_runtime', 'password', 'secret', 'token', 'SELECT ', 'INSERT ',
+      'created_by', 'permit_sequence', 'form_payload', 'capabilit',
+    ]) {
+      assert.ok(!raw.includes(forbidden), `the catalogue must not mention "${forbidden}"`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('the catalogue reads nothing from the database', async () => {
+  capturedQueries = [];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await getRequest(url, '/permits/catalogue', VALID_TOKEN)).status, 200);
+    // Only the auth/access-state lookups the gate itself performs; no
+    // permit, JSA or form query is issued for a static definition.
+    const permitQueries = capturedQueries.filter((q) => /FROM\s+permits|FROM\s+jsas/i.test(q.sql));
+    assert.deepEqual(permitQueries, []);
+  } finally {
+    await close();
+  }
+});
