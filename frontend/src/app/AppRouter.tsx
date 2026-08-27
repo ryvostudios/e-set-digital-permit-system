@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from '../auth/useAuth';
 import { ChangePasswordPage } from '../features/auth/ChangePasswordPage';
+import { FormPreviewPage } from '../features/permits/v2/FormPreviewPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { HomePage } from '../features/home/HomePage';
 import { NotificationsPage } from '../features/notifications/NotificationsPage';
@@ -132,6 +133,15 @@ export function AppRouter() {
           <Route path={ROUTES.employeeNew} element={<CreateEmployeePage />} />
           <Route path={ROUTES.employeePattern} element={<EmployeeDetailPage />} />
           <Route path={ROUTES.siteManagers} element={<SiteManagersPage />} />
+          {/*
+            Visual-QA harness for the authoritative documents, mounted ONLY
+            in the e2e build. The production bundle has no such route: the
+            documents are not yet wired into the live create flow, and that
+            cutover is deliberately not part of this stage.
+          */}
+          {import.meta.env.MODE === 'e2e' ? (
+            <Route path="/__forms-preview" element={<FormPreviewPage />} />
+          ) : null}
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

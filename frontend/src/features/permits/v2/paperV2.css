@@ -1,0 +1,252 @@
+/*
+ * Styling for the authoritative document renderers.
+ *
+ * The goal is a PAPER DOCUMENT that happens to be interactive, not a web
+ * form that happens to list safety questions: ruled tables, tick columns
+ * with headings, and section bands, because that is what the operational
+ * forms print and what a reviewer expects to recognise.
+ *
+ * MOBILE RULE. A wide safety table scrolls INSIDE its own container - it
+ * never widens the page. Every table therefore sits in `.doc__scroll`,
+ * and nothing here sets a width on the document itself. The alternative,
+ * collapsing each safety question into a stacked card, would destroy the
+ * document character the forms depend on.
+ */
+
+.doc__scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+
+.doc__table {
+  width: 100%;
+  /*
+   * Wide enough to stay readable where there is room, but allowed to
+   * shrink to the container on a phone so the Yes/No/N/A columns stay
+   * ON SCREEN. A fixed 32rem pushed them out of view at 390px, leaving
+   * safety questions with no visible controls until the user discovered
+   * they had to scroll sideways.
+   */
+  min-width: min(32rem, 100%);
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  background: var(--surface, #fff);
+}
+
+.doc__table th,
+.doc__table td {
+  border: 1px solid var(--border, #c8ccd4);
+  padding: 0.35rem 0.5rem;
+  vertical-align: middle;
+}
+
+.doc__table thead th {
+  background: var(--surface-header, #eef1f5);
+  font-weight: 700;
+  text-align: left;
+  font-size: 0.8rem;
+}
+
+.doc__table-question {
+  text-align: left;
+  font-weight: 400;
+  line-height: 1.35;
+  /* Long printed questions wrap rather than being clipped. */
+  overflow-wrap: anywhere;
+}
+
+.doc__table thead .doc__table-question {
+  font-weight: 700;
+}
+
+.doc__table-tick {
+  width: 3.25rem;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.doc__tick-box {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  line-height: 1rem;
+  border: 1px solid var(--border, #7a8290);
+  text-align: center;
+  font-weight: 700;
+  background: #fff;
+}
+
+.doc__tick-box--on {
+  background: var(--selected-bg, #dbe6f5);
+}
+
+.doc__input {
+  width: 100%;
+  border: 1px solid var(--border, #c8ccd4);
+  border-radius: 2px;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  background: #fff;
+  color: inherit;
+}
+
+.doc__input:focus-visible {
+  outline: 2px solid var(--brand-primary, #2563eb);
+  outline-offset: 1px;
+}
+
+.doc__field-note {
+  color: var(--text-muted, #6b7280);
+  font-size: 0.75rem;
+}
+
+.doc__response-group {
+  display: inline-flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.doc__response {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+/* The tick bands print in columns; they collapse to one column on a phone. */
+.doc__ticks {
+  display: grid;
+  grid-template-columns: repeat(var(--doc-tick-columns, 2), minmax(0, 1fr));
+  gap: 0.25rem 1rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.doc__ticks .doc__tick {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+  line-height: 1.3;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.doc__ticks .doc__tick label {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+/* A page of the JSA, so the two remain visibly separate documents. */
+.doc__page {
+  border: 2px solid var(--border, #9aa1ac);
+  margin-bottom: var(--space-5, 1.5rem);
+  background: var(--surface, #fff);
+}
+
+.doc__page-banner {
+  background: var(--surface-header, #eef1f5);
+  border-bottom: 1px solid var(--border, #c8ccd4);
+  padding: 0.4rem 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+}
+
+.doc__reminder {
+  border: 2px solid var(--border, #9aa1ac);
+  padding: 0.5rem 0.75rem;
+  font-weight: 700;
+  text-align: center;
+  margin-top: var(--space-4, 1rem);
+  font-size: 0.85rem;
+}
+
+.doc__slogan {
+  font-weight: 800;
+  text-align: center;
+  padding: 0.5rem;
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+}
+
+.doc__footer {
+  border-top: 1px solid var(--border, #c8ccd4);
+  padding: 0.4rem 0.75rem;
+  font-size: 0.7rem;
+  color: var(--text-muted, #6b7280);
+}
+
+@media (max-width: 640px) {
+  .doc__ticks {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The HSE checklist prints in three columns; it stacks on narrow screens. */
+.doc__hse-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4, 1rem);
+}
+
+@media (max-width: 1100px) {
+  .doc__hse-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .doc__hse-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The printed heading a tick band carries (the JSA's HSE categories). */
+.doc__band-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+/* Visually hidden but available to assistive technology. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * A scroll container that can ACTUALLY constrain its table.
+ *
+ * `overflow-x: auto` alone is not enough: as a flex/grid child the
+ * container defaults to `min-width: auto`, so it grows to its content and
+ * the whole page scrolls sideways instead. Real-browser QA caught this on
+ * the JSA task-analysis table, which is ~840px wide at a 390px viewport.
+ */
+.doc__scroll {
+  min-width: 0;
+}
+
+.doc,
+.doc__section,
+.doc__section-body {
+  min-width: 0;
+}
+
+/* The eight energy-source ticks wrap rather than forcing a wide cell. */
+.doc__response-group {
+  flex-wrap: wrap;
+  row-gap: 0.25rem;
+}

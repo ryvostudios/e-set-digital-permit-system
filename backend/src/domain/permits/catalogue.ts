@@ -206,7 +206,7 @@ export const WTG_AUTHORIZATION_BANDS: readonly CatalogueItem[] = [
 const SHARED_EQUIPMENT_CONDITION: readonly CatalogueItem[] = [
   { id: '1', label: 'EQUIPMENT OUT OF SERVICE' },
   { id: '2', label: 'LOCKOUT / TAGOUT COMPLETED' },
-  { id: '3', label: 'ALL VALVES  BLOCKED / BLINDED' },
+  { id: '3', label: 'ALL VALVES BLOCKED / BLINDED' },
   { id: '4', label: 'EQUIPMENT DEPRESSURISED' },
   { id: '5', label: 'EQUIPMENT DRAINED' },
   { id: '6', label: 'EQUIPMENT EARTHED' },

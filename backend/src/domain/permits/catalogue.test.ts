@@ -435,3 +435,18 @@ test('form reference numbers match the printed footers', () => {
     JSA: 'E-SET-ZPL-F-009',
   });
 });
+
+test('no catalogue label contains collapsed whitespace it could never render with', () => {
+  // HTML collapses runs of whitespace, so a label carrying a double space
+  // can never display as transcribed - it is always a transcription
+  // artifact rather than printed wording. Caught by real-browser QA on
+  // Cold Work's "ALL VALVES BLOCKED / BLINDED".
+  for (const section of [...ALL_CHECKLISTS, ...ALL_SELECTIONS]) {
+    for (const entry of 'items' in section ? section.items : section.options) {
+      assert.ok(
+        !/\s{2,}/.test(entry.label),
+        `${section.id}/${entry.id} carries collapsed whitespace: ${JSON.stringify(entry.label)}`,
+      );
+    }
+  }
+});

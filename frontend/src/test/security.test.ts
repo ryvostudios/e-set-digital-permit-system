@@ -70,8 +70,13 @@ describe('no server secret can reach the browser bundle', () => {
         if (match[1]) referenced.add(match[1]);
       }
     }
-    // PROD is Vite's own build-mode flag, not configuration.
+    // PROD and MODE are Vite's own build-mode flags, not configuration
+    // and not credentials: they carry a literal like "production" or
+    // "e2e". MODE gates the e2e-only form-preview route out of the
+    // shipped bundle. Everything else must still be a documented public
+    // VITE_ variable.
     referenced.delete('PROD');
+    referenced.delete('MODE');
     expect([...referenced].sort()).toEqual(['VITE_API_BASE_URL', 'VITE_SUPABASE_PUBLISHABLE_KEY', 'VITE_SUPABASE_URL']);
   });
 });

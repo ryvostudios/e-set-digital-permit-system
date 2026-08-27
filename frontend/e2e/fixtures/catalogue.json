@@ -1,0 +1,1835 @@
+{
+  "permits": {
+    "WTG_WORK": {
+      "formVersion": "WTG_WORK_V2",
+      "title": "PERMIT TO WORK ON WTG",
+      "formReference": null,
+      "checklistSections": [
+        {
+          "id": "general_work",
+          "title": "GENERAL WORK",
+          "printedNumber": "2",
+          "responses": "YES_NO_NA",
+          "items": [
+            {
+              "id": "a",
+              "label": "Risk Assessment & safe system of work document & workers aware of/trained in findings?"
+            },
+            {
+              "id": "b",
+              "label": "Those undertaking the work have appropriate competence & experience?"
+            },
+            {
+              "id": "c",
+              "label": "Loss of service has been approved by site management?"
+            },
+            {
+              "id": "d",
+              "label": "Are safety warning signs clearly displayed at the work location?"
+            },
+            {
+              "id": "e",
+              "label": "Is suitable rescue equipment in place & certified for use?"
+            },
+            {
+              "id": "f",
+              "label": "Are radios required or communication strategy known?"
+            },
+            {
+              "id": "g",
+              "label": "Has JSA been carried out for this activity?"
+            },
+            {
+              "id": "h",
+              "label": "Are tools and work equipment's suitable for the work activity?"
+            },
+            {
+              "id": "i",
+              "label": "Aware with \"work in and around the WTG\"?"
+            }
+          ]
+        },
+        {
+          "id": "electrical_work",
+          "title": "ELECTRICAL WORK",
+          "printedNumber": "3",
+          "responses": "YES_NO_NA",
+          "items": [
+            {
+              "id": "a",
+              "label": "Equipment isolated from all source of supply?"
+            },
+            {
+              "id": "b",
+              "label": "Has all stored energy been completely isolated?"
+            },
+            {
+              "id": "c",
+              "label": "Is Lock out Tag out (LOTO) required?"
+            }
+          ]
+        },
+        {
+          "id": "mechanical_work",
+          "title": "MECHANICAL WORK",
+          "printedNumber": "4",
+          "responses": "YES_NO_NA",
+          "items": [
+            {
+              "id": "a",
+              "label": "All rotating/equipment properly guarded?"
+            },
+            {
+              "id": "b",
+              "label": "Is Lock out Tag out (LOTO) Required?"
+            }
+          ]
+        },
+        {
+          "id": "hydraulic_work",
+          "title": "HYDRAULIC WORK",
+          "printedNumber": "5",
+          "responses": "YES_NO_NA",
+          "items": [
+            {
+              "id": "a",
+              "label": "Are warning signs displayed where parts of the system remain pressurized?"
+            },
+            {
+              "id": "b",
+              "label": "Has all stored energy been completely dissipated?"
+            }
+          ]
+        },
+        {
+          "id": "work_at_heights",
+          "title": "WORK AT HEIGHTS",
+          "printedNumber": "6",
+          "responses": "YES_NO_NA",
+          "items": [
+            {
+              "id": "a",
+              "label": "Are working are suitably trained and competent to use access equipment or fall arrest equipment involved?"
+            },
+            {
+              "id": "b",
+              "label": "Are control measures and protective equipment's including PPE inspected for the work activity?"
+            },
+            {
+              "id": "c",
+              "label": "Is Hazard regarding high wind speed known according to task?"
+            }
+          ]
+        },
+        {
+          "id": "specific_safety_requirements",
+          "title": "Specific Safety requirement before commencing work",
+          "printedNumber": null,
+          "responses": "YES_NO_NA",
+          "items": [
+            {
+              "id": "a",
+              "label": "WTG needs to be stopped?"
+            },
+            {
+              "id": "b",
+              "label": "Is Man on Turbine (MOT) applied?"
+            },
+            {
+              "id": "c",
+              "label": "Is MV disconnection required?"
+            }
+          ]
+        }
+      ],
+      "isolationPoints": {
+        "id": "isolation_points",
+        "title": "Detail of Isolation Points",
+        "printedNumber": null,
+        "responses": "YES_NO",
+        "items": [
+          {
+            "id": "a",
+            "label": "Bottom box isolation"
+          },
+          {
+            "id": "b",
+            "label": "Top box isolation"
+          },
+          {
+            "id": "c",
+            "label": "Trafo box isolation"
+          },
+          {
+            "id": "d",
+            "label": "Hub isolation"
+          },
+          {
+            "id": "e",
+            "label": "Hydraulic Station isolation?"
+          },
+          {
+            "id": "f",
+            "label": "Gear oil filter isolation"
+          },
+          {
+            "id": "g",
+            "label": "Generator cooling system isolation"
+          },
+          {
+            "id": "h",
+            "label": "converter cooling system isolation"
+          },
+          {
+            "id": "i",
+            "label": "overhead crane isolation"
+          },
+          {
+            "id": "j",
+            "label": "transformer isolation"
+          }
+        ]
+      },
+      "ppe": {
+        "id": "ppe",
+        "title": "PPE REQUIRED",
+        "printedNumber": "7",
+        "hasOther": true,
+        "options": [
+          {
+            "id": "fall_protection",
+            "label": "Fall Protection"
+          },
+          {
+            "id": "full_suit",
+            "label": "Full Suit"
+          },
+          {
+            "id": "electrical",
+            "label": "Electrical"
+          },
+          {
+            "id": "dust_respirator",
+            "label": "Dust respirator"
+          },
+          {
+            "id": "vapor_respirator",
+            "label": "Vapor respirator"
+          },
+          {
+            "id": "hardhat",
+            "label": "Hardhat"
+          },
+          {
+            "id": "safety_glasses",
+            "label": "Safety glasses"
+          },
+          {
+            "id": "face_shield",
+            "label": "Face Shield"
+          },
+          {
+            "id": "boots",
+            "label": "Boots"
+          },
+          {
+            "id": "ear_protection",
+            "label": "Ear protection"
+          },
+          {
+            "id": "gloves",
+            "label": "Gloves"
+          }
+        ]
+      },
+      "authorizationBands": [
+        {
+          "id": "permit_issuer",
+          "label": "PERMIT ISSUER"
+        },
+        {
+          "id": "permit_receipt",
+          "label": "PERMIT RECEIPT"
+        },
+        {
+          "id": "extension_of_permit",
+          "label": "EXTENSION OF PERMIT"
+        },
+        {
+          "id": "permit_closed",
+          "label": "PERMIT CLOSED"
+        }
+      ],
+      "slogan": null,
+      "distributionFooter": "DISTRIBUTION: WHITE - JOB EXECUTE: BLUE - ISSUER: YELLOW - BOOK COPY:"
+    },
+    "COLD_WORK": {
+      "formVersion": "COLD_WORK_V2",
+      "title": "COLD WORK PERMIT",
+      "formReference": "E-SET-ZPL-F-008A",
+      "natureOfWork": {
+        "id": "nature_of_work",
+        "title": "NATURE OF WORK",
+        "printedNumber": null,
+        "hasOther": false,
+        "options": [
+          {
+            "id": "mechanical",
+            "label": "MECHANICAL WORK"
+          },
+          {
+            "id": "e_and_i",
+            "label": "E&I WORK"
+          },
+          {
+            "id": "civil",
+            "label": "CIVIL WORK"
+          },
+          {
+            "id": "chemical",
+            "label": "CHEMICAL WORK"
+          },
+          {
+            "id": "inspection",
+            "label": "INSPECTION"
+          }
+        ]
+      },
+      "typeOfHazard": {
+        "id": "type_of_hazard",
+        "title": "TYPE OF HAZARD",
+        "printedNumber": null,
+        "hasOther": false,
+        "options": [
+          {
+            "id": "energized",
+            "label": "ENERGIZED WORK"
+          },
+          {
+            "id": "fall",
+            "label": "FALL HAZARD"
+          },
+          {
+            "id": "respiratory",
+            "label": "RESPIRATORY HAZARD"
+          },
+          {
+            "id": "chemical",
+            "label": "CHEMICAL HAZARD"
+          }
+        ]
+      },
+      "combustionSubTicks": null,
+      "checklistSections": [
+        {
+          "id": "general_requirements",
+          "title": "GENERAL REQUIREMENTS",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "AREA/EQUIPMENT/LINE READY"
+            },
+            {
+              "id": "2",
+              "label": "SITE SPECIFIC HAZARD EXPLAINED"
+            },
+            {
+              "id": "3",
+              "label": "EMERGENCY EGRESS PLANNED"
+            },
+            {
+              "id": "4",
+              "label": "CONTAINERS LABEING O.K."
+            },
+            {
+              "id": "5",
+              "label": "MSDS INFORMATION AVAILABLE"
+            },
+            {
+              "id": "6",
+              "label": "ANY SOURCE OF HEAT/SPARK INVOLVED"
+            }
+          ]
+        },
+        {
+          "id": "equipment_condition",
+          "title": "EQUIPMENT CONDITION",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "EQUIPMENT OUT OF SERVICE"
+            },
+            {
+              "id": "2",
+              "label": "LOCKOUT / TAGOUT COMPLETED"
+            },
+            {
+              "id": "3",
+              "label": "ALL VALVES BLOCKED / BLINDED"
+            },
+            {
+              "id": "4",
+              "label": "EQUIPMENT DEPRESSURISED"
+            },
+            {
+              "id": "5",
+              "label": "EQUIPMENT DRAINED"
+            },
+            {
+              "id": "6",
+              "label": "EQUIPMENT EARTHED"
+            },
+            {
+              "id": "7",
+              "label": "UNEXPECTED HAZARD"
+            },
+            {
+              "id": "8",
+              "label": "MANUAL STOP OF WTG APPLIED"
+            },
+            {
+              "id": "9",
+              "label": "EQUIPMENT LAST CONTAINED"
+            },
+            {
+              "id": "10",
+              "label": "OTHERS"
+            }
+          ]
+        },
+        {
+          "id": "protective_equipment",
+          "title": "PROTECTIVE EQUIPMENT REQUIRED",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "FALL PROTECTION"
+            },
+            {
+              "id": "2",
+              "label": "SAFETY GLASSES"
+            },
+            {
+              "id": "3",
+              "label": "HARDHAT"
+            },
+            {
+              "id": "4",
+              "label": "SAFETY SHOES"
+            },
+            {
+              "id": "5",
+              "label": "HEARING PROTECTION"
+            },
+            {
+              "id": "6",
+              "label": "CHEMICAL GLOVES"
+            },
+            {
+              "id": "7",
+              "label": "CHEMICAL SUIT"
+            },
+            {
+              "id": "8",
+              "label": "CHEMICAL BOOTS"
+            },
+            {
+              "id": "9",
+              "label": "GLOVES"
+            },
+            {
+              "id": "10",
+              "label": "DUST RESPIRATOR"
+            },
+            {
+              "id": "11",
+              "label": "OTHERS"
+            }
+          ]
+        }
+      ],
+      "authorizationBands": [
+        {
+          "id": "inspected_safe_to_work",
+          "statement": "INSPECTED/DISCUSSED WORK AREA, JOB PREPARATIONS ARE COMPLETE AND IT IS SAFE TO WORK",
+          "signatories": [
+            {
+              "id": "issuing_auth_person",
+              "label": "ISSUING AUTH PERSON"
+            },
+            {
+              "id": "extend_auth_person",
+              "label": "EXTEND AUTH PERSON"
+            }
+          ]
+        },
+        {
+          "id": "instructed_the_crew",
+          "statement": "INSPECTED / DISCUSSED WORK AREA, UNDERSTOOD THE INSTRUCTIONS AND INSTRUCTED THE CREW",
+          "signatories": [
+            {
+              "id": "maintenance_auth_person",
+              "label": "MAINTENANCE AUTH PERSON"
+            }
+          ]
+        },
+        {
+          "id": "evacuation",
+          "statement": "EVACUATION COMPLETED",
+          "signatories": [
+            {
+              "id": "maint_auth_person",
+              "label": "MAINT. AUTH PERSON"
+            },
+            {
+              "id": "issuing_auth_person_evacuation",
+              "label": "ISSUING AUTH PERSON"
+            }
+          ]
+        }
+      ],
+      "slogan": "PERMIT SAVE LIVE - GIVE THEM THE PROPER ATTENTION",
+      "distributionFooter": "DISTRIBUTION: WHITE - JOB EXECUTE: BLUE - ISSUER: YELLOW - BOOK COPY:"
+    },
+    "HOT_WORK": {
+      "formVersion": "HOT_WORK_V2",
+      "title": "HOT WORK PERMIT",
+      "formReference": "E-SET-ZPL-F-008C",
+      "natureOfWork": {
+        "id": "nature_of_work",
+        "title": "NATURE OF WORK",
+        "printedNumber": null,
+        "hasOther": false,
+        "options": [
+          {
+            "id": "mechanical",
+            "label": "MECHANICAL WORK"
+          },
+          {
+            "id": "e_and_i",
+            "label": "E&I WORK"
+          },
+          {
+            "id": "civil",
+            "label": "CIVIL WORK"
+          },
+          {
+            "id": "chemical",
+            "label": "CHEMICAL WORK"
+          }
+        ]
+      },
+      "typeOfHazard": {
+        "id": "type_of_hazard",
+        "title": "TYPE OF HAZARD",
+        "printedNumber": null,
+        "hasOther": false,
+        "options": [
+          {
+            "id": "combustion_and_spark",
+            "label": "COMBUSTION & SPARK PRODUCING HAZARD"
+          },
+          {
+            "id": "energised_eqpt",
+            "label": "ENERGISED EQPT HAZARD"
+          },
+          {
+            "id": "fall",
+            "label": "FALL HAZARD"
+          },
+          {
+            "id": "respiratory",
+            "label": "RESPIRATORY HAZARD"
+          },
+          {
+            "id": "chemical",
+            "label": "CHEMICAL HAZARD"
+          }
+        ]
+      },
+      "combustionSubTicks": [
+        {
+          "id": "welding",
+          "label": "WELDING"
+        },
+        {
+          "id": "cutting",
+          "label": "CUTTING"
+        },
+        {
+          "id": "brazing",
+          "label": "BRAZING"
+        },
+        {
+          "id": "grinding",
+          "label": "GRINDING"
+        },
+        {
+          "id": "drilling",
+          "label": "DRILLING"
+        }
+      ],
+      "checklistSections": [
+        {
+          "id": "general_requirements",
+          "title": "GENERAL REQUIREMENTS",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "AREA/EQUIPMENT/LINE READY"
+            },
+            {
+              "id": "2",
+              "label": "METAL THICKNESS FOR WELDING"
+            },
+            {
+              "id": "3",
+              "label": "SEWERS COVERED"
+            },
+            {
+              "id": "4",
+              "label": "SITE SPECIFIC HAZARD EXPLAINED"
+            },
+            {
+              "id": "5",
+              "label": "EMERGENCY EGRESS PLANNED"
+            },
+            {
+              "id": "6",
+              "label": "FIRE WATCH READY"
+            },
+            {
+              "id": "7",
+              "label": "FIRE EXTINGUISHER NEARBY"
+            },
+            {
+              "id": "8",
+              "label": "MSDS INFORMATION AVAILABLE"
+            }
+          ]
+        },
+        {
+          "id": "equipment_condition",
+          "title": "EQUIPMENT CONDITION",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "EQUIPMENT OUT OF SERVICE"
+            },
+            {
+              "id": "2",
+              "label": "LOCKOUT / TAGOUT COMPLETED"
+            },
+            {
+              "id": "3",
+              "label": "ALL VALVES BLOCKED / BLINDED"
+            },
+            {
+              "id": "4",
+              "label": "EQUIPMENT DEPRESSURISED"
+            },
+            {
+              "id": "5",
+              "label": "EQUIPMENT DRAINED"
+            },
+            {
+              "id": "6",
+              "label": "EQUIPMENT EARTHED"
+            },
+            {
+              "id": "7",
+              "label": "UNEXPECTED HAZARD"
+            },
+            {
+              "id": "8",
+              "label": "MANUAL STOP OF WTG APPLIED"
+            },
+            {
+              "id": "9",
+              "label": "EQUIPMENT LAST CONTAINED"
+            },
+            {
+              "id": "10",
+              "label": "OTHERS"
+            }
+          ]
+        },
+        {
+          "id": "protective_equipment",
+          "title": "PROTECTIVE EQUIPMENT REQUIRED",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "FALL PROTECTION"
+            },
+            {
+              "id": "2",
+              "label": "SAFETY GLASSES"
+            },
+            {
+              "id": "3",
+              "label": "HARDHAT"
+            },
+            {
+              "id": "4",
+              "label": "SAFETY SHOES"
+            },
+            {
+              "id": "5",
+              "label": "HEARING PROTECTION"
+            },
+            {
+              "id": "6",
+              "label": "CHEMICAL GLOVES"
+            },
+            {
+              "id": "7",
+              "label": "CHEMICAL SUIT"
+            },
+            {
+              "id": "8",
+              "label": "CHEMICAL BOOTS"
+            },
+            {
+              "id": "9",
+              "label": "GLOVES"
+            },
+            {
+              "id": "10",
+              "label": "DUST RESPIRATOR"
+            },
+            {
+              "id": "11",
+              "label": "OTHERS"
+            }
+          ]
+        }
+      ],
+      "authorizationBands": [
+        {
+          "id": "inspected_safe_to_work",
+          "statement": "INSPECTED/DISCUSSED WORK AREA, JOB PREPARATIONS ARE COMPLETE AND IT IS SAFE TO WORK",
+          "signatories": [
+            {
+              "id": "issuing_auth_person",
+              "label": "ISSUING AUTH PERSON"
+            },
+            {
+              "id": "extend_auth_person",
+              "label": "EXTEND AUTH PERSON"
+            }
+          ]
+        },
+        {
+          "id": "instructed_the_crew",
+          "statement": "INSPECTED / DISCUSSED WORK AREA, UNDERSTOOD THE INSTRUCTIONS AND INSTRUCTED THE CREW",
+          "signatories": [
+            {
+              "id": "maintenance_auth_person",
+              "label": "MAINTENANCE AUTH PERSON"
+            }
+          ]
+        },
+        {
+          "id": "evacuation",
+          "statement": "EVACUATION COMPLETED",
+          "signatories": [
+            {
+              "id": "maint_auth_person",
+              "label": "MAINT. AUTH PERSON"
+            },
+            {
+              "id": "issuing_auth_person_evacuation",
+              "label": "ISSUING AUTH PERSON"
+            }
+          ]
+        }
+      ],
+      "slogan": "PERMIT VOID IF CONDITIONS CHANGED",
+      "distributionFooter": "DISTRIBUTION: WHITE - JOB EXECUTE: BLUE - ISSUER: YELLOW - BOOK COPY:"
+    },
+    "CONFINED_SPACE_ENTRY": {
+      "formVersion": "CONFINED_SPACE_ENTRY_V2",
+      "title": "CONFINED SPACE ENTRY PERMIT",
+      "formReference": "E-SET-ZPL-F-008B",
+      "natureOfWork": {
+        "id": "nature_of_work",
+        "title": "NATURE OF WORK",
+        "printedNumber": null,
+        "hasOther": false,
+        "options": [
+          {
+            "id": "hot_work",
+            "label": "HOT WORK"
+          },
+          {
+            "id": "cold_work",
+            "label": "COLD WORK"
+          },
+          {
+            "id": "mechanical",
+            "label": "MECHANICAL WORK"
+          },
+          {
+            "id": "e_and_i",
+            "label": "E&I WORK"
+          },
+          {
+            "id": "civil",
+            "label": "CIVIL WORK"
+          },
+          {
+            "id": "chemical",
+            "label": "CHEMICAL WORK"
+          },
+          {
+            "id": "inspection",
+            "label": "INSPECTION"
+          }
+        ]
+      },
+      "typeOfHazard": {
+        "id": "type_of_hazard",
+        "title": "TYPE OF HAZARD",
+        "printedNumber": null,
+        "hasOther": false,
+        "options": [
+          {
+            "id": "combustion_and_spark",
+            "label": "COMBUSTION & SPARK PRODUCING HAZARD"
+          },
+          {
+            "id": "energised_eqpt",
+            "label": "ENERGISED EQPT HAZARD"
+          },
+          {
+            "id": "fall",
+            "label": "FALL HAZARD"
+          },
+          {
+            "id": "respiratory",
+            "label": "RESPIRATORY HAZARD"
+          },
+          {
+            "id": "chemical",
+            "label": "CHEMICAL HAZARD"
+          }
+        ]
+      },
+      "combustionSubTicks": [
+        {
+          "id": "welding",
+          "label": "WELDING"
+        },
+        {
+          "id": "cutting",
+          "label": "CUTTING"
+        },
+        {
+          "id": "brazing",
+          "label": "BRAZING"
+        },
+        {
+          "id": "grinding",
+          "label": "GRINDING"
+        },
+        {
+          "id": "drilling",
+          "label": "DRILLING"
+        }
+      ],
+      "checklistSections": [
+        {
+          "id": "gas_test",
+          "title": "GAS TEST",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "GAS TEST CONDUCTED"
+            },
+            {
+              "id": "2",
+              "label": "INSTRUMENT USED"
+            },
+            {
+              "id": "3",
+              "label": "INSTRUMENT CALIBRATED"
+            },
+            {
+              "id": "4",
+              "label": "GAS RETEST REQUIRED"
+            },
+            {
+              "id": "5",
+              "label": "CONTINOUS MONITORING"
+            }
+          ]
+        },
+        {
+          "id": "general_requirements",
+          "title": "GENERAL REQUIREMENTS",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "PREPARATIONS SATISFACTORY"
+            },
+            {
+              "id": "2",
+              "label": "ADEQUATE LIGHT"
+            },
+            {
+              "id": "3",
+              "label": "PROPER VENTILATION"
+            },
+            {
+              "id": "4",
+              "label": "TEMPERATURE NORMAL"
+            },
+            {
+              "id": "5",
+              "label": "WARNING SIGNS POSTED"
+            },
+            {
+              "id": "6",
+              "label": "SITE SPECIFIC HAZARD EXPLAINED"
+            },
+            {
+              "id": "7",
+              "label": "EMERGENCY EGRESS PLANNED"
+            },
+            {
+              "id": "8",
+              "label": "ATTENDANT READY"
+            },
+            {
+              "id": "9",
+              "label": "ENTRANTS RECORD MAINTAINED"
+            },
+            {
+              "id": "10",
+              "label": "COMMUNICATION"
+            },
+            {
+              "id": "11",
+              "label": "OTHERS"
+            }
+          ]
+        },
+        {
+          "id": "protective_equipment",
+          "title": "PROTECTIVE EQUIPMENT REQUIRED",
+          "printedNumber": null,
+          "responses": "YES_NO",
+          "items": [
+            {
+              "id": "1",
+              "label": "FALL PROTECTION"
+            },
+            {
+              "id": "2",
+              "label": "SAFETY GLASSES"
+            },
+            {
+              "id": "3",
+              "label": "HARDHAT"
+            },
+            {
+              "id": "4",
+              "label": "SAFETY SHOES"
+            },
+            {
+              "id": "5",
+              "label": "HEARING PROTECTION"
+            },
+            {
+              "id": "6",
+              "label": "CHEMICAL GLOVES"
+            },
+            {
+              "id": "7",
+              "label": "CHEMICAL SUIT"
+            },
+            {
+              "id": "8",
+              "label": "CHEMICAL BOOTS"
+            },
+            {
+              "id": "9",
+              "label": "GLOVES"
+            },
+            {
+              "id": "10",
+              "label": "DUST RESPIRATOR"
+            },
+            {
+              "id": "11",
+              "label": "OTHERS"
+            }
+          ]
+        }
+      ],
+      "gasTestRecord": {
+        "columns": [
+          {
+            "id": "test_no",
+            "label": "TEST NO."
+          },
+          {
+            "id": "o2_and_time",
+            "label": "02 (19.5-23.5%) & TIME"
+          },
+          {
+            "id": "signature",
+            "label": "SIGNATURE"
+          }
+        ],
+        "rows": [
+          "1",
+          "2",
+          "3"
+        ]
+      },
+      "authorizationBands": [
+        {
+          "id": "inspected_safe_to_work",
+          "statement": "INSPECTED/DISCUSSED WORK AREA, JOB PREPARATIONS ARE COMPLETE AND IT IS SAFE TO WORK",
+          "signatories": [
+            {
+              "id": "issuing_auth_person",
+              "label": "ISSUING AUTH PERSON"
+            },
+            {
+              "id": "extend_auth_person",
+              "label": "EXTEND AUTH PERSON"
+            }
+          ]
+        },
+        {
+          "id": "instructed_the_crew",
+          "statement": "INSPECTED / DISCUSSED WORK AREA, UNDERSTOOD THE INSTRUCTIONS AND INSTRUCTED THE CREW",
+          "signatories": [
+            {
+              "id": "maintenance_auth_person",
+              "label": "MAINTENANCE AUTH PERSON"
+            }
+          ]
+        },
+        {
+          "id": "evacuation",
+          "statement": "EVACUATION COMPLETED",
+          "signatories": [
+            {
+              "id": "maint_auth_person",
+              "label": "MAINT. AUTH PERSON"
+            },
+            {
+              "id": "issuing_auth_person_evacuation",
+              "label": "ISSUING AUTH PERSON"
+            }
+          ]
+        }
+      ],
+      "slogan": "EVACUATE IMMEDIATELY IF CONDITIONS CHANGED",
+      "distributionFooter": "DISTRIBUTION: WHITE - JOB EXECUTE: BLUE - ISSUER: YELLOW - BOOK COPY:"
+    }
+  },
+  "jsa": {
+    "formVersion": "JSA_V2",
+    "formReference": "E-SET-ZPL-F-009",
+    "page1": {
+      "pageLabel": "PAGE 1 OF 2",
+      "requiredPermits": {
+        "id": "required_permits",
+        "title": "Are any working permits required for this job?",
+        "printedNumber": null,
+        "hasOther": true,
+        "options": [
+          {
+            "id": "eew",
+            "label": "Energized Electrical Work (EEW)"
+          },
+          {
+            "id": "switching_authorization",
+            "label": "Switching Authorization"
+          },
+          {
+            "id": "confined_space_entry",
+            "label": "Confined Space Entry"
+          },
+          {
+            "id": "ground_disturbance",
+            "label": "Ground Disturbance"
+          },
+          {
+            "id": "simops",
+            "label": "Simultaneous Operations (SIMOPS)"
+          },
+          {
+            "id": "major_equipment_movement",
+            "label": "Major Equipment Movement"
+          },
+          {
+            "id": "lifting_operations",
+            "label": "Lifting Operations"
+          },
+          {
+            "id": "hot_work",
+            "label": "Hot Work"
+          }
+        ]
+      },
+      "hseChecklistInstruction": "Discuss with your team the following list and tick the applicable items. Provide details in the section \"Task Analysis\".",
+      "hseChecklistCategories": [
+        {
+          "id": "ergonomic",
+          "title": "Ergonomic",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Manual handling required"
+            },
+            {
+              "id": "2",
+              "label": "Excessive twisting of back, neck, or wrist"
+            },
+            {
+              "id": "3",
+              "label": "Working with hands above shoulders."
+            },
+            {
+              "id": "4",
+              "label": "Lifting, lowering or carrying heavy loads"
+            },
+            {
+              "id": "5",
+              "label": "Carrying with one hand/side of the body"
+            },
+            {
+              "id": "6",
+              "label": "Applying uneven, fast or irregular forces"
+            },
+            {
+              "id": "7",
+              "label": "Squatting, kneeling, crawling required"
+            },
+            {
+              "id": "8",
+              "label": "Fingers working close or wide apart"
+            },
+            {
+              "id": "9",
+              "label": "Awkward grips - No secure gripping"
+            }
+          ]
+        },
+        {
+          "id": "driving_motorized_equipment",
+          "title": "Driving/Motorized Equipment",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Discuss condition of the road or route"
+            },
+            {
+              "id": "2",
+              "label": "Vehicle pre-use inspection needed?"
+            },
+            {
+              "id": "3",
+              "label": "Spotter required?"
+            },
+            {
+              "id": "4",
+              "label": "All loads secured?"
+            },
+            {
+              "id": "5",
+              "label": "Driving over underground piping/lines"
+            }
+          ]
+        },
+        {
+          "id": "electrical",
+          "title": "Electrical",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Contact with energized parts possible?"
+            },
+            {
+              "id": "2",
+              "label": "Contact with overhead/underground lines"
+            },
+            {
+              "id": "3",
+              "label": "Explosion or fire of electrical components"
+            },
+            {
+              "id": "4",
+              "label": "Unauthorized access to electrical systems"
+            },
+            {
+              "id": "5",
+              "label": "Non-isolated electrical components"
+            },
+            {
+              "id": "6",
+              "label": "Induced static voltage potential"
+            },
+            {
+              "id": "7",
+              "label": "Earthing/Grounding/bounding required?"
+            },
+            {
+              "id": "8",
+              "label": "GFCI/RCD for electric power tools?"
+            }
+          ]
+        },
+        {
+          "id": "hot_work_welding",
+          "title": "Hot Work/Welding",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Combustible/LEL monitored?"
+            },
+            {
+              "id": "2",
+              "label": "Fire extinguisher/equipment at job site"
+            },
+            {
+              "id": "3",
+              "label": "02 detector needed?"
+            },
+            {
+              "id": "4",
+              "label": "Ventilation concerns?"
+            },
+            {
+              "id": "5",
+              "label": "Welding/X-ray (secured area off?)"
+            },
+            {
+              "id": "6",
+              "label": "Hot work near drains, sumps(flammable)"
+            },
+            {
+              "id": "7",
+              "label": "Cold cut, cutting torch, electric saw"
+            },
+            {
+              "id": "8",
+              "label": "Ground rod for welding machine"
+            },
+            {
+              "id": "9",
+              "label": "Hot tap, welding and pressure check"
+            }
+          ]
+        },
+        {
+          "id": "environmental_biological_human",
+          "title": "Environmental, Biological and Human",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Spill mitigation or containment plan?"
+            },
+            {
+              "id": "2",
+              "label": "Chemicals in use? MSDS reviewed?"
+            },
+            {
+              "id": "3",
+              "label": "Odorless fumes present?"
+            },
+            {
+              "id": "4",
+              "label": "Air borne contaminants (dust, fibers)"
+            },
+            {
+              "id": "5",
+              "label": "Waste disposal permits/plan?"
+            },
+            {
+              "id": "6",
+              "label": "Exposure to dangerous animals"
+            },
+            {
+              "id": "7",
+              "label": "Exposure to toxic natural substances"
+            },
+            {
+              "id": "8",
+              "label": "Exposure to infectious substances"
+            },
+            {
+              "id": "9",
+              "label": "Assault by another person"
+            }
+          ]
+        },
+        {
+          "id": "workplace_area_and_design",
+          "title": "Workplace Area and Design",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Poor housekeeping, spillages or wastes"
+            },
+            {
+              "id": "2",
+              "label": "Uneven/slippery work surfaces or gaps"
+            },
+            {
+              "id": "3",
+              "label": "Dropped/Falling objects possible"
+            },
+            {
+              "id": "4",
+              "label": "Are others working overhead/below?"
+            },
+            {
+              "id": "5",
+              "label": "Moving equipment, or vehicles around."
+            },
+            {
+              "id": "6",
+              "label": "Pinch points for fingers/hands/limbs"
+            },
+            {
+              "id": "7",
+              "label": "Confusing/inadequate labeling of controls"
+            },
+            {
+              "id": "8",
+              "label": "Exposure to continuous vibrations"
+            },
+            {
+              "id": "9",
+              "label": "Lighting Too much/not enough"
+            },
+            {
+              "id": "10",
+              "label": "Exposure to extreme cold/heat?"
+            }
+          ]
+        },
+        {
+          "id": "organizational_arrangements",
+          "title": "Organizational Arrangements",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Chance of remote shutdown/restart?"
+            },
+            {
+              "id": "2",
+              "label": "Chance of automatic shutdown/restart?"
+            },
+            {
+              "id": "3",
+              "label": "Sufficient job rotation, breaks planned?"
+            },
+            {
+              "id": "4",
+              "label": "No accompanied contractor"
+            },
+            {
+              "id": "5",
+              "label": "New employee/Inexperienced workers"
+            },
+            {
+              "id": "6",
+              "label": "Lack of clarity in work roles of employees"
+            },
+            {
+              "id": "7",
+              "label": "Work related stress and burn out"
+            },
+            {
+              "id": "8",
+              "label": "Are all workers fit for duty?(medication, sleep, distraction)"
+            }
+          ]
+        },
+        {
+          "id": "energy_isolation",
+          "title": "Energy Isolation",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Is personnel trained to use LOTO?"
+            },
+            {
+              "id": "2",
+              "label": "Walkthrough, discussion, LOTO verification"
+            },
+            {
+              "id": "3",
+              "label": "Depressurized/drained (verification)"
+            },
+            {
+              "id": "4",
+              "label": "Breaker open and locked?"
+            },
+            {
+              "id": "5",
+              "label": "Mechanical energy released"
+            },
+            {
+              "id": "6",
+              "label": "Purge/ventilation needed?"
+            },
+            {
+              "id": "7",
+              "label": "LOTO checklist used and attached to JSA?"
+            }
+          ]
+        },
+        {
+          "id": "heavy_lifting_equipment",
+          "title": "Heavy Lifting Equipment",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Is the operator certification updated?"
+            },
+            {
+              "id": "2",
+              "label": "Daily inspection for lifting equipment"
+            },
+            {
+              "id": "3",
+              "label": "Is the equipment swing radius clear?"
+            },
+            {
+              "id": "4",
+              "label": "Overturn potential/restricted access area"
+            },
+            {
+              "id": "5",
+              "label": "Banks man/spotter/signal man in place?"
+            },
+            {
+              "id": "6",
+              "label": "Safe use of tag line for rigging"
+            },
+            {
+              "id": "7",
+              "label": "Overhead power lines, poling"
+            }
+          ]
+        },
+        {
+          "id": "chemical_and_toxicity",
+          "title": "Chemical and Toxicity",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Inert gas or asphyxiate gas/vaper"
+            },
+            {
+              "id": "2",
+              "label": "Explosion or ignition of gas/vapors/liquids"
+            },
+            {
+              "id": "3",
+              "label": "Exposure to toxic concentrations"
+            },
+            {
+              "id": "4",
+              "label": "Atmospheres with low presence of oxygen"
+            },
+            {
+              "id": "5",
+              "label": "Damage lines/cylinders, chemical storage"
+            }
+          ]
+        },
+        {
+          "id": "weather_and_environmental_conditions",
+          "title": "Weather and Environmental Conditions",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Is high wind speed a concern?"
+            },
+            {
+              "id": "2",
+              "label": "Extreme weather conditions(storm, snow)"
+            },
+            {
+              "id": "3",
+              "label": "Fires possible? Dry grass or conditions"
+            },
+            {
+              "id": "4",
+              "label": "Loose or unstable ground, ridges"
+            },
+            {
+              "id": "5",
+              "label": "Flooding possible in low-lying land?"
+            },
+            {
+              "id": "6",
+              "label": "Lightning possible with little/no notice?"
+            }
+          ]
+        },
+        {
+          "id": "working_at_heights",
+          "title": "Working at Heights",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Adequate platform/stair/ladder/guardrail?"
+            },
+            {
+              "id": "2",
+              "label": "Proper anchor/tie-off points identified"
+            },
+            {
+              "id": "3",
+              "label": "Area secured (cordoned) below?"
+            },
+            {
+              "id": "4",
+              "label": "Walking on wet, slippery, icy surfaces"
+            },
+            {
+              "id": "5",
+              "label": "Scaffolding, inspected? Weight capacity?"
+            },
+            {
+              "id": "6",
+              "label": "Man lift not inspected or certified"
+            }
+          ]
+        },
+        {
+          "id": "mechanical",
+          "title": "Mechanical",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Poorly maintained/ unguarded equipment"
+            },
+            {
+              "id": "2",
+              "label": "Entanglement in moving components?"
+            },
+            {
+              "id": "3",
+              "label": "Unexpected movement of equipment/load"
+            },
+            {
+              "id": "4",
+              "label": "Failure of machinery dropped loads"
+            },
+            {
+              "id": "5",
+              "label": "Inability to slow/stop machines or vehicles"
+            },
+            {
+              "id": "6",
+              "label": "Contact with moving, sharp or hot parts"
+            },
+            {
+              "id": "7",
+              "label": "Persons pushed/thrown off structures"
+            },
+            {
+              "id": "8",
+              "label": "Use of mechanical tightening tools"
+            },
+            {
+              "id": "9",
+              "label": "Pressurized systems (chemical/air)"
+            }
+          ]
+        },
+        {
+          "id": "ground_disturbance",
+          "title": "Ground Disturbance",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Notifications/locates completed"
+            },
+            {
+              "id": "2",
+              "label": "Lines located/marked/drawings reviewed?"
+            },
+            {
+              "id": "3",
+              "label": "Will this be an open excavation?"
+            },
+            {
+              "id": "4",
+              "label": "Approved shoring/barricades"
+            },
+            {
+              "id": "5",
+              "label": "Proper sloping defined"
+            },
+            {
+              "id": "6",
+              "label": "Area/trench roped off (barricades)?"
+            },
+            {
+              "id": "7",
+              "label": "Proper egress provided from trenches"
+            }
+          ]
+        },
+        {
+          "id": "technical_processes",
+          "title": "Technical/Processes",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Has the MOC been approved for this job?"
+            },
+            {
+              "id": "2",
+              "label": "Lacking of procedures/instructions"
+            },
+            {
+              "id": "3",
+              "label": "Lacking or incorrect tooling"
+            }
+          ]
+        },
+        {
+          "id": "emergency_and_communication",
+          "title": "Emergency and Communication",
+          "printedNumber": null,
+          "hasOther": false,
+          "options": [
+            {
+              "id": "1",
+              "label": "Safety equipment locations known?"
+            },
+            {
+              "id": "2",
+              "label": "Radios Supplied for use?"
+            },
+            {
+              "id": "3",
+              "label": "Communication strategy known?"
+            },
+            {
+              "id": "4",
+              "label": "Barricades or security required?"
+            },
+            {
+              "id": "5",
+              "label": "Safety signs and color coding understood?"
+            },
+            {
+              "id": "6",
+              "label": "Sufficient first-aid training/equipment?"
+            },
+            {
+              "id": "7",
+              "label": "Sufficient emergency/rescue planning?"
+            }
+          ]
+        }
+      ],
+      "reminder": "REMEMBER... Everyone has the AUTHORITY to STOP any unsafe work. All injuries can be prevented."
+    },
+    "page2": {
+      "pageLabel": "PAGE 2 OF 2",
+      "emergencyContacts": [
+        {
+          "id": "radio_channel_cell_phone",
+          "label": "Radio Channel / Cell phone"
+        },
+        {
+          "id": "eset_emergency_response_unit",
+          "label": "E-Set Emergency response unit"
+        }
+      ],
+      "emergencyQuestions": [
+        {
+          "id": "erp_understood",
+          "label": "Was the Emergency Response Plan understood and agreed prior start working?"
+        },
+        {
+          "id": "language_concern",
+          "label": "Is language a working team concern/behaviour?"
+        }
+      ],
+      "taskAnalysisColumns": [
+        {
+          "id": "sequence_of_tasks",
+          "label": "Sequence of Tasks"
+        },
+        {
+          "id": "possible_hazardous_events",
+          "label": "Possible Hazardous Events"
+        },
+        {
+          "id": "energy_sources",
+          "label": "Energy Sources"
+        },
+        {
+          "id": "triggering_events",
+          "label": "Triggering Events to Stop the Work"
+        },
+        {
+          "id": "protective_actions",
+          "label": "Protective Actions/ Measures to Reduce Risk"
+        }
+      ],
+      "energySourceLegend": [
+        {
+          "code": "M",
+          "label": "mechanical"
+        },
+        {
+          "code": "E",
+          "label": "electrical"
+        },
+        {
+          "code": "C",
+          "label": "chemical"
+        },
+        {
+          "code": "P",
+          "label": "pressure"
+        },
+        {
+          "code": "G",
+          "label": "gravity"
+        },
+        {
+          "code": "H",
+          "label": "heat/cold"
+        },
+        {
+          "code": "R",
+          "label": "radiation"
+        },
+        {
+          "code": "B",
+          "label": "biological"
+        }
+      ],
+      "ppe": {
+        "id": "ppe",
+        "title": "PPE required for this job",
+        "printedNumber": null,
+        "hasOther": true,
+        "options": [
+          {
+            "id": "fall_protection",
+            "label": "Fall Protection"
+          },
+          {
+            "id": "full_suit",
+            "label": "Full Suit"
+          },
+          {
+            "id": "electrical",
+            "label": "Electrical"
+          },
+          {
+            "id": "dust_respirator",
+            "label": "Dust respirator"
+          },
+          {
+            "id": "vapor_respirator",
+            "label": "Vapor respirator"
+          },
+          {
+            "id": "hardhat",
+            "label": "Hardhat"
+          },
+          {
+            "id": "safety_glasses",
+            "label": "Safety glasses"
+          },
+          {
+            "id": "face_shield",
+            "label": "Face Shield"
+          },
+          {
+            "id": "boots",
+            "label": "Boots"
+          },
+          {
+            "id": "ear_protection",
+            "label": "Ear protection"
+          },
+          {
+            "id": "gloves",
+            "label": "Gloves"
+          }
+        ]
+      },
+      "participantSignatureNote": "Signature indicates that you understand and agree with JSA content",
+      "approvalSignatories": [
+        {
+          "id": "job_lead",
+          "label": "Job Lead"
+        },
+        {
+          "id": "work_authorizer",
+          "label": "Work Authorizer"
+        }
+      ],
+      "approvalNote": "indicates all parts involve in the work have completed, reviewed and understand the JSA",
+      "closeOutNote": "Closure out signature indicates that the work has been completed, tools/materials are back in place and housekeeping is done."
+    }
+  }
+}
