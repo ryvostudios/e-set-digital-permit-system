@@ -2,6 +2,7 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { closePool, getPool, toSafeDbErrorMessage } from './db/pool.js';
 import { logEvent } from './middleware/requestLog.js';
+import { ACTIVE_FORM_GENERATION } from './domain/permits/formGeneration.js';
 
 // A safety net, not the primary shutdown mechanism: `server.close()`
 // normally completes as soon as in-flight requests finish and idle
@@ -21,7 +22,17 @@ async function main(): Promise<void> {
 
   const app = createApp();
   const server = app.listen(env.PORT, () => {
-    logEvent('startup', { port: env.PORT, nodeEnv: env.NODE_ENV });
+    // The active form generation is logged at startup because a STALE
+    // PROCESS is otherwise invisible: the source and the build can both
+    // say V2 while a long-running server still serves the V1 it was
+    // started with, and the only symptom is new permits quietly storing
+    // the wrong version. One line here makes "which generation is this
+    // process actually creating?" answerable without a database query.
+    logEvent('startup', {
+      port: env.PORT,
+      nodeEnv: env.NODE_ENV,
+      activeFormGeneration: ACTIVE_FORM_GENERATION,
+    });
   });
 
   let shuttingDown = false;
