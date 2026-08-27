@@ -884,13 +884,21 @@ accountsRouter.delete(
  * One employee's ADMINISTRATIVE/SECURITY audit trail - who created the
  * account, who reset its password, when it was disabled.
  *
- * CEO ONLY, deliberately narrower than every other endpoint on this
- * router. A Site Manager performs routine employee administration and
- * therefore APPEARS in this log as an actor; letting them read it would
- * let the administered watch the record of their own administration.
- * That is a different question from whether they may administer, so it
- * gets a different gate: `authorizeCeo`, resolved from the append-only
- * grant log on every request, never from a JWT claim.
+ * READ is open to the two privileged system roles and NOBODY else:
+ * an active CEO, or an active E-SET SITE_MANAGER. A Site Manager runs
+ * day-to-day employee administration and needs to see what was already
+ * done to an account before acting on it. Both roles are resolved from
+ * the append-only privileged grant log on every request (see
+ * `authorizeAccountManagement`) - never from a JWT claim, an email, a
+ * position name, or anything the client can influence. So a ZPL
+ * organizational "Site Manager" is not this role, and `permit.view_all`
+ * grants nothing here.
+ *
+ * READ-ONLY for both. There is no audit mutation endpoint anywhere, and
+ * the logs are append-only in the database for every role including the
+ * CEO's - see `forbid_mutation()` and db/auditImmutability.test.ts.
+ * Correcting a record is a separate, CEO-only authority that APPENDS a
+ * new event; it never rewrites one.
  *
  * This is NOT permit workflow history. A permit's own lifecycle
  * (`permit_lifecycle_events` - created, submitted, reviewed, issued) is
@@ -903,7 +911,7 @@ accountsRouter.get(
   requireAuth,
   managerAccountLimiter,
   async (req: Request, res: Response) => {
-    const actorUserId = await authorizeCeo(req, res);
+    const actorUserId = await authorize(req, res);
     if (!actorUserId) return;
     const params = employeeIdParamsSchema.safeParse(req.params);
     if (!params.success) {

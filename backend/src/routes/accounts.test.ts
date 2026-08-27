@@ -729,9 +729,8 @@ test('audit history pagination is bounded', async () => {
   try {
     for (const qs of ['?pageSize=101', '?page=0', '?pageSize=0', '?page=99999999', '?unknown=1']) {
       authenticatedUserId = nextActorId();
-      // CEO, not a Site Manager: the audit is CEO-only, and authorization
-      // runs BEFORE query validation - so a Site Manager would be refused
-      // 403 here and this would stop testing paging at all.
+      // Either privileged role reaches the audit; the CEO is used here
+      // simply so this test measures paging validation and nothing else.
       authorizeCeo();
       const response = await get(url, `/admin/employees/${EMPLOYEE_ID}/history${qs}`, VALID_TOKEN);
       assert.equal(response.status, 400, `expected ${qs} to be rejected`);
@@ -745,24 +744,39 @@ test('audit history pagination is bounded', async () => {
 // The ADMINISTRATIVE/SECURITY audit is CEO-only
 // ---------------------------------------------------------------------
 
-test('the administrative audit refuses EVERY role except CEO - including the Site Manager who administers the account', async () => {
+test('BOTH privileged system roles may READ the administrative audit', async () => {
+  // A Site Manager runs day-to-day employee administration and needs to
+  // see what was already done to an account before acting on it. The
+  // stubbed database holds no such employee, so both land on 404 - what
+  // matters is that neither is 403: the gate opened for each.
   const { url, close } = await startServer();
   try {
-    // A Site Manager holds full employee administration and APPEARS in
-    // this log as an actor. Reading it would let the administered watch
-    // the record of their own administration, so it is refused - and
-    // refused with the same generic 403 as anyone else, which never
-    // reveals that the caller was close to authorized.
-    authenticatedUserId = nextActorId();
-    authorizeSiteManager();
-    assert.equal(
-      (await get(url, `/admin/employees/${EMPLOYEE_ID}/history`, VALID_TOKEN)).status,
-      403,
-      'an E-SET Site Manager must not read the administrative audit',
-    );
+    for (const [label, authorize] of [
+      ['CEO', authorizeCeo],
+      ['E-SET SITE_MANAGER', authorizeSiteManager],
+    ] as const) {
+      authenticatedUserId = nextActorId();
+      authorize();
+      const response = await get(url, `/admin/employees/${EMPLOYEE_ID}/history`, VALID_TOKEN);
+      assert.notEqual(response.status, 403, `${label} must pass the administrative audit gate`);
+      assert.equal(response.status, 404, `${label} must reach the lookup, not an authorization refusal`);
+    }
+  } finally {
+    await close();
+  }
+});
 
-    // Nobody reaches it through a capability, a broad permit permission,
-    // or a position that merely sounds senior.
+test('NOBODY else reaches the administrative audit - no capability, no broad permit permission, no job title', async () => {
+  const { url, close } = await startServer();
+  try {
+    // Every one of these is refused with the same generic 403, which
+    // never reveals how close the caller was to being authorized.
+    //
+    // `permit.view_all` is listed deliberately: broad permit VISIBILITY
+    // must never become audit access. So is a caller holding the
+    // employee.* capability NAMES - a ZPL organizational "Site Manager"
+    // is not the privileged E-SET SITE_MANAGER role, and the difference
+    // is exactly what this asserts.
     for (const capabilities of [
       [],
       ['permit.view_all'],
@@ -780,21 +794,6 @@ test('the administrative audit refuses EVERY role except CEO - including the Sit
         `capabilities ${JSON.stringify(capabilities)} must not reach the administrative audit`,
       );
     }
-  } finally {
-    await close();
-  }
-});
-
-test('the CEO passes the audit gate - the refusal above is authorization, not a broken route', async () => {
-  const { url, close } = await startServer();
-  try {
-    authenticatedUserId = nextActorId();
-    authorizeCeo();
-    const response = await get(url, `/admin/employees/${EMPLOYEE_ID}/history`, VALID_TOKEN);
-    // The stubbed database holds no such employee, so the CEO lands on
-    // 404. What matters is that it is NOT 403: the gate opened.
-    assert.notEqual(response.status, 403, 'the CEO must pass the administrative audit gate');
-    assert.equal(response.status, 404);
   } finally {
     await close();
   }

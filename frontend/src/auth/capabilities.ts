@@ -60,16 +60,27 @@ export interface Capabilities {
   canDeleteEmployees: boolean;
   canManageSiteManagers: boolean;
   /**
-   * CEO-only: the ADMINISTRATIVE/SECURITY audit trail (who created an
-   * account, who reset a password, who disabled it).
+   * The ADMINISTRATIVE/SECURITY audit trail (who created an account, who
+   * reset a password, who disabled it).
    *
-   * Deliberately NOT `canManageEmployees`. A Site Manager performs those
-   * actions and so appears in the log as an actor - reading it would let
-   * the administered watch the record of their own administration. This
-   * is also NOT permit workflow history, which stays visible to the
-   * people working a permit.
+   * Both privileged system roles may READ it - CEO and E-SET
+   * SITE_MANAGER - because a Site Manager runs day-to-day employee
+   * administration and needs to see what was already done to an account.
+   * Nobody else: not a normal employee, not CRO, not HSE, not a ZPL
+   * organizational "Site Manager" (which is not this role at all), and
+   * `permit.view_all` never grants it.
+   *
+   * Read-only. Correcting a record is `canCorrectRecords` below, which is
+   * CEO-only. This is also NOT permit workflow history, which stays
+   * visible to the people working a permit.
    */
   canViewAdministrativeAudit: boolean;
+  /**
+   * CEO-only: initiate a controlled, versioned correction/amendment to a
+   * historical record. A Site Manager may READ the audit but may never
+   * amend a record.
+   */
+  canCorrectRecords: boolean;
   /** Permit application. Privileged accounts may apply; E-SET E-BOP CRO may not (it holds neither capability). */
   canApplyForPermits: boolean;
   /** Whether the CRO review queue is worth showing at all. */
@@ -101,7 +112,8 @@ export function deriveCapabilities(user: CurrentUser): Capabilities {
     canManageEmployees: isPrivileged,
     canDeleteEmployees: isCeo,
     canManageSiteManagers: isCeo,
-    canViewAdministrativeAudit: isCeo,
+    canViewAdministrativeAudit: isPrivileged,
+    canCorrectRecords: isCeo,
     // Matches `requirePermitApplicant`: the capability, OR a privileged
     // system role. E-SET E-BOP CRO holds neither `permit.create` nor
     // `permit.submit` (migration 0020 excludes it), so CRO cannot apply.
