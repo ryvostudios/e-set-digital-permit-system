@@ -10,26 +10,41 @@ import {
 import type { PermitType } from './forms.js';
 
 /**
- * WHAT STILL HAS TO BE ANSWERED BEFORE A PERMIT MAY BE SUBMITTED.
+ * WHAT A PERMIT MUST CARRY BEFORE IT MAY BE SUBMITTED.
  *
- * A DRAFT is deliberately allowed to be incomplete: a person fills a long
- * safety document over time, and forcing an answer to save would push them
- * into ticking something just to get past it. Submission is the moment
- * that stops being acceptable - an issued permit records safety
- * judgements, so every printed question must carry one a person actually
- * made.
+ * NOT COMPLETENESS. The authoritative forms are printed to cover every
+ * job the company does, so a great many of their questions do not apply
+ * to any particular one. Requiring an answer to all of them before
+ * submission did not produce safer permits - it produced pressure to tick
+ * something, anything, to get past the gate, which is the opposite of
+ * what a safety document is for. Blank means "not applicable here" or
+ * "the CRO should look at this", and the CRO reviews what was actually
+ * supplied and can send the permit back for correction.
  *
- * `null` IS NOT `'NA'`. `'NA'` means "considered, does not apply"; null
- * means nobody has looked yet. Treating them as the same is exactly the
- * defect this module exists to prevent, so nothing here ever substitutes
- * one for the other or fills a blank in on the applicant's behalf.
+ * SO THE BAR IS DELIBERATELY LOW, AND EXISTS ONLY TO CATCH AN ACCIDENT:
+ * a permit must carry at least one thing a person actually entered. That
+ * stops an empty document being submitted by a mis-click; it does not ask
+ * which fields were filled, or how many.
  *
- * JSA HSE checklist items are TICKS, not responses. An unticked box is a
- * meaningful answer on that form ("this hazard is not present"), so they
- * are not required here - converting them into a third state would be
- * inventing a control the printed form does not have.
+ * `null` IS STILL NOT `'NA'`. `'NA'` means "considered, does not apply"
+ * and counts as content because a person made that judgement; null means
+ * nobody has looked. Nothing here ever substitutes one for the other, and
+ * nothing fills a blank in on the applicant's behalf - a field left empty
+ * is stored, submitted and printed empty.
+ *
+ * WHAT COUNTS AS CONTENT is anything in the stored payload that a person
+ * had to do something to produce: text they typed, a box they ticked, a
+ * Yes/No/N-A they chose. A blank draft is empty strings, false ticks and
+ * null responses throughout, so it contributes nothing. The payload holds
+ * only applicant-entered content - permit number, permit type, applicant
+ * identity and every timestamp are columns, never payload - so scanning
+ * it cannot mistake system-generated data for a person's work.
+ *
+ * The `findUnanswered*` functions below still report which printed
+ * questions are blank. They no longer BLOCK anything; they exist so a
+ * screen can offer guidance, and so the distinction between null and
+ * 'NA' stays tested.
  */
-
 export interface UnansweredAnswer {
   /** Catalogue section id, e.g. `general_work`. */
   sectionId: string;
@@ -141,4 +156,35 @@ export function findUnansweredForSubmission(
   const permit = findUnansweredPermitAnswers(permitType, permitForm);
   const jsa = findUnansweredJsaAnswers(jsaForm);
   return { permit, jsa, total: permit.length + jsa.length };
+}
+
+
+/**
+ * Anything a person had to do something to produce.
+ *
+ * `false` is not content: an unticked box is the state every blank draft
+ * starts in, so counting it would make every empty permit submittable.
+ * An empty or whitespace-only string is not content either. A response of
+ * 'NA' IS content, because choosing it is a judgement.
+ */
+function hasApplicantContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim() !== '';
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return true;
+  if (Array.isArray(value)) return value.some(hasApplicantContent);
+  if (typeof value === 'object') return Object.values(value as Record<string, unknown>).some(hasApplicantContent);
+  return false;
+}
+
+/**
+ * Whether this submission carries anything at all.
+ *
+ * Permit AND JSA are considered together: they are one document to the
+ * person filling them, and a permit whose JSA describes the job is
+ * plainly not an accidental blank. The only submission refused here is
+ * one where neither document contains a single entered value.
+ */
+export function hasMeaningfulSubmissionContent(permitForm: unknown, jsaForm: unknown): boolean {
+  return hasApplicantContent(permitForm) || hasApplicantContent(jsaForm);
 }

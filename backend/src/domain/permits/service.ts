@@ -10,7 +10,7 @@ import {
   type PermitFormVersion,
   type PermitType,
 } from './forms.js';
-import { findUnansweredForSubmission, type UnansweredAnswer } from './formCompleteness.js';
+import { hasMeaningfulSubmissionContent } from './formCompleteness.js';
 import {
   ACTIVE_FORM_GENERATION,
   type AnyPermitForm,
@@ -807,31 +807,36 @@ export type SubmitOutcome =
    * the applicant straight to the first one instead of making them hunt
    * through a long document.
    */
-  | { outcome: 'invalid'; reason: 'unanswered_questions'; unanswered: { permit: UnansweredAnswer[]; jsa: UnansweredAnswer[] } }
+  /**
+   * V2 only: neither the permit nor its JSA carries a single value a
+   * person entered. A partially completed permit is legitimate and is
+   * NOT refused here - this catches an empty document submitted by
+   * accident, and nothing else.
+   */
+  | { outcome: 'invalid'; reason: 'empty_submission' }
   | { outcome: 'ok'; permit: PermitRow };
 
 /**
- * V2 completeness, evaluated against the STORED payloads. Returns the
- * refusal outcome when anything printed is still unanswered, or null when
- * the document is ready. V1 permits are unaffected: their contract has no
- * notion of an unanswered fixed question.
+ * The ONLY V2 submission bar, evaluated against the STORED payloads.
+ *
+ * A permit may be submitted partially completed: the printed forms cover
+ * every job the company does, so blank fields usually mean "not
+ * applicable to this one", and the CRO reviews what was supplied. This
+ * refuses one thing - a document with nothing in it at all - so an empty
+ * permit cannot reach the CRO by mis-click. V1 permits are unaffected;
+ * their contract has no notion of a fixed printed question.
  */
-async function findUnansweredOnSubmission(
+async function findEmptySubmission(
   client: PoolClient,
   permit: PermitRow,
-): Promise<{ outcome: 'invalid'; reason: 'unanswered_questions'; unanswered: { permit: UnansweredAnswer[]; jsa: UnansweredAnswer[] } } | null> {
+): Promise<{ outcome: 'invalid'; reason: 'empty_submission' } | null> {
   if (generationOfPermitFormVersion(permit.form_version) !== 'V2' || !permit.permit_type) return null;
   const jsaResult = await client.query<{ form_payload: unknown }>(
     'SELECT form_payload FROM jsas WHERE id = $1',
     [permit.jsa_id],
   );
-  const result = findUnansweredForSubmission(
-    permit.permit_type,
-    permit.form_payload,
-    jsaResult.rows[0]?.form_payload ?? null,
-  );
-  if (result.total === 0) return null;
-  return { outcome: 'invalid', reason: 'unanswered_questions', unanswered: { permit: result.permit, jsa: result.jsa } };
+  if (hasMeaningfulSubmissionContent(permit.form_payload, jsaResult.rows[0]?.form_payload ?? null)) return null;
+  return { outcome: 'invalid', reason: 'empty_submission' };
 }
 
 /**
@@ -884,11 +889,12 @@ export async function submitPermit(
       return { outcome: 'invalid', reason: 'missing_required_fields' };
     }
 
-    // A DRAFT may be incomplete; a SUBMISSION may not. Every printed
-    // question must carry an answer a person actually gave - an
-    // unanswered item is never treated as 'NA'.
-    const unanswered = await findUnansweredOnSubmission(client, existing);
-    if (unanswered) return unanswered;
+    // A partially completed permit is legitimate: blank printed questions
+    // usually mean "not applicable to this job", and the CRO reviews what
+    // was actually supplied. The only refusal is a document with nothing
+    // in it at all.
+    const empty = await findEmptySubmission(client, existing);
+    if (empty) return empty;
 
     const applicant = await resolvePermitApplicantAuthority(client.query.bind(client), actorUserId);
     if (!applicant.allowed || !applicant.identity) throw new SigningIdentityUnavailableError(actorUserId);

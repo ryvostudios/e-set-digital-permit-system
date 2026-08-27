@@ -1,4 +1,16 @@
 import {
+  COLD_WORK_CHECKLIST_SECTIONS,
+  COLD_WORK_NATURE_OF_WORK,
+  COLD_WORK_TYPE_OF_HAZARD,
+  CONFINED_SPACE_CHECKLIST_SECTIONS,
+  CONFINED_SPACE_COMBUSTION_SUB_TICKS,
+  CONFINED_SPACE_GAS_TEST_TABLE,
+  CONFINED_SPACE_NATURE_OF_WORK,
+  CONFINED_SPACE_TYPE_OF_HAZARD,
+  HOT_WORK_CHECKLIST_SECTIONS,
+  HOT_WORK_COMBUSTION_SUB_TICKS,
+  HOT_WORK_NATURE_OF_WORK,
+  HOT_WORK_TYPE_OF_HAZARD,
   JSA_APPROVAL_SIGNATORIES,
   JSA_EMERGENCY_CONTACTS,
   JSA_EMERGENCY_QUESTIONS,
@@ -137,6 +149,98 @@ export function answeredJsaV2(): JsaV2Fixture {
     page2: {
       ...base.page2,
       emergencyQuestions: Object.fromEntries(JSA_EMERGENCY_QUESTIONS.map((q) => [q.id, 'YES'])),
+    },
+  };
+}
+
+
+// ---------------------------------------------------------------------
+// Blank and partial documents, for every permit type
+// ---------------------------------------------------------------------
+
+/**
+ * What a genuinely untouched draft looks like: every printed question
+ * unanswered, every tick false, every optional text omitted. Built from
+ * the catalogue, so a form gaining a question stays covered.
+ */
+const blankSections = (sections: readonly ChecklistSection[]): Record<string, unknown> =>
+  Object.fromEntries(sections.map((s) => [s.id, unanswered(s)]));
+
+const blankTicks = (options: readonly { id: string }[]): Record<string, boolean> =>
+  Object.fromEntries(options.map((o) => [o.id, false]));
+
+export function blankPermitV2(permitType: 'WTG_WORK' | 'COLD_WORK' | 'HOT_WORK' | 'CONFINED_SPACE_ENTRY'): Record<string, unknown> {
+  if (permitType === 'WTG_WORK') {
+    return {
+      // Genuinely untouched: the header is optional, so it is omitted
+      // entirely rather than carrying placeholder values.
+      permitIssue: {},
+      sections: blankSections(WTG_WORK_CHECKLIST_SECTIONS),
+      isolationPoints: unanswered(WTG_ISOLATION_POINTS),
+      ppe: ticks(WTG_PPE_REQUIRED),
+    };
+  }
+  const common = { workWindow: {}, evacuation: {} };
+  if (permitType === 'COLD_WORK') {
+    return {
+      ...common,
+      natureOfWork: blankTicks(COLD_WORK_NATURE_OF_WORK.options),
+      typeOfHazard: blankTicks(COLD_WORK_TYPE_OF_HAZARD.options),
+      sections: blankSections(COLD_WORK_CHECKLIST_SECTIONS),
+    };
+  }
+  if (permitType === 'HOT_WORK') {
+    return {
+      ...common,
+      natureOfWork: blankTicks(HOT_WORK_NATURE_OF_WORK.options),
+      typeOfHazard: blankTicks(HOT_WORK_TYPE_OF_HAZARD.options),
+      combustionSubTicks: blankTicks(HOT_WORK_COMBUSTION_SUB_TICKS),
+      sections: blankSections(HOT_WORK_CHECKLIST_SECTIONS),
+    };
+  }
+  return {
+    ...common,
+    natureOfWork: blankTicks(CONFINED_SPACE_NATURE_OF_WORK.options),
+    typeOfHazard: blankTicks(CONFINED_SPACE_TYPE_OF_HAZARD.options),
+    combustionSubTicks: blankTicks(CONFINED_SPACE_COMBUSTION_SUB_TICKS),
+    sections: blankSections(CONFINED_SPACE_CHECKLIST_SECTIONS),
+    gasTestRecord: Object.fromEntries(CONFINED_SPACE_GAS_TEST_TABLE.rows.map((row) => [row, {}])),
+  };
+}
+
+/**
+ * A realistically PARTIAL permit: the applicant described the job and
+ * answered one question, and left everything else blank because it does
+ * not apply. This is the shape the business requires to be submittable.
+ */
+export function partialPermitV2(permitType: 'WTG_WORK' | 'COLD_WORK' | 'HOT_WORK' | 'CONFINED_SPACE_ENTRY'): Record<string, unknown> {
+  const blank = blankPermitV2(permitType);
+  if (permitType === 'WTG_WORK') {
+    const sections = blank.sections as Record<string, Record<string, { response: string | null }>>;
+    const first = WTG_WORK_CHECKLIST_SECTIONS[0]!;
+    sections[first.id]![first.items[0]!.id] = { response: 'NA' };
+    return {
+      ...blank,
+      permitIssue: { ...(blank.permitIssue as Record<string, unknown>), descriptionOfWork: 'Gearbox inspection' },
+    };
+  }
+  return { ...blank, workWindow: { area: 'Substation bay 3' } };
+}
+
+/** A JSA with nothing entered at all - every question null, every tick false. */
+export function blankJsaFormV2(): JsaV2Fixture {
+  const base = jsaBase();
+  return {
+    page1: { ...base.page1, siteOrWtg: '', jobOrWork: '' },
+    page2: {
+      ...base.page2,
+      emergencyContacts: Object.fromEntries(JSA_EMERGENCY_CONTACTS.map((c) => [c.id, ''])),
+      // One EMPTY row, exactly as the editor starts a blank JSA - the
+      // printed table always has a first line.
+      taskAnalysis: [{
+        sequenceOfTasks: '', possibleHazardousEvents: '', energySources: [],
+        triggeringEventsToStopWork: '', protectiveActionsOrMeasures: '',
+      }],
     },
   };
 }

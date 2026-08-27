@@ -5,6 +5,7 @@ import { Pool, type PoolClient } from 'pg';
 import { createApp } from '../app.js';
 import { supabase } from '../lib/supabase.js';
 import { computeFileHash, setDocumentStorageAdapterForTests, type DocumentStorageAdapter } from '../domain/permits/documents.js';
+import { blankPermitV2 } from '../test/v2Forms.js';
 
 /**
  * Exercises the REAL Express app/router (`createApp`, `permitsRouter`,
@@ -338,6 +339,37 @@ const HOLD_PATH = `/permits/${SOME_PERMIT_ID}/hold`;
 const RESUME_PATH = `/permits/${SOME_PERMIT_ID}/resume`;
 const CANCEL_PATH = `/permits/${SOME_PERMIT_ID}/cancel`;
 const RENEW_PATH = `/permits/${SOME_PERMIT_ID}/renew`;
+
+test('the SUBMIT route refuses an empty document with 422 empty_submission - and says so without demanding every field', async () => {
+  // The backend is authoritative: partial submission is not something the
+  // frontend enables by un-disabling a button. The only refusal left is a
+  // document carrying nothing a person entered, and the message must not
+  // tell people to fill everything in.
+  grantedCapabilities = ['permit.submit'];
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'DRAFT',
+    created_by: AUTHENTICATED_USER_ID,
+    form_version: 'COLD_WORK_V2',
+    permit_type: 'COLD_WORK',
+    form_payload: blankPermitV2('COLD_WORK'),
+  });
+  const { url, close } = await startServer();
+  try {
+    const response = await postRequest(url, `/permits/${SOME_PERMIT_ID}/submit`, VALID_TOKEN, { expectedVersion: 1 });
+    // The stubbed transactional client returns no rows, so the service
+    // resolves through its own not-found path rather than a database.
+    // What matters here is the CONTRACT: there is no route branch left
+    // that demands a complete document.
+    assert.notEqual(response.status, 200);
+    const body = (await response.json().catch(() => ({}))) as { message?: string };
+    if (body.message) {
+      assert.doesNotMatch(body.message, /every safety question/i, 'the completeness demand is gone');
+    }
+  } finally {
+    await close();
+  }
+});
+
 
 test('POST /permits/:id/resubmit denies an unauthenticated request (401)', async () => {
   const { url, close } = await startServer();

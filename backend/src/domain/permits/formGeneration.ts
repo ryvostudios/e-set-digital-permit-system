@@ -145,9 +145,11 @@ export function derivePermitProjectionForVersion(
   if (permitType === 'WTG_WORK') {
     const wtg = form as WtgWorkFormV2;
     return {
-      windFarm: wtg.permitIssue.windFarmName,
-      wtgNumber: wtg.permitIssue.wtgNumber,
-      workDescription: wtg.permitIssue.descriptionOfWork,
+      // The header is optional now, so an unfilled field projects as NULL
+      // rather than being invented - the same as every other permit type.
+      windFarm: wtg.permitIssue.windFarmName ?? null,
+      wtgNumber: wtg.permitIssue.wtgNumber ?? null,
+      workDescription: wtg.permitIssue.descriptionOfWork ?? null,
       lotoNumber: null,
     };
   }
@@ -168,5 +170,7 @@ export function deriveJsaProjectionForVersion(
     return deriveJsaFormProjection(form as Parameters<typeof deriveJsaFormProjection>[0]);
   }
   const v2 = form as JsaFormV2;
-  return { siteOrWtg: v2.page1.siteOrWtg, jobDescription: v2.page1.jobOrWork };
+  // Both are optional printed fields now, so an unfilled one projects as
+  // an empty string rather than being invented.
+  return { siteOrWtg: v2.page1.siteOrWtg ?? '', jobDescription: v2.page1.jobOrWork ?? '' };
 }

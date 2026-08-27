@@ -283,14 +283,31 @@ test('taskAnalysis carries all FIVE printed columns - V1 collapsed two into one'
   form.page2.taskAnalysis = [row];
   assert.ok(ok(parseJsaFormV2(form)));
 
-  // Each of the five is required.
-  for (const column of Object.keys(row)) {
-    const missing = validJsa() as { page2: { taskAnalysis: Record<string, unknown>[] } };
+  // All five are ACCEPTED and distinct. They are no longer each
+  // MANDATORY: a permit may be submitted partially completed, so a task
+  // row may be started and left for the CRO to review. `energySources`
+  // remains structurally required because it is a list, not free text -
+  // an empty list is how "none" is expressed.
+  for (const column of ['sequenceOfTasks', 'possibleHazardousEvents', 'triggeringEventsToStopWork', 'protectiveActionsOrMeasures']) {
+    const withoutColumn = validJsa() as { page2: { taskAnalysis: Record<string, unknown>[] } };
     const partial: Record<string, unknown> = { ...row };
     delete partial[column];
-    missing.page2.taskAnalysis = [partial];
-    assert.equal(parseJsaFormV2(missing).ok, false, `${column} must be required`);
+    withoutColumn.page2.taskAnalysis = [partial];
+    assert.equal(parseJsaFormV2(withoutColumn).ok, true, `${column} may be left blank`);
+
+    // Present-but-empty is stored as given, never defaulted.
+    const blanked = validJsa() as { page2: { taskAnalysis: Record<string, unknown>[] } };
+    blanked.page2.taskAnalysis = [{ ...row, [column]: '' }];
+    const parsedBlank = parseJsaFormV2(blanked);
+    assert.equal(parsedBlank.ok, true, `${column} may be empty`);
   }
+
+  // The one column that is not free text stays structurally required.
+  const withoutEnergy = validJsa() as { page2: { taskAnalysis: Record<string, unknown>[] } };
+  const noEnergy: Record<string, unknown> = { ...row };
+  delete noEnergy.energySources;
+  withoutEnergy.page2.taskAnalysis = [noEnergy];
+  assert.equal(parseJsaFormV2(withoutEnergy).ok, false, 'energySources must still be present');
 
   // V1's merged column is not accepted.
   const v1Shape = validJsa() as { page2: { taskAnalysis: unknown[] } };

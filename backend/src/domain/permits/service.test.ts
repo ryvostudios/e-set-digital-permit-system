@@ -37,7 +37,7 @@ import {
   makeJsaFormColumns,
   makePermitFormColumns,
 } from './formFixtures.test.js';
-import { answeredJsaV2, answeredWtgPermitV2 } from '../../test/v2Forms.js';
+import { answeredJsaV2, answeredWtgPermitV2, blankJsaFormV2, blankPermitV2, partialPermitV2 } from '../../test/v2Forms.js';
 import { ACTIVE_FORM_GENERATION, jsaFormVersionFor, permitFormVersionFor } from './formGeneration.js';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
@@ -3134,6 +3134,75 @@ test('listOwnPermits: an empty result set reports zero totalPages/totalCount, no
   assert.equal(page.hasNextPage, false);
   assert.equal(page.hasPreviousPage, false);
 });
+
+test('a PARTIALLY completed permit submits to the CRO - blank printed questions do not block it', async () => {
+  // The business rule: the authoritative forms cover every job the
+  // company does, so most questions do not apply to any given one.
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  const saved = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: permit.version, company: 'ESET', form: partialPermitV2('WTG_WORK') },
+    db.deps(),
+  );
+  assert.equal(saved.outcome, 'ok');
+  if (saved.outcome !== 'ok') return;
+  const jsa = await updateLinkedJsa('owner', permit.id, { expectedVersion: saved.permit.version, form: blankJsaFormV2() }, db.deps());
+  assert.equal(jsa.outcome, 'ok');
+  if (jsa.outcome !== 'ok') return;
+
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: jsa.permit.version }, db.deps());
+  assert.equal(submitted.outcome, 'ok', 'a partially completed permit must reach the CRO');
+  if (submitted.outcome !== 'ok') return;
+  assert.equal(submitted.permit.status, 'PENDING_CRO');
+
+  // What the applicant left blank is still blank on the submitted record -
+  // nothing was defaulted, and no answer was invented.
+  const stored = db.permits.get(permit.id)!.form_payload as unknown as { sections: Record<string, Record<string, { response: string | null }>> };
+  const answers = Object.values(stored.sections).flatMap((section) => Object.values(section));
+  assert.ok(answers.some((answer) => answer.response === null), 'blanks survived submission');
+});
+
+test('an EMPTY permit cannot be submitted by accident', async () => {
+  const db = new FakeDb();
+  const { permit } = await createDraftPermit('owner', 'UTC', 'COLD_WORK', db.deps());
+  const saved = await updateDraftPermit(
+    'owner',
+    permit.id,
+    { expectedVersion: permit.version, company: 'ESET', form: blankPermitV2('COLD_WORK') },
+    db.deps(),
+  );
+  assert.equal(saved.outcome, 'ok', 'an empty draft still SAVES');
+  if (saved.outcome !== 'ok') return;
+  const jsa = await updateLinkedJsa('owner', permit.id, { expectedVersion: saved.permit.version, form: blankJsaFormV2() }, db.deps());
+  if (jsa.outcome !== 'ok') throw new Error('setup failed');
+
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: jsa.permit.version }, db.deps());
+  assert.deepEqual(submitted, { outcome: 'invalid', reason: 'empty_submission' });
+  assert.equal(db.permits.get(permit.id)!.status, 'DRAFT', 'the refusal changed nothing');
+});
+
+test('every V2 permit type accepts a partial draft and a partial submission', async () => {
+  for (const permitType of PERMIT_TYPES) {
+    const db = new FakeDb();
+    const { permit } = await createDraftPermit('owner', 'UTC', permitType, db.deps());
+    const saved = await updateDraftPermit(
+      'owner',
+      permit.id,
+      { expectedVersion: permit.version, company: 'ESET', form: partialPermitV2(permitType) },
+      db.deps(),
+    );
+    assert.equal(saved.outcome, 'ok', `${permitType}: a partial draft must save`);
+    if (saved.outcome !== 'ok') return;
+    const jsa = await updateLinkedJsa('owner', permit.id, { expectedVersion: saved.permit.version, form: blankJsaFormV2() }, db.deps());
+    if (jsa.outcome !== 'ok') throw new Error(`${permitType}: JSA setup failed`);
+
+    const submitted = await submitPermit('owner', permit.id, { expectedVersion: jsa.permit.version }, db.deps());
+    assert.equal(submitted.outcome, 'ok', `${permitType}: a partial permit must submit`);
+  }
+});
+
 
 test('listOwnPermits excludes an owner\'s DRAFT while listOwnDrafts includes exactly that own draft', async () => {
   const db = new FakeDb();

@@ -703,19 +703,15 @@ permitsRouter.post(
       return;
     }
     if (result.outcome === 'invalid') {
-      // Unanswered printed questions come back ITEMISED, in printed
-      // order, each with the payload path of the control that needs an
-      // answer. A long permit plus a two-page JSA is far too much
-      // document to make someone search by hand, and the alternative -
-      // letting the editor guess - would drift from what the server
-      // actually requires. Only the question text and its location
-      // travel; no permit content and no identity.
-      if (result.reason === 'unanswered_questions') {
+      // A permit may be submitted partially completed - blank printed
+      // questions usually mean "not applicable to this job". The only
+      // refusal here is a document carrying nothing a person entered,
+      // which can only be an accident.
+      if (result.reason === 'empty_submission') {
         res.status(422).json({
           error: 'invalid_state',
           reason: result.reason,
-          message: 'Every safety question must be answered before this permit can be submitted',
-          unanswered: result.unanswered,
+          message: 'Enter at least one detail before submitting this permit',
         });
         return;
       }

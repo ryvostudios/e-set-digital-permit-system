@@ -66,8 +66,13 @@ import { MAX_FORM_PAYLOAD_BYTES, type FormParseResult, type PermitType } from '.
  * rewrite (stage C); nothing writes a V2 payload yet.
  */
 
-const text = (max: number) => z.string().trim().min(1).max(max);
-const optionalText = (max: number) => z.string().trim().min(1).max(max).optional();
+/**
+ * An optional printed field. Present-and-empty is allowed on purpose: a
+ * blank form sends '', and refusing that made an untouched draft
+ * unsaveable. An empty field is STORED empty - nothing is defaulted in
+ * its place, and '' is never turned into a value.
+ */
+const optionalText = (max: number) => z.string().trim().max(max).optional();
 
 const ISO_DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
 const isoDateTime = z
@@ -166,13 +171,18 @@ export const wtgWorkFormV2Schema = z
   .object({
     // Section 1 PERMIT ISSUE. The Permit Number is deliberately absent:
     // it is the server's `permit_sequence`.
+    // OPTIONAL, like every other permit type's header. These were the
+    // only required text fields left in any V2 form, which made WTG the
+    // one type whose blank draft could not even be SAVED, and the one
+    // type that could not be submitted partially completed. A field left
+    // empty is stored empty; nothing is defaulted in its place.
     permitIssue: z
       .object({
-        windFarmName: text(200),
-        wtgNumber: text(100),
-        descriptionOfWork: text(4000),
-        permitStartAt: isoDateTime,
-        permitExpiryAt: isoDateTime,
+        windFarmName: optionalText(200),
+        wtgNumber: optionalText(100),
+        descriptionOfWork: optionalText(4000),
+        permitStartAt: isoDateTime.optional(),
+        permitExpiryAt: isoDateTime.optional(),
       })
       .strict(),
     sections: checklistSectionsSchema(WTG_WORK_CHECKLIST_SECTIONS),
@@ -181,7 +191,11 @@ export const wtgWorkFormV2Schema = z
   })
   .strict()
   .superRefine((form, ctx) => {
-    if (Date.parse(form.permitIssue.permitExpiryAt) < Date.parse(form.permitIssue.permitStartAt)) {
+    // Only meaningful once BOTH dates are present; a permit still being
+    // filled in has neither, or one.
+    const { permitStartAt, permitExpiryAt } = form.permitIssue;
+    if (permitStartAt === undefined || permitExpiryAt === undefined) return;
+    if (Date.parse(permitExpiryAt) < Date.parse(permitStartAt)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'permitExpiryAt must not be before permitStartAt',
@@ -301,12 +315,12 @@ const hseChecklistSchema = z
 
 const jsaPage1Schema = z
   .object({
-    siteOrWtg: text(200),
+    siteOrWtg: optionalText(200),
     /** The printed "Date/Time" header cell. */
     dateTime: isoDateTime.optional(),
     /** The printed "S. No." header cell. */
     serialNo: optionalText(60),
-    jobOrWork: text(2000),
+    jobOrWork: optionalText(2000),
     // "JSA completed by (name and position)" is NOT here: it is the
     // authenticated applicant, frozen server-side into the snapshot.
     /** The printed Yes/No above the permit tick list. */
@@ -327,8 +341,8 @@ const ENERGY_SOURCE_CODES = JSA_ENERGY_SOURCE_LEGEND.map((entry) => entry.code) 
 
 const taskAnalysisRowSchema = z
   .object({
-    sequenceOfTasks: text(1000),
-    possibleHazardousEvents: text(1000),
+    sequenceOfTasks: optionalText(1000),
+    possibleHazardousEvents: optionalText(1000),
     /** Constrained to the printed legend: M/E/C/P/G/H/R/B. */
     energySources: z
       .array(z.enum(ENERGY_SOURCE_CODES))
@@ -338,15 +352,15 @@ const taskAnalysisRowSchema = z
           ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'duplicate energy source code' });
         }
       }),
-    triggeringEventsToStopWork: text(1000),
-    protectiveActionsOrMeasures: text(1000),
+    triggeringEventsToStopWork: optionalText(1000),
+    protectiveActionsOrMeasures: optionalText(1000),
   })
   .strict();
 
 /** Paper acknowledgement content. Never an authoritative digital signature. */
 const participantSchema = z
   .object({
-    nameAndPosition: text(200),
+    nameAndPosition: optionalText(200),
     company: optionalText(200),
     acknowledged: z.boolean(),
   })
