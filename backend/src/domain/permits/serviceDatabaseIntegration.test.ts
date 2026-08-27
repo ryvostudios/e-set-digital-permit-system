@@ -44,8 +44,9 @@ test('real PostgreSQL transaction rolls back fallback-only CRO forward when no H
         permit_id uuid NOT NULL REFERENCES permits(id),
         source_event_id uuid NOT NULL REFERENCES permit_lifecycle_events(id),
         signature_role text NOT NULL, signer_user_id uuid NOT NULL,
-        signer_display_name text NOT NULL, signer_team_position_id uuid NOT NULL,
-        signer_team_name text NOT NULL, signer_position_name text NOT NULL,
+        signer_display_name text NOT NULL, signer_team_position_id uuid,
+        signer_team_name text, signer_position_name text,
+        signer_identity_kind text NOT NULL DEFAULT 'NORMAL',
         signed_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
       );
 

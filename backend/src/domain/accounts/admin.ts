@@ -67,6 +67,26 @@ export function createSupabaseAccountAdmin(): AccountAdmin | null {
       }
     },
 
+    async setEmailAndPassword(userId, email, password) {
+      // One Auth call changes both. `email_confirm: true` keeps the new
+      // address immediately usable without an invitation round-trip,
+      // matching how provisioning already works - the employee is forced
+      // to replace the temporary password on first use anyway.
+      try {
+        const { error } = await client.auth.admin.updateUserById(userId, {
+          email,
+          password,
+          email_confirm: true,
+        });
+        if (error) {
+          return { ok: false, reason: isDuplicateEmail(error) ? 'email_unavailable' : 'failed' };
+        }
+        return { ok: true };
+      } catch {
+        return { ok: false, reason: 'failed' };
+      }
+    },
+
     async deleteUser(userId) {
       try {
         const { error } = await client.auth.admin.deleteUser(userId);

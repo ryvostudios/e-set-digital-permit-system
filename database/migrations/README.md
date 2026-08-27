@@ -170,6 +170,21 @@ Versioned, plain SQL migration files, applied in filename order by
   each denial with `has_*_privilege` and fails the migration otherwise,
   while confirming the operator/owner bootstrap path still works.
 
+- `0023_employee_lifecycle_and_user_permissions.sql` through
+  `0027_service_role_function_hardening.sql`: **APPLIED / LIVE-VERIFIED**.
+  Their exact new `app_runtime` delta is:
+  `SELECT, INSERT` on `user_capability_grants`; `USAGE` on its ordinal
+  sequence; `UPDATE(display_name, company_id, primary_team_position_id)`
+  on `workforce_profiles`; and `UPDATE(ended_at)` on
+  `user_team_positions`. Neither employee table receives table-level
+  UPDATE, and no identity/assignment key column is writable. See
+  `DEPLOYMENT.md` for the executable grant statements.
+
+  Migration 0025 removes all public application table/sequence mutation
+  from `service_role`; 0027 removes its inherited EXECUTE from every
+  non-extension public application function. Live effective-privilege and
+  rolled-back attempt audits verified both boundaries.
+
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
 later, scoped implementation sections — not here.

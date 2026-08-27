@@ -1,4 +1,5 @@
 import { query, type QueryFn } from '../db/pool.js';
+import { resolveUserIndividualCapabilities } from '../domain/accounts/userPermissions.js';
 
 /**
  * Resolves the set of capability names granted to `userId` via their
@@ -19,21 +20,34 @@ import { query, type QueryFn } from '../db/pool.js';
  * exactly the escalation the one-current-assignment rule exists to
  * prevent. History is for audit; only the current row grants anything.
  *
+ * INDIVIDUAL GRANTS ARE UNIONED IN. A capability may also be held
+ * personally rather than through a role (migration 0023's
+ * `user_capability_grants`). Only capabilities explicitly marked
+ * `individually_grantable` can be held that way - currently just
+ * `permit.view_all` - and a database trigger refuses to attach any of
+ * them to a Team + Position, so the two sources can never overlap and
+ * this union cannot smuggle workflow authority in through the personal
+ * side. Both are re-resolved from the database on every request, so a
+ * revoke takes effect on the target's very next call.
+ *
  * Privileged system authority (CEO / E-SET SITE_MANAGER) is deliberately
  * NOT resolved here and can never be obtained through this path - it
  * comes solely from `privileged_access_events` (authz/privilegedAccess.ts).
  */
 export async function resolveUserCapabilities(userId: string): Promise<Set<string>> {
-  const result = await query<{ name: string }>(
-    `SELECT DISTINCT c.name
-       FROM user_team_positions utp
-       JOIN team_position_capabilities tpc ON tpc.team_position_id = utp.team_position_id
-       JOIN capabilities c ON c.id = tpc.capability_id
-      WHERE utp.user_id = $1
-        AND utp.ended_at IS NULL`,
-    [userId],
-  );
-  return new Set(result.rows.map((row) => row.name));
+  const [organizational, individual] = await Promise.all([
+    query<{ name: string }>(
+      `SELECT DISTINCT c.name
+         FROM user_team_positions utp
+         JOIN team_position_capabilities tpc ON tpc.team_position_id = utp.team_position_id
+         JOIN capabilities c ON c.id = tpc.capability_id
+        WHERE utp.user_id = $1
+          AND utp.ended_at IS NULL`,
+      [userId],
+    ),
+    resolveUserIndividualCapabilities(userId),
+  ]);
+  return new Set([...organizational.rows.map((row) => row.name), ...individual]);
 }
 
 /**
@@ -49,6 +63,11 @@ export async function resolveUserCapabilities(userId: string): Promise<Set<strin
  * The `ended_at IS NULL` filter matters just as much here: a transferred
  * employee must drop out of the CRO/HSE notification queue immediately,
  * not keep receiving permits addressed to a role they no longer hold.
+ *
+ * Individual grants are deliberately NOT unioned in here. This resolves
+ * WHO SHOULD BE NOTIFIED about a workflow step, which is an
+ * organizational duty; a personal "see every permit" permission is a
+ * visibility grant and must not subscribe anyone to a review queue.
  *
  * Takes an injectable `queryFn` (rather than always using the module's
  * own pooled `query`) so a caller that needs this resolved INSIDE an

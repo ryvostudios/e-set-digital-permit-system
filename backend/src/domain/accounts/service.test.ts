@@ -23,7 +23,7 @@ const FAKE_TEMPORARY_PASSWORD = 'FAKE-temporary-password-for-tests';
 const FAKE_NEW_PASSWORD = 'FAKE-chosen-password-for-tests';
 
 interface FakeAuthCall {
-  op: 'createUser' | 'setPassword' | 'deleteUser';
+  op: 'createUser' | 'setPassword' | 'setEmailAndPassword' | 'deleteUser';
   userId?: string;
 }
 
@@ -87,6 +87,17 @@ class FakeAccounts {
       if (existing) this.authUsers.set(userId, { ...existing, password });
       return { ok: true };
     },
+    setEmailAndPassword: async (userId, email, password) => {
+      this.timeline.push('auth:setEmailAndPassword');
+      this.authCalls.push({ op: 'setEmailAndPassword', userId });
+      if (this.failSetPassword) return { ok: false, reason: 'failed' };
+      if ([...this.authUsers.entries()].some(([id, user]) => id !== userId && user.email === email)) {
+        return { ok: false, reason: 'email_unavailable' };
+      }
+      const existing = this.authUsers.get(userId);
+      if (existing) this.authUsers.set(userId, { email, password });
+      return { ok: true };
+    },
     deleteUser: async (userId) => {
       this.authCalls.push({ op: 'deleteUser', userId });
       if (this.failDeleteUser) return { ok: false };
@@ -147,6 +158,9 @@ class FakeAccounts {
       return { rows: row ? [{
         credential_version: String(row.credential_version ?? 0),
         credential_reset_pending: row.credential_reset_pending ?? false,
+        // Self-service change reads this too: it is only reachable while
+        // a forced change is outstanding.
+        must_change_password: row.must_change_password,
       }] : [] };
     }
     if (sql.startsWith('UPDATE app_user_access') && sql.includes('credential_version = credential_version + 1')) {

@@ -5,6 +5,16 @@ import {
   teamPositionIsSiteManagerAssignable,
 } from '../authz/accountManagement.js';
 import { createSupabaseAccountAdmin } from '../domain/accounts/admin.js';
+import {
+  changeEmployeeEmail,
+  deleteEmployeeAccount,
+  loadEmployeeAuditHistory,
+  loadEmployeeDetail,
+  setEmployeeAccountState,
+  transferEmployee,
+  updateEmployeeDisplayName,
+} from '../domain/accounts/employees.js';
+import { setUserCapabilityGrant } from '../domain/accounts/userPermissions.js';
 import { resolveProvisioningCompany } from '../domain/accounts/companies.js';
 import {
   createSiteManagerAccount,
@@ -19,15 +29,20 @@ import {
   type AccountsServiceDeps,
 } from '../domain/accounts/service.js';
 import {
+  changeEmployeeEmailBodySchema,
   changePasswordBodySchema,
   createEmployeeBodySchema,
   createSiteManagerBodySchema,
+  employeeHistoryQuerySchema,
   employeeIdParamsSchema,
+  employeePermissionBodySchema,
   privilegedRoleChangeBodySchema,
   privilegedUserIdParamsSchema,
   resetEmployeePasswordBodySchema,
+  updateEmployeeBodySchema,
 } from '../domain/accounts/validation.js';
 import { resolvePrivilegedAccess } from '../authz/privilegedAccess.js';
+import { query } from '../db/pool.js';
 import { createPrivilegedAccessAdmin, type PrivilegedAccessAdmin } from '../db/privilegedPool.js';
 import { requireAuth, requireAuthDuringPasswordChange } from '../middleware/auth.js';
 import { accountLimiter, managerAccountLimiter } from '../middleware/rateLimit.js';
@@ -136,6 +151,17 @@ accountsRouter.post(
     }
 
     const result = await changeOwnPassword(userId, body.data.newPassword, deps);
+    if (result.outcome === 'refused') {
+      // There is deliberately no anytime "change my password" feature:
+      // this endpoint exists only to satisfy an outstanding forced
+      // change. Refused BEFORE Supabase Auth was touched.
+      res.status(409).json({
+        error: 'conflict',
+        reason: result.reason,
+        message: 'No password change is currently required for this account',
+      });
+      return;
+    }
     if (result.outcome !== 'ok') {
       // Both failure modes are safe and recoverable: either nothing
       // changed, or the password changed while the account still owes a
@@ -520,4 +546,351 @@ async function changeSiteManagerGrant(
   }
 
   res.status(200).json({ status: 'ok', siteManager: { userId: params.data.id, active: action === 'grant' } });
+}
+
+// ---------------------------------------------------------------------
+// Normal employee lifecycle (CEO or E-SET SITE_MANAGER)
+// ---------------------------------------------------------------------
+
+/**
+ * Maps a lifecycle outcome onto the HTTP shape the account API already
+ * uses. `not_found` and `target_is_privileged` deliberately produce the
+ * SAME 404: the employee API must not become a way to discover that a
+ * given id belongs to a CEO or Site Manager.
+ */
+function sendLifecycleFailure(
+  res: Response,
+  result: { outcome: string; reason?: string },
+): void {
+  if (result.outcome === 'not_found') {
+    res.status(404).json({ error: 'not_found', message: 'Employee account not found' });
+    return;
+  }
+  if (result.outcome === 'refused' && result.reason === 'target_is_privileged') {
+    res.status(404).json({ error: 'not_found', message: 'Employee account not found' });
+    return;
+  }
+  if (result.outcome === 'refused') {
+    res.status(409).json({ error: 'conflict', reason: result.reason, message: 'That change is not permitted' });
+    return;
+  }
+  if (result.outcome === 'invalid') {
+    res.status(400).json({ error: 'invalid_request', reason: result.reason, message: 'Invalid employee update' });
+    return;
+  }
+  res.status(503).json({
+    error: 'employee_update_failed',
+    reason: result.reason,
+    message: 'The change could not be applied. Please try again.',
+  });
+}
+
+/** One normal employee's management view. Privileged targets are indistinguishable from missing ones. */
+accountsRouter.get(
+  '/admin/employees/:id',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = employeeIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const detail = await loadEmployeeDetail(query, params.data.id);
+    if (!detail) {
+      res.status(404).json({ error: 'not_found', message: 'Employee account not found' });
+      return;
+    }
+    res.status(200).json({ employee: detail });
+  },
+);
+
+/**
+ * Display name and/or organizational transfer. Both are handled here
+ * because they are the two things an employee "profile edit" screen
+ * changes, and doing them in one request keeps the audit trail ordered.
+ * Each is applied by its own transaction-safe service call.
+ */
+accountsRouter.patch(
+  '/admin/employees/:id',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = employeeIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = updateEmployeeBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+    const deps = resolveDeps();
+    if (!deps) {
+      sendAccountAdminUnavailable(res);
+      return;
+    }
+
+    if (body.data.displayName !== undefined) {
+      const renamed = await updateEmployeeDisplayName(actorUserId, params.data.id, body.data.displayName, deps);
+      // `unchanged` is not an error when other fields still apply.
+      if (renamed.outcome !== 'ok' && !(renamed.outcome === 'invalid' && renamed.reason === 'unchanged')) {
+        sendLifecycleFailure(res, renamed);
+        return;
+      }
+    }
+
+    if (body.data.companyCode !== undefined && body.data.teamPositionId !== undefined) {
+      const company = await resolveProvisioningCompany(body.data.companyCode);
+      if (!company) {
+        res.status(400).json({
+          error: 'invalid_request',
+          reason: 'company_not_found',
+          message: 'The requested company is not available',
+        });
+        return;
+      }
+      const transferred = await transferEmployee(
+        actorUserId,
+        params.data.id,
+        { companyId: company.id, teamPositionId: body.data.teamPositionId },
+        deps,
+      );
+      if (transferred.outcome !== 'ok' && !(transferred.outcome === 'invalid' && transferred.reason === 'unchanged')) {
+        sendLifecycleFailure(res, transferred);
+        return;
+      }
+    }
+
+    res.status(200).json({ status: 'ok', employee: { userId: params.data.id } });
+  },
+);
+
+/**
+ * Manager-initiated login-email transition. The new temporary password
+ * is mandatory and is never echoed back; the employee must replace it
+ * before regaining normal access.
+ */
+accountsRouter.post(
+  '/admin/employees/:id/change-email',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = employeeIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = changeEmployeeEmailBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+    const deps = resolveDeps();
+    if (!deps) {
+      sendAccountAdminUnavailable(res);
+      return;
+    }
+
+    const result = await changeEmployeeEmail(actorUserId, params.data.id, body.data, deps);
+    if (result.outcome === 'conflict') {
+      res.status(409).json({ error: 'conflict', reason: result.reason, message: 'That email cannot be used' });
+      return;
+    }
+    if (result.outcome !== 'ok') {
+      sendLifecycleFailure(res, result);
+      return;
+    }
+    res.status(200).json({ status: 'ok', employee: { userId: params.data.id, mustChangePassword: true } });
+  },
+);
+
+/** Disable: access ends on the target's very next request. */
+accountsRouter.post(
+  '/admin/employees/:id/disable',
+  requireAuth,
+  managerAccountLimiter,
+  (req: Request, res: Response) => changeEmployeeState(req, res, 'DISABLED'),
+);
+
+/** Re-enable: the same Company, Team, Position and permissions are still there. */
+accountsRouter.post(
+  '/admin/employees/:id/enable',
+  requireAuth,
+  managerAccountLimiter,
+  (req: Request, res: Response) => changeEmployeeState(req, res, 'ACTIVE'),
+);
+
+async function changeEmployeeState(
+  req: Request,
+  res: Response,
+  nextState: 'ACTIVE' | 'DISABLED',
+): Promise<void> {
+  const actorUserId = await authorize(req, res);
+  if (!actorUserId) return;
+  const params = employeeIdParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    sendValidationError(res, params.error.issues);
+    return;
+  }
+  const deps = resolveDeps();
+  if (!deps) {
+    sendAccountAdminUnavailable(res);
+    return;
+  }
+  const result = await setEmployeeAccountState(actorUserId, params.data.id, nextState, deps);
+  if (result.outcome !== 'ok') {
+    sendLifecycleFailure(res, result);
+    return;
+  }
+  res.status(200).json({ status: 'ok', employee: { userId: params.data.id, state: nextState } });
+}
+
+/**
+ * CEO-ONLY permanent deletion. A Site Manager holds full authority over
+ * normal employees but not this: destroying a login is the one employee
+ * operation reserved to the higher tier, so the gate is `authorizeCeo`,
+ * not `authorize`.
+ */
+accountsRouter.delete(
+  '/admin/employees/:id',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorizeCeo(req, res);
+    if (!actorUserId) return;
+    const params = employeeIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const deps = resolveDeps();
+    if (!deps) {
+      sendAccountAdminUnavailable(res);
+      return;
+    }
+
+    const result = await deleteEmployeeAccount(actorUserId, params.data.id, deps);
+    if (result.outcome === 'failed' && result.reason === 'auth_delete_failed') {
+      // The account is already tombstoned and can reach nothing; only the
+      // Supabase identity remains, which an operator must remove.
+      console.error(
+        JSON.stringify({
+          event: 'employee_auth_identity_not_removed',
+          requestId: req.requestId,
+          userId: params.data.id,
+        }),
+      );
+      res.status(503).json({
+        error: 'deletion_incomplete',
+        reason: 'auth_delete_failed',
+        message: 'The account was disabled permanently but its login could not be removed. Retry.',
+      });
+      return;
+    }
+    if (result.outcome !== 'ok') {
+      sendLifecycleFailure(res, result);
+      return;
+    }
+    res.status(200).json({ status: 'ok', employee: { userId: params.data.id, state: 'DELETED' } });
+  },
+);
+
+/** One employee's administrative history. Managers only; never the employee themselves. */
+accountsRouter.get(
+  '/admin/employees/:id/history',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = employeeIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const pagination = employeeHistoryQuerySchema.safeParse(req.query);
+    if (!pagination.success) {
+      sendValidationError(res, pagination.error.issues);
+      return;
+    }
+    // A privileged target is hidden here too, so the history endpoint
+    // cannot be used to enumerate the privileged tier either.
+    const detail = await loadEmployeeDetail(query, params.data.id);
+    if (!detail) {
+      res.status(404).json({ error: 'not_found', message: 'Employee account not found' });
+      return;
+    }
+    const { page, pageSize } = pagination.data;
+    const history = await loadEmployeeAuditHistory(query, params.data.id, pageSize, (page - 1) * pageSize);
+    res.status(200).json({
+      items: history.items,
+      page,
+      pageSize,
+      totalCount: history.totalCount,
+      totalPages: history.totalCount === 0 ? 0 : Math.ceil(history.totalCount / pageSize),
+    });
+  },
+);
+
+/** Grant an individual permission (currently only `permit.view_all`). */
+accountsRouter.post(
+  '/admin/employees/:id/permissions',
+  requireAuth,
+  managerAccountLimiter,
+  (req: Request, res: Response) => changeEmployeePermission(req, res, 'GRANTED'),
+);
+
+/** Revoke it. Broad visibility ends on the target's very next request. */
+accountsRouter.delete(
+  '/admin/employees/:id/permissions',
+  requireAuth,
+  managerAccountLimiter,
+  (req: Request, res: Response) => changeEmployeePermission(req, res, 'REVOKED'),
+);
+
+async function changeEmployeePermission(
+  req: Request,
+  res: Response,
+  action: 'GRANTED' | 'REVOKED',
+): Promise<void> {
+  const actorUserId = await authorize(req, res);
+  if (!actorUserId) return;
+  const params = employeeIdParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    sendValidationError(res, params.error.issues);
+    return;
+  }
+  const body = employeePermissionBodySchema.safeParse(req.body);
+  if (!body.success) {
+    sendValidationError(res, body.error.issues);
+    return;
+  }
+  const deps = resolveDeps();
+  if (!deps) {
+    sendAccountAdminUnavailable(res);
+    return;
+  }
+  const result = await setUserCapabilityGrant(
+    actorUserId,
+    params.data.id,
+    body.data.capability,
+    action,
+    deps,
+  );
+  if (result.outcome !== 'ok') {
+    sendLifecycleFailure(res, result);
+    return;
+  }
+  res.status(200).json({
+    status: 'ok',
+    employee: { userId: params.data.id, capability: body.data.capability, active: action === 'GRANTED' },
+  });
 }

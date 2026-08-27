@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { COMPANY_CODES } from './companies.js';
+import { INDIVIDUALLY_GRANTABLE_CAPABILITIES } from './userPermissions.js';
 
 /**
  * Request contracts for account management.
@@ -81,6 +82,60 @@ export const createSiteManagerBodySchema = z
 
 /** Grant/revoke SITE_MANAGER. The target is the validated route parameter; the body carries nothing at all. */
 export const privilegedRoleChangeBodySchema = z.object({}).strict();
+
+/**
+ * Employee update. Every field is optional but the object may not be
+ * empty, and `.strict()` means anything not named here - a role, a
+ * capability list, an account state, an audit field - is rejected rather
+ * than ignored. Company and Team + Position must move together, because
+ * an assignment is only valid against the company that owns its team.
+ */
+export const updateEmployeeBodySchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(120).optional(),
+    companyCode: z.enum(COMPANY_CODES).optional(),
+    teamPositionId: z.string().uuid().optional(),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    if (body.displayName === undefined && body.companyCode === undefined && body.teamPositionId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'at least one field must be supplied' });
+    }
+    if ((body.companyCode === undefined) !== (body.teamPositionId === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'companyCode and teamPositionId must be changed together',
+        path: ['teamPositionId'],
+      });
+    }
+  });
+
+/**
+ * Manager-initiated login-email transition. A new temporary password is
+ * MANDATORY: changing the address without rotating the credential would
+ * leave the old password valid on the new login.
+ */
+export const changeEmployeeEmailBodySchema = z
+  .object({
+    newEmail: z.string().trim().email().max(254),
+    temporaryPassword: passwordSchema,
+  })
+  .strict();
+
+/** Individual permission grant/revoke. The capability is a closed set, never an arbitrary name or array. */
+export const employeePermissionBodySchema = z
+  .object({
+    capability: z.enum(INDIVIDUALLY_GRANTABLE_CAPABILITIES),
+  })
+  .strict();
+
+/** Bounded pagination for the administrative audit history. */
+export const employeeHistoryQuerySchema = z
+  .object({
+    page: z.coerce.number().int().min(1).max(10_000).default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).default(25),
+  })
+  .strict();
 
 /** The privileged account a CEO-only action targets. */
 export const privilegedUserIdParamsSchema = z.object({ id: z.string().uuid() }).strict();

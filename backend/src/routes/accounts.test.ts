@@ -155,6 +155,14 @@ function post(url: string, path: string, token: string | undefined, body: unknow
   return fetch(`${url}/api/v1${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
+function request(url: string, method: string, path: string, token: string | undefined, body?: unknown): Promise<Response> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const init: RequestInit = { method, headers };
+  if (body !== undefined) init.body = JSON.stringify(body);
+  return fetch(`${url}/api/v1${path}`, init);
+}
+
 function get(url: string, path: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = {};
   if (token) headers.authorization = `Bearer ${token}`;
@@ -575,6 +583,192 @@ test('the employee endpoints can never write a privileged grant or identity', as
   }
 });
 
+
+// ---------------------------------------------------------------------
+// Layer 2: normal employee lifecycle
+// ---------------------------------------------------------------------
+
+test('every employee lifecycle route requires CEO or SITE_MANAGER privileged access', async () => {
+  // An ordinary employee - including one holding the account-management
+  // capability NAMES, and including a ZPL "Site Manager" - is refused.
+  grantedCapabilities = ['permit.create', 'employee.create', 'employee.reset_password'];
+  privilegedGrants = {};
+  const { url, close } = await startServer();
+  try {
+    for (const [method, path, body] of [
+      ['GET', `/admin/employees/${EMPLOYEE_ID}`, undefined],
+      ['GET', `/admin/employees/${EMPLOYEE_ID}/history`, undefined],
+      ['PATCH', `/admin/employees/${EMPLOYEE_ID}`, { displayName: 'X' }],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/change-email`, { newEmail: 'a@b.co', temporaryPassword: FAKE_TEMPORARY_PASSWORD }],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/disable`, {}],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/enable`, {}],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/permissions`, { capability: 'permit.view_all' }],
+      ['DELETE', `/admin/employees/${EMPLOYEE_ID}`, undefined],
+      ['DELETE', `/admin/employees/${EMPLOYEE_ID}/permissions`, { capability: 'permit.view_all' }],
+    ] as const) {
+      authenticatedUserId = nextActorId();
+      grantedCapabilities = ['permit.create', 'employee.create'];
+      privilegedGrants = {};
+      const response = await request(url, method, path, VALID_TOKEN, body);
+      assert.equal(response.status, 403, `${method} ${path} must require privileged access`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('permanent deletion is CEO-only - a Site Manager is refused', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    const denied = await request(url, 'DELETE', `/admin/employees/${EMPLOYEE_ID}`, VALID_TOKEN);
+    assert.equal(denied.status, 403);
+    // Refused before any Auth Admin work was attempted.
+    assert.notEqual(denied.status, 503);
+
+    // A CEO passes the gate and reaches the service.
+    authenticatedUserId = nextActorId();
+    authorizeCeo();
+    const allowed = await request(url, 'DELETE', `/admin/employees/${EMPLOYEE_ID}`, VALID_TOKEN);
+    assert.notEqual(allowed.status, 403, 'the CEO tier is not blocked by the privileged gate');
+  } finally {
+    await close();
+  }
+});
+
+test('a Site Manager may perform every non-deletion lifecycle action', async () => {
+  const { url, close } = await startServer();
+  try {
+    for (const [method, path, body] of [
+      ['GET', `/admin/employees/${EMPLOYEE_ID}`, undefined],
+      ['PATCH', `/admin/employees/${EMPLOYEE_ID}`, { displayName: 'Ayesha K' }],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/disable`, {}],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/permissions`, { capability: 'permit.view_all' }],
+    ] as const) {
+      authenticatedUserId = nextActorId();
+      authorizeSiteManager();
+      const response = await request(url, method, path, VALID_TOKEN, body);
+      assert.notEqual(response.status, 403, `${method} ${path} must be allowed for a Site Manager`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('employee update refuses any privileged, capability, or state field', async () => {
+  const { url, close } = await startServer();
+  try {
+    for (const body of [
+      { role: 'CEO' },
+      { privilegedRole: 'SITE_MANAGER' },
+      { capabilities: ['permit.close'] },
+      { state: 'ACTIVE' },
+      { mustChangePassword: false },
+      { userId: CEO_ID },
+      { companyId: COMPANY_ID },
+      { email: 'someone@example.com' },
+      {},
+      // Company and assignment must move together - an assignment is
+      // only valid against the company owning its team.
+      { companyCode: 'ZPL' },
+      { teamPositionId: TEAM_POSITION_ID },
+    ]) {
+      authenticatedUserId = nextActorId();
+      authorizeSiteManager();
+      const response = await request(url, 'PATCH', `/admin/employees/${EMPLOYEE_ID}`, VALID_TOKEN, body);
+      assert.equal(response.status, 400, `expected ${JSON.stringify(body)} to be rejected`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('an email change always requires a new temporary password', async () => {
+  const { url, close } = await startServer();
+  try {
+    for (const body of [
+      { newEmail: 'new@example.com' },
+      { temporaryPassword: FAKE_TEMPORARY_PASSWORD },
+      { newEmail: 'not-an-email', temporaryPassword: FAKE_TEMPORARY_PASSWORD },
+      { newEmail: 'new@example.com', temporaryPassword: 'short' },
+      { newEmail: 'new@example.com', temporaryPassword: FAKE_TEMPORARY_PASSWORD, mustChangePassword: false },
+    ]) {
+      authenticatedUserId = nextActorId();
+      authorizeSiteManager();
+      const response = await request(url, 'POST', `/admin/employees/${EMPLOYEE_ID}/change-email`, VALID_TOKEN, body);
+      assert.equal(response.status, 400, `expected ${JSON.stringify(body)} to be rejected`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('only an individually grantable capability may be named, never an arbitrary one', async () => {
+  const { url, close } = await startServer();
+  try {
+    for (const body of [
+      { capability: 'permit.close' },
+      { capability: 'permit.cro_review' },
+      { capability: 'employee.create' },
+      { capability: 'made.up' },
+      { capabilities: ['permit.view_all'] },
+      {},
+    ]) {
+      authenticatedUserId = nextActorId();
+      authorizeSiteManager();
+      const response = await request(url, 'POST', `/admin/employees/${EMPLOYEE_ID}/permissions`, VALID_TOKEN, body);
+      assert.equal(response.status, 400, `expected ${JSON.stringify(body)} to be rejected`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('audit history pagination is bounded', async () => {
+  const { url, close } = await startServer();
+  try {
+    for (const qs of ['?pageSize=101', '?page=0', '?pageSize=0', '?page=99999999', '?unknown=1']) {
+      authenticatedUserId = nextActorId();
+      authorizeSiteManager();
+      const response = await get(url, `/admin/employees/${EMPLOYEE_ID}/history${qs}`, VALID_TOKEN);
+      assert.equal(response.status, 400, `expected ${qs} to be rejected`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('a privileged target is indistinguishable from a missing one through the employee API', async () => {
+  // The fake returns no workforce profile, which is exactly what a
+  // privileged account looks like - both must be a plain 404 so the
+  // endpoint cannot be used to enumerate the privileged tier.
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    const detail = await get(url, `/admin/employees/${CEO_ID}`, VALID_TOKEN);
+    assert.equal(detail.status, 404);
+    const body = (await detail.json()) as { message: string };
+    assert.doesNotMatch(body.message, /privileg|CEO|Site Manager/i);
+  } finally {
+    await close();
+  }
+});
+
+test('self-service password change is refused when no change is owed', async () => {
+  // There is deliberately no anytime "change my password" feature.
+  mustChangePassword = false;
+  const { url, close } = await startServer();
+  try {
+    const response = await post(url, '/auth/change-password', VALID_TOKEN, { newPassword: 'FAKE-chosen-password' });
+    // 503 would mean it reached the Auth Admin boundary; it must not.
+    assert.notEqual(response.status, 200);
+    assert.equal(capturedQueries.some(({ sql }) => sql.includes('UPDATE app_user_access')), false,
+      'a refused self-change never touches credential state');
+  } finally {
+    await close();
+  }
+});
+
 // ---------------------------------------------------------------------
 // Self-service password change
 // ---------------------------------------------------------------------
@@ -773,6 +967,15 @@ test('EVERY authenticated application route is behind the forced-password gate',
       ['POST', `/notifications/${EMPLOYEE_ID}/read`],
       ['POST', '/admin/employees'],
       ['POST', `/admin/employees/${EMPLOYEE_ID}/reset-password`],
+      ['GET', `/admin/employees/${EMPLOYEE_ID}`],
+      ['GET', `/admin/employees/${EMPLOYEE_ID}/history`],
+      ['PATCH', `/admin/employees/${EMPLOYEE_ID}`],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/change-email`],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/disable`],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/enable`],
+      ['POST', `/admin/employees/${EMPLOYEE_ID}/permissions`],
+      ['DELETE', `/admin/employees/${EMPLOYEE_ID}`],
+      ['DELETE', `/admin/employees/${EMPLOYEE_ID}/permissions`],
       ['POST', '/admin/site-managers'],
       ['POST', `/admin/site-managers/${EMPLOYEE_ID}/grant`],
       ['POST', `/admin/site-managers/${EMPLOYEE_ID}/revoke`],
@@ -780,7 +983,7 @@ test('EVERY authenticated application route is behind the forced-password gate',
     for (const [method, path] of guarded) {
       const response = method === 'GET'
         ? await get(url, path, VALID_TOKEN)
-        : await post(url, path, VALID_TOKEN, {});
+        : await request(url, method, path, VALID_TOKEN, {});
       assert.equal(response.status, 403, `${method} ${path} must be gated`);
       assert.equal(((await response.json()) as { reason: string }).reason, 'PASSWORD_CHANGE_REQUIRED');
     }

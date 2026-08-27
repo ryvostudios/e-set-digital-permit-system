@@ -17,6 +17,7 @@ import {
   type PermitType,
 } from './forms.js';
 import { recordPermitSignature, SigningIdentityUnavailableError } from './signatures.js';
+import { resolvePermitApplicantAuthority } from './applicantIdentity.js';
 import {
   onCroSentBackToApplicant,
   onForwardedToHse,
@@ -70,6 +71,10 @@ export interface PermitRow {
   site_timezone: string;
   company: Company | null;
   company_other: string | null;
+  applicant_identity_kind?: 'NORMAL' | 'PRIVILEGED' | null | undefined;
+  applicant_display_name?: string | null | undefined;
+  applicant_company_code?: 'E_SET' | 'ZPL' | 'SGRE' | null | undefined;
+  applicant_company_name?: string | null | undefined;
   submitted_at: string | null;
   // Set together, DB-side, by forwardToHseReview - the authoritative
   // start/deadline of HSE's 5-minute review window (SECURITY.md "Time
@@ -133,6 +138,10 @@ export const PERMIT_SUMMARY_COLUMNS = [
   'site_timezone',
   'company',
   'company_other',
+  'applicant_identity_kind',
+  'applicant_display_name',
+  'applicant_company_code',
+  'applicant_company_name',
   'submitted_at',
   'hse_review_started_at',
   'hse_review_deadline_at',
@@ -755,8 +764,6 @@ export type SubmitOutcome =
  * than the only thing standing between an incomplete permit and CRO.
  */
 function isSubmittable(permit: PermitRow): boolean {
-  if (!permit.company) return false;
-  if (permit.company === 'OTHER' && !permit.company_other) return false;
   if (!permit.permit_type || !permit.form_version || !permit.form_payload) return false;
   return true;
 }
@@ -798,12 +805,20 @@ export async function submitPermit(
       return { outcome: 'invalid', reason: 'missing_required_fields' };
     }
 
+    const applicant = await resolvePermitApplicantAuthority(client.query.bind(client), actorUserId);
+    if (!applicant.allowed || !applicant.identity) throw new SigningIdentityUnavailableError(actorUserId);
+    const legacyCompany = applicant.identity.companyCode === 'E_SET' ? 'ESET' : applicant.identity.companyCode;
+
     const updateResult = await client.query<PermitRow>(
       `UPDATE permits
-          SET status = 'PENDING_CRO', version = version + 1, submitted_at = now(), updated_at = now()
+          SET status = 'PENDING_CRO', version = version + 1, submitted_at = now(), updated_at = now(),
+              company = $2, company_other = NULL,
+              applicant_identity_kind = $3, applicant_display_name = $4,
+              applicant_company_code = $5, applicant_company_name = $6
         WHERE id = $1
         RETURNING *`,
-      [permitId],
+      [permitId, legacyCompany, applicant.identity.kind, applicant.identity.displayName,
+        applicant.identity.companyCode, applicant.identity.companyName],
     );
     const permit = requireRow(updateResult.rows);
 
@@ -872,6 +887,11 @@ export async function resubmitPermit(
     if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
     if (!isSubmittable(existing)) return { outcome: 'invalid', reason: 'missing_required_fields' };
     if (!(await hasCompletedJsa(client, existing.jsa_id))) {
+      return { outcome: 'invalid', reason: 'missing_required_fields' };
+    }
+
+    if (!existing.applicant_identity_kind || !existing.applicant_display_name ||
+        !existing.applicant_company_code || !existing.applicant_company_name) {
       return { outcome: 'invalid', reason: 'missing_required_fields' };
     }
 
@@ -1655,10 +1675,11 @@ export async function renewPermit(
       const insertResult = await client.query<PermitRow>(
         `INSERT INTO permits (
            jsa_id, created_by, previous_permit_id, site_timezone, company, company_other,
+           applicant_identity_kind, applicant_display_name, applicant_company_code, applicant_company_name,
            permit_type, form_version, form_payload, wind_farm, wtg_number, work_description, loto_number,
            status, issued_at, hse_review_started_at, hse_review_deadline_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, 'ISSUED', now(), NULL, NULL)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16, $17, 'ISSUED', now(), NULL, NULL)
          RETURNING *`,
         [
           existing.jsa_id,
@@ -1667,6 +1688,10 @@ export async function renewPermit(
           existing.site_timezone,
           existing.company,
           existing.company_other,
+          existing.applicant_identity_kind,
+          existing.applicant_display_name,
+          existing.applicant_company_code,
+          existing.applicant_company_name,
           // The renewed permit is the same work continuing: it carries
           // over the old permit's template and validated form content
           // verbatim (and reuses the same JSA row), exactly as it already

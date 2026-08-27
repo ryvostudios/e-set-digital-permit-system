@@ -61,6 +61,7 @@ class FakePrivilegedDb {
       return { ok: true, userId: NEW_MANAGER };
     },
     setPassword: async () => ({ ok: true }),
+    setEmailAndPassword: async () => ({ ok: true as const }),
     deleteUser: async (userId) => {
       this.authCalls.push(`delete:${userId}`);
       if (this.failCompensation) return { ok: false };

@@ -358,6 +358,10 @@ class FakeDb {
         siteTimezone,
         company,
         companyOther,
+        applicantIdentityKind,
+        applicantDisplayName,
+        applicantCompanyCode,
+        applicantCompanyName,
         permitType,
         formVersion,
         formPayloadJson,
@@ -371,6 +375,10 @@ class FakeDb {
         string,
         string,
         PermitRow['company'],
+        string | null,
+        PermitRow['applicant_identity_kind'],
+        string | null,
+        PermitRow['applicant_company_code'],
         string | null,
         PermitRow['permit_type'],
         PermitRow['form_version'],
@@ -406,6 +414,10 @@ class FakeDb {
         site_timezone: siteTimezone,
         company,
         company_other: companyOther,
+        applicant_identity_kind: applicantIdentityKind,
+        applicant_display_name: applicantDisplayName,
+        applicant_company_code: applicantCompanyCode,
+        applicant_company_name: applicantCompanyName,
         submitted_at: null,
         hse_review_started_at: null,
         hse_review_deadline_at: null,
@@ -674,6 +686,14 @@ class FakeDb {
       if (!existing) return { rows: [] };
       const updated: PermitRow = {
         ...existing,
+        ...(sql.includes('applicant_identity_kind') ? {
+          company: (params[1] as PermitRow['company']),
+          company_other: null,
+          applicant_identity_kind: params[2] as 'NORMAL' | 'PRIVILEGED',
+          applicant_display_name: params[3] as string,
+          applicant_company_code: params[4] as 'E_SET' | 'ZPL' | 'SGRE',
+          applicant_company_name: params[5] as string,
+        } : {}),
         status: 'PENDING_CRO',
         version: existing.version + 1,
         submitted_at: this.now.toISOString(),
@@ -848,6 +868,9 @@ class FakeDb {
     }
 
     // --- Workforce signing identity + digital signatures (migration 0016) ---
+    if (sql.includes('FROM privileged_access_events') && sql.includes('JOIN privileged_identities')) {
+      return { rows: [] };
+    }
     // Checked BEFORE recipient resolution below: both queries mention
     // `user_team_positions`, and this one is the more specific shape.
     if (sql.includes('FROM workforce_profiles')) {
@@ -1318,13 +1341,17 @@ test('updateDraftPermit rejects updating a permit that is no longer DRAFT', asyn
   assert.deepEqual(result, { outcome: 'conflict', reason: 'not_editable' });
 });
 
-test('submitPermit rejects the transition when the required company field is missing', async () => {
+test('submitPermit derives and freezes applicant company when the legacy draft company is missing', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
   const result = await submitPermit('owner', permit.id, { expectedVersion: permit.version }, db.deps());
 
-  assert.deepEqual(result, { outcome: 'invalid', reason: 'missing_required_fields' });
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome === 'ok') {
+    assert.equal(result.permit.applicant_company_code, 'E_SET');
+    assert.equal(result.permit.company, 'ESET');
+  }
 });
 
 test('submitPermit requires companyOther when company is OTHER before allowing submission', async () => {
@@ -2198,7 +2225,7 @@ test('resubmitPermit rejects a stale version', async () => {
   assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
 });
 
-test('resubmitPermit rejects when required fields are missing (defensive - unreachable via the normal API, since submission already required company, but re-checked here anyway)', async () => {
+test('resubmitPermit rejects when the frozen applicant identity is missing', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
   await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
@@ -2211,7 +2238,7 @@ test('resubmitPermit rejects when required fields are missing (defensive - unrea
     db.deps(),
   );
   if (sentBack.outcome !== 'ok') throw new Error('setup failed');
-  db.permits.set(permit.id, { ...sentBack.permit, company: null });
+  db.permits.set(permit.id, { ...sentBack.permit, applicant_identity_kind: null });
 
   const result = await resubmitPermit(
     'applicant-1',

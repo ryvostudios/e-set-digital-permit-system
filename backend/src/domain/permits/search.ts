@@ -41,6 +41,8 @@ export interface PermitSearchAccess {
   viewerId: string;
   /** Every status the caller's capabilities additionally grant non-owner visibility into - see `domain/permits/access.ts::computeViewableStatuses`. Never expanded "for search" beyond what that same function already grants for direct permit access. */
   allowedStatuses: readonly PermitStatus[];
+  /** Current DB-backed individual/privileged broad visibility. */
+  viewAll?: boolean | undefined;
 }
 
 export interface PermitSearchFilters {
@@ -66,7 +68,7 @@ export interface PermitSearchFilters {
  */
 function buildSearchWhere(access: PermitSearchAccess, filters: PermitSearchFilters): { clause: string; params: unknown[] } {
   const params: unknown[] = [access.viewerId, access.allowedStatuses];
-  let clause = '(p.created_by = $1 OR p.status = ANY($2))';
+  let clause = access.viewAll ? 'TRUE' : '(p.created_by = $1 OR p.status = ANY($2))';
 
   if (filters.permitNumber !== undefined) {
     params.push(String(filters.permitNumber));

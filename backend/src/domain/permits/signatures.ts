@@ -1,4 +1,5 @@
 import type { QueryFn } from '../../db/pool.js';
+import { resolvePermitApplicantAuthority } from './applicantIdentity.js';
 
 /**
  * Authoritative digital signatures.
@@ -37,9 +38,10 @@ export interface SigningIdentity {
   displayName: string;
   companyCode: string;
   companyName: string;
-  teamPositionId: string;
-  teamName: string;
-  positionName: string;
+  identityKind?: 'NORMAL' | 'PRIVILEGED';
+  teamPositionId: string | null;
+  teamName: string | null;
+  positionName: string | null;
 }
 
 export interface PermitSignatureRow {
@@ -49,9 +51,10 @@ export interface PermitSignatureRow {
   signature_role: SignatureRole;
   signer_user_id: string;
   signer_display_name: string;
-  signer_team_position_id: string;
-  signer_team_name: string;
-  signer_position_name: string;
+  signer_identity_kind?: 'NORMAL' | 'PRIVILEGED';
+  signer_team_position_id: string | null;
+  signer_team_name: string | null;
+  signer_position_name: string | null;
   signed_at: string;
   created_at: string;
 }
@@ -79,7 +82,11 @@ export class SigningIdentityUnavailableError extends Error {
  * unchanged and still comes solely from `authz/capabilities.ts`; holding
  * a primary Team + Position grants nothing.
  */
-export async function resolveSigningIdentity(queryFn: QueryFn, userId: string): Promise<SigningIdentity> {
+export async function resolveSigningIdentity(
+  queryFn: QueryFn,
+  userId: string,
+  role: SignatureRole = 'CRO',
+): Promise<SigningIdentity> {
   const result = await queryFn<{
     display_name: string;
     company_code: string;
@@ -112,6 +119,16 @@ export async function resolveSigningIdentity(queryFn: QueryFn, userId: string): 
     row.team_name.trim() === '' ||
     row.position_name.trim() === ''
   ) {
+    if (role === 'APPLICANT') {
+      const applicant = await resolvePermitApplicantAuthority(queryFn, userId);
+      if (applicant.allowed && applicant.identity?.kind === 'PRIVILEGED') {
+        return {
+          userId, displayName: applicant.identity.displayName,
+          companyCode: 'E_SET', companyName: 'E-SET', identityKind: 'PRIVILEGED',
+          teamPositionId: null, teamName: null, positionName: null,
+        };
+      }
+    }
     throw new SigningIdentityUnavailableError(userId);
   }
 
@@ -145,13 +162,13 @@ export async function recordPermitSignature(
   queryFn: QueryFn,
   input: RecordSignatureInput,
 ): Promise<PermitSignatureRow> {
-  const identity = await resolveSigningIdentity(queryFn, input.actorUserId);
+  const identity = await resolveSigningIdentity(queryFn, input.actorUserId, input.role);
   const result = await queryFn<PermitSignatureRow>(
     `INSERT INTO permit_signatures (
        permit_id, source_event_id, signature_role, signer_user_id,
-       signer_display_name, signer_team_position_id, signer_team_name, signer_position_name
+       signer_display_name, signer_team_position_id, signer_team_name, signer_position_name, signer_identity_kind
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
     [
       input.permitId,
@@ -162,6 +179,7 @@ export async function recordPermitSignature(
       identity.teamPositionId,
       identity.teamName,
       identity.positionName,
+      identity.identityKind ?? 'NORMAL',
     ],
   );
   const row = result.rows[0];
@@ -196,9 +214,9 @@ export interface SnapshotSignature {
   userId: string;
   displayName: string;
   designation: string;
-  teamName: string;
-  positionName: string;
-  teamPositionId: string;
+  teamName: string | null;
+  positionName: string | null;
+  teamPositionId: string | null;
   signedAt: string;
   sourceEventId: string;
 }
@@ -234,7 +252,9 @@ function toSnapshotSignature(row: PermitSignatureRow): SnapshotSignature {
     displayName: row.signer_display_name,
     // The printed designation - the signer's authoritative Team +
     // Position at the moment they signed, frozen as text.
-    designation: `${row.signer_position_name}, ${row.signer_team_name}`,
+    designation: row.signer_identity_kind === 'PRIVILEGED'
+      ? ''
+      : `${row.signer_position_name}, ${row.signer_team_name}`,
     teamName: row.signer_team_name,
     positionName: row.signer_position_name,
     teamPositionId: row.signer_team_position_id,

@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { resolveUserCapabilities } from '../authz/capabilities.js';
+import { resolvePrivilegedAccess } from '../authz/privilegedAccess.js';
 import { env } from '../config/env.js';
 import {
   canViewPermit,
@@ -65,8 +66,18 @@ import { query } from '../db/pool.js';
 import { requireAuth } from '../middleware/auth.js';
 import { mutationLimiter } from '../middleware/rateLimit.js';
 import { requireCapability } from '../middleware/requireCapability.js';
+import { requirePermitApplicant } from '../middleware/requirePermitApplicant.js';
 
 export const permitsRouter = Router();
+
+async function resolvePermitReadCapabilities(userId: string): Promise<Set<string>> {
+  const [capabilities, roles] = await Promise.all([
+    resolveUserCapabilities(userId),
+    resolvePrivilegedAccess(userId),
+  ]);
+  if (roles.has('CEO') || roles.has('SITE_MANAGER')) capabilities.add('permit.view_all');
+  return capabilities;
+}
 
 // The display number format is not yet confirmed (see
 // domain/permits/numbering.ts); serializing it here, at the response
@@ -131,7 +142,7 @@ function getAuthenticatedUserId(req: Request, res: Response): string | null {
 // permits (created_by) at the service layer - capability alone is never
 // enough for object access (SECURITY.md IDOR/BOLA guidance).
 
-permitsRouter.post('/permits', requireAuth, mutationLimiter, requireCapability('permit.create'), async (req: Request, res: Response) => {
+permitsRouter.post('/permits', requireAuth, mutationLimiter, requirePermitApplicant('permit.create'), async (req: Request, res: Response) => {
   const userId = getAuthenticatedUserId(req, res);
   if (!userId) return;
 
@@ -176,7 +187,12 @@ permitsRouter.get('/permits/mine', requireAuth, async (req: Request, res: Respon
     return;
   }
 
-  const page = await listOwnPermits(userId, query.data);
+  const capabilities = await resolvePermitReadCapabilities(userId);
+  const page = capabilities.has('permit.view_all')
+    ? await searchPermits(
+        { viewerId: userId, allowedStatuses: [], viewAll: true }, {}, query.data,
+      )
+    : await listOwnPermits(userId, query.data);
   res.status(200).json({ permits: page.items.map(serializePermitSummary), pagination: serializePagination(page) });
 });
 
@@ -243,9 +259,13 @@ permitsRouter.get('/permits/search', requireAuth, async (req: Request, res: Resp
     return;
   }
 
-  const capabilities = await resolveUserCapabilities(userId);
+  const capabilities = await resolvePermitReadCapabilities(userId);
   const page = await searchPermits(
-    { viewerId: userId, allowedStatuses: computeViewableStatuses(capabilities) },
+    {
+      viewerId: userId,
+      allowedStatuses: computeViewableStatuses(capabilities),
+      viewAll: capabilities.has('permit.view_all'),
+    },
     {
       permitNumber: parsed.data.permitNumber,
       jsaNumber: parsed.data.jsaNumber,
@@ -294,7 +314,7 @@ permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Respons
     return;
   }
 
-  const capabilities = await resolveUserCapabilities(userId);
+  const capabilities = await resolvePermitReadCapabilities(userId);
   if (!canViewPermit(permit, userId, capabilities)) {
     sendNotFound(res);
     return;
@@ -374,7 +394,7 @@ permitsRouter.get('/permits/:id/history', requireAuth, async (req: Request, res:
     return;
   }
 
-  const capabilities = await resolveUserCapabilities(userId);
+  const capabilities = await resolvePermitReadCapabilities(userId);
   if (!canViewPermit(permit, userId, capabilities)) {
     sendNotFound(res);
     return;
@@ -429,7 +449,7 @@ permitsRouter.get('/permits/:id/pdf', requireAuth, async (req: Request, res: Res
     return;
   }
 
-  const capabilities = await resolveUserCapabilities(userId);
+  const capabilities = await resolvePermitReadCapabilities(userId);
   if (!canViewPermit(permit, userId, capabilities)) {
     sendNotFound(res);
     return;
@@ -500,7 +520,7 @@ permitsRouter.patch(
   '/permits/:id',
   requireAuth,
   mutationLimiter,
-  requireCapability('permit.create'),
+  requirePermitApplicant('permit.create'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
     if (!userId) return;
@@ -518,8 +538,6 @@ permitsRouter.patch(
 
     const result = await updateDraftPermit(userId, params.data.id, {
       expectedVersion: body.data.version,
-      company: body.data.company,
-      companyOther: body.data.companyOther,
       ...('form' in body.data ? { form: body.data.form } : {}),
     });
 
@@ -555,7 +573,7 @@ permitsRouter.patch(
   '/permits/:id/jsa',
   requireAuth,
   mutationLimiter,
-  requireCapability('permit.create'),
+  requirePermitApplicant('permit.create'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
     if (!userId) return;
@@ -601,7 +619,7 @@ permitsRouter.post(
   '/permits/:id/submit',
   requireAuth,
   mutationLimiter,
-  requireCapability('permit.submit'),
+  requirePermitApplicant('permit.submit'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
     if (!userId) return;
@@ -649,7 +667,7 @@ permitsRouter.post(
   '/permits/:id/resubmit',
   requireAuth,
   mutationLimiter,
-  requireCapability('permit.submit'),
+  requirePermitApplicant('permit.submit'),
   async (req: Request, res: Response) => {
     const userId = getAuthenticatedUserId(req, res);
     if (!userId) return;

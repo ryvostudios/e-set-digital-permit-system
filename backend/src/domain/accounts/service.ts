@@ -26,6 +26,16 @@ export interface AccountAdmin {
   >;
   /** Sets a new password on an existing Auth identity. */
   setPassword(userId: string, password: string): Promise<{ ok: boolean }>;
+  /**
+   * Replaces an existing identity's LOGIN EMAIL and password in one Auth
+   * call. Both together, deliberately: an email change without a new
+   * credential would leave the old password valid on a new login, and two
+   * separate calls would create a window where exactly that is true.
+   * Reports `email_unavailable` when the address belongs to someone else.
+   */
+  setEmailAndPassword(userId: string, email: string, password: string): Promise<
+    { ok: true } | { ok: false; reason: 'email_unavailable' | 'failed' }
+  >;
   /** Best-effort compensation for a half-provisioned identity. */
   deleteUser(userId: string): Promise<{ ok: boolean }>;
 }
@@ -69,7 +79,30 @@ async function boundCredentialResetTransaction(client: PoolClient, authAdminTime
 export type AccountAuditEventType =
   | 'EMPLOYEE_ACCOUNT_CREATED'
   | 'EMPLOYEE_PASSWORD_RESET_BY_MANAGER'
-  | 'EMPLOYEE_PASSWORD_CHANGED';
+  | 'EMPLOYEE_PASSWORD_CHANGED'
+  | 'EMPLOYEE_DISPLAY_NAME_CHANGED'
+  | 'EMPLOYEE_EMAIL_CHANGED'
+  | 'EMPLOYEE_COMPANY_CHANGED'
+  | 'EMPLOYEE_TEAM_POSITION_CHANGED'
+  | 'EMPLOYEE_PERMISSION_GRANTED'
+  | 'EMPLOYEE_PERMISSION_REVOKED'
+  | 'EMPLOYEE_DISABLED'
+  | 'EMPLOYEE_REENABLED'
+  | 'EMPLOYEE_ACCOUNT_DELETED';
+
+/**
+ * The structured, non-free-text detail migration 0023 added. Every field
+ * is a foreign key to reference data, so an administrative history can
+ * say WHICH company or capability changed without any column that could
+ * ever hold a password, a token, or an email address.
+ */
+export interface AccountAuditDetail {
+  previousCompanyId?: string | null;
+  newCompanyId?: string | null;
+  previousTeamPositionId?: string | null;
+  newTeamPositionId?: string | null;
+  capabilityId?: string | null;
+}
 
 /**
  * Appends one account audit row. The table has no free-text column
@@ -77,14 +110,33 @@ export type AccountAuditEventType =
  * by mistake - the recorded facts are the event type, the actor, the
  * target, and the database's own timestamp.
  */
-async function recordAccountAudit(
+export async function recordAccountAudit(
   queryFn: QueryFn,
-  input: { eventType: AccountAuditEventType; actorUserId: string; targetUserId: string },
+  input: {
+    eventType: AccountAuditEventType;
+    actorUserId: string;
+    targetUserId: string;
+    detail?: AccountAuditDetail;
+  },
 ): Promise<void> {
+  const detail = input.detail ?? {};
   await queryFn(
-    `INSERT INTO account_audit_events (event_type, actor_user_id, target_user_id)
-     VALUES ($1, $2, $3)`,
-    [input.eventType, input.actorUserId, input.targetUserId],
+    `INSERT INTO account_audit_events (
+       event_type, actor_user_id, target_user_id,
+       previous_company_id, new_company_id,
+       previous_team_position_id, new_team_position_id, capability_id
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      input.eventType,
+      input.actorUserId,
+      input.targetUserId,
+      detail.previousCompanyId ?? null,
+      detail.newCompanyId ?? null,
+      detail.previousTeamPositionId ?? null,
+      detail.newTeamPositionId ?? null,
+      detail.capabilityId ?? null,
+    ],
   );
 }
 
@@ -308,6 +360,7 @@ export async function resetEmployeePassword(
 
 export type ChangeOwnPasswordOutcome =
   | { outcome: 'ok' }
+  | { outcome: 'refused'; reason: 'no_password_change_required' }
   | { outcome: 'failed'; reason: 'auth_update_failed' }
   | { outcome: 'failed'; reason: 'state_update_failed' }
   | { outcome: 'failed'; reason: 'manager_reset_in_progress' }
@@ -318,6 +371,11 @@ export type ChangeOwnPasswordOutcome =
  * always the caller's own verified identity - this function takes no
  * target parameter at all, so there is nothing for a request body to
  * influence.
+ *
+ * ONLY REACHABLE WHILE A CHANGE IS OWED (`must_change_password`). That
+ * is checked first, before any Auth call, so a caller with nothing to
+ * change cannot rotate their own credential as a side effect of a
+ * refused request.
  *
  * ORDER AND FAILURE DESIGN: Auth first, then application state. If the
  * state update fails after Auth succeeded, the user simply still owes a
@@ -334,14 +392,25 @@ export async function changeOwnPassword(
 ): Promise<ChangeOwnPasswordOutcome> {
   let credentialVersion: string;
   try {
-    const captured = await deps.query<{ credential_version: string; credential_reset_pending: boolean }>(
-      `SELECT credential_version::text AS credential_version, credential_reset_pending
+    const captured = await deps.query<{
+      credential_version: string;
+      credential_reset_pending: boolean;
+      must_change_password: boolean;
+    }>(
+      `SELECT credential_version::text AS credential_version, credential_reset_pending, must_change_password
          FROM app_user_access
         WHERE user_id = $1`,
       [userId],
     );
     const row = captured.rows[0];
     if (!row) return { outcome: 'failed', reason: 'state_update_failed' };
+    // MVP RULE: self-service password change exists ONLY to satisfy an
+    // outstanding forced change - a first login on a temporary password,
+    // a manager reset, or an email transition. There is deliberately no
+    // "change my password whenever I like" feature, so this is refused
+    // BEFORE Supabase Auth is touched: a rejected request must never
+    // move the real credential.
+    if (!row.must_change_password) return { outcome: 'refused', reason: 'no_password_change_required' };
     if (row.credential_reset_pending) return { outcome: 'failed', reason: 'manager_reset_in_progress' };
     credentialVersion = row.credential_version;
   } catch {

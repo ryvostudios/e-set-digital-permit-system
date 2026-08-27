@@ -98,6 +98,7 @@ export function canViewPermit(
   viewerCapabilities: ReadonlySet<string>,
 ): boolean {
   if (permit.created_by === viewerId) return true;
+  if (viewerCapabilities.has('permit.view_all')) return true;
   return STATUS_VIEW_CAPABILITIES[permit.status].some((capability) => viewerCapabilities.has(capability));
 }
 

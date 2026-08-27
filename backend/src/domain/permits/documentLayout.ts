@@ -475,6 +475,11 @@ function jsaPage2(snapshot: IssuedPermitSnapshot): DocumentPage {
 
 /** The complete issued document: Permit page(s), then JSA page 1, then JSA page 2 - always in that order. */
 export function buildIssuedDocumentPages(snapshot: IssuedPermitSnapshot): DocumentPage[] {
+  const applicantLine = snapshot.applicantIdentity
+    ? snapshot.applicantIdentity.kind === 'NORMAL'
+      ? `Mr. ${snapshot.applicantIdentity.displayName} of Company ${snapshot.applicantIdentity.companyName}`
+      : snapshot.applicantIdentity.displayName
+    : null;
   const permitPage: DocumentPage = {
     title: PERMIT_TYPE_TITLES[snapshot.permitType],
     sections: [
@@ -489,10 +494,12 @@ export function buildIssuedDocumentPages(snapshot: IssuedPermitSnapshot): Docume
               { label: 'Permit Type', value: snapshot.permitType },
               { label: 'Form Version', value: snapshot.permitFormVersion },
               { label: 'Status at Issuance', value: snapshot.status },
-              {
-                label: 'Company',
-                value: `${textOrDash(snapshot.company)}${snapshot.companyOther ? ` (${snapshot.companyOther})` : ''}`,
-              },
+              ...(applicantLine
+                ? [{ label: 'Applicant', value: applicantLine }]
+                : [{
+                    label: 'Company',
+                    value: `${textOrDash(snapshot.company)}${snapshot.companyOther ? ` (${snapshot.companyOther})` : ''}`,
+                  }]),
               { label: 'Submitted At', value: textOrDash(snapshot.submittedAt) },
               { label: 'Issued At', value: snapshot.issuedAt },
               { label: 'Issuance Decision', value: snapshot.issuanceEventType },

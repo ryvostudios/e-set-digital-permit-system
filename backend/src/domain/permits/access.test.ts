@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { canViewPermit, computeAvailableActions, computePermitValidity, computeViewableStatuses } from './access.js';
-import type { PermitRow } from './service.js';
+import { canViewPermit, computeAvailableActions, computePermitValidity, computeViewableStatuses, STATUS_VIEW_CAPABILITIES } from './access.js';
+import type { PermitRow, PermitStatus } from './service.js';
 
 function basePermit(
   overrides: Partial<PermitRow> = {},
@@ -62,6 +62,14 @@ test('canViewPermit denies a non-creator holding an unrelated capability (no cro
     false,
     'hse_review should not grant view access to an ISSUED permit',
   );
+});
+
+test('permit.view_all grants every status, including another applicant\'s draft, while ownership survives revoke', () => {
+  for (const status of Object.keys(STATUS_VIEW_CAPABILITIES) as PermitStatus[]) {
+    assert.equal(canViewPermit({ status, created_by: 'owner' }, 'viewer', new Set(['permit.view_all'])), true);
+  }
+  assert.equal(canViewPermit({ status: 'CLOSED', created_by: 'owner' }, 'viewer', new Set()), false);
+  assert.equal(canViewPermit({ status: 'CLOSED', created_by: 'viewer' }, 'viewer', new Set()), true);
 });
 
 test('canViewPermit: permit.cro_review alone grants PENDING_CRO visibility (independent of permit.forward_hse)', () => {

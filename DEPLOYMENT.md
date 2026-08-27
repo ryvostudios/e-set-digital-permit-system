@@ -252,12 +252,12 @@ they depend on the actual deployment topology:
   and sequence in `public`, so any future table holding authorization
   state must revoke them in its own migration.
 
-  STILL OPEN - broader sweep. `service_role` retains DML on the remaining
-  application tables, including `team_position_capabilities` and
-  `user_team_positions`, so the service key can still grant itself
-  OPERATIONAL capabilities (for example CRO). That is not CEO/SITE_MANAGER
-  authority and was deliberately left out of 0022; a full application-table
-  hardening sweep is scheduled after Layers 2 and 3, before go-live.
+  **Completed / live-verified by 0025 and 0027.** `service_role` now has
+  zero effective INSERT/UPDATE/DELETE/TRUNCATE/TRIGGER/REFERENCES on every
+  public application table, zero write privilege on every public sequence,
+  and zero EXECUTE on every non-extension public application function.
+  SELECT remains for read-only support tooling. Auth Admin continues to use
+  the service credential over Supabase HTTP; it performs no application SQL.
 
   **Pre-existing gap this exposes:** `npm run bootstrap:ceo` connects with
   `DATABASE_URL` (`app_runtime`) and writes a CEO grant directly, so it
@@ -277,9 +277,39 @@ they depend on the actual deployment topology:
   access. Browser `anon` and `authenticated` remain default-deny with no
   table grants and no policies.
 
-  `UPDATE` on `user_team_positions` (to stamp `ended_at` on a transfer) is
-  NOT required yet and is deliberately not granted here - the employee
-  transfer endpoint is a later layer. Grant it when that lands.
+  Migrations 0023-0027 are **APPLIED / LIVE-VERIFIED**. Their exact new
+  `app_runtime` privilege delta was applied by the migration owner:
+
+  ```sql
+  GRANT SELECT, INSERT
+  ON TABLE public.user_capability_grants
+  TO app_runtime;
+
+  GRANT USAGE
+  ON SEQUENCE public.user_capability_grants_ordinal_seq
+  TO app_runtime;
+
+  GRANT UPDATE (display_name, company_id, primary_team_position_id)
+  ON TABLE public.workforce_profiles
+  TO app_runtime;
+
+  GRANT UPDATE (ended_at)
+  ON TABLE public.user_team_positions
+  TO app_runtime;
+  ```
+
+  These are column-level UPDATE grants. Do not replace either with
+  table-level UPDATE, and do not grant UPDATE on `user_id`,
+  `team_position_id`, `started_at`, timestamps, or other columns. No new
+  DELETE, TRUNCATE, REFERENCES, TRIGGER, CREATE, ownership, or DDL access
+  is required. The individual-capability table's database trigger permits
+  only capabilities explicitly marked `individually_grantable` (currently
+  only `permit.view_all`), so INSERT cannot manufacture workflow authority.
+
+  Live catalog checks and rolled-back attempts confirmed both table-level
+  UPDATE privileges remain false; identity/assignment key updates,
+  privileged grants/functions/sequences, schema creation, bootstrap state,
+  and the migration ledger are all denied to `app_runtime`.
 
   `BOOTSTRAP_CEO_NAME` is now REQUIRED by `npm run bootstrap:ceo`: a CEO
   is a privileged system account whose only identity field is their

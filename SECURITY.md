@@ -74,13 +74,16 @@ pass.
 
 ## Privileged Management Access
 
-The privileged grant log is written through a SEPARATE database login.
+The privileged grant log is designed to be written through a SEPARATE
+database login. The `privileged_runtime` credential is not yet configured;
+until an operator creates it and supplies `PRIVILEGED_DATABASE_URL`, those
+CEO-only endpoints fail closed with a sanitized unavailable response.
 The ordinary runtime credential (`app_runtime`) holds no INSERT on
 `privileged_access_events`, no privilege on its sequence, and no EXECUTE
 on `public.record_site_manager_grant` - verified live by attempting both
-as that role and being denied. Grants and revokes travel over a dedicated
-`privileged_runtime` login whose entire privilege set is CONNECT, schema
-USAGE, and EXECUTE on that one hardened SECURITY DEFINER function. Two
+as that role and being denied. Once configured, grants and revokes travel
+over a dedicated `privileged_runtime` login whose entire privilege set is
+CONNECT, schema USAGE, and EXECUTE on that one hardened SECURITY DEFINER function. Two
 independent gates apply: the HTTP layer re-resolves the caller as an
 active CEO, and the function independently re-derives the supplied
 actor's CEO status. The role it writes is a hardcoded literal, so no
@@ -92,17 +95,16 @@ application code:
 - `app_runtime` (every ordinary request) - cannot create or revoke
   privileged authority. No INSERT on `privileged_access_events`, no
   sequence privilege, no EXECUTE on the grant function.
-- `privileged_runtime` (CEO Site Manager administration only) - CONNECT,
+- `privileged_runtime` (CEO Site Manager administration only; operator
+  configuration still required) - CONNECT,
   schema USAGE, and EXECUTE on the one hardened SITE_MANAGER grant
   function. No table privilege of any kind, and it cannot create a CEO
   because the role written by that function is a hardcoded literal.
 - `service_role` (Supabase Auth Admin only) - used exclusively over HTTP
-  to create users, set passwords and delete users. Migrations 0021 and
-  0022 explicitly deny it EXECUTE on the grant function and all
-  INSERT/UPDATE/DELETE/TRUNCATE on `privileged_access_events`,
-  `privileged_identities` and `initial_ceo_bootstrap`, plus every
-  privilege on the grant log's sequence. SELECT is retained so support
-  tooling can still read governance history.
+  to create users, set passwords and delete users. Migrations 0021, 0022,
+  0025 and 0027 deny every public application-table mutation, every public
+  application-sequence write, and EXECUTE on every non-extension public
+  application function. SELECT is retained for read-only support tooling.
 - operator / owner (`postgres`) - migrations and the one-time CEO
   bootstrap. This is the only channel that can create a CEO.
 
@@ -112,13 +114,10 @@ the moment it is created. Any future migration that adds one must revoke
 those privileges in the same migration; creating the table is not enough.
 
 `SUPABASE_SERVICE_ROLE_KEY` remains a highly sensitive break-glass
-credential - it can still administer Auth (create users, set passwords)
-and read application data. What it can no longer do is manufacture CEO or
-SITE_MANAGER authority. It also still holds DML on the remaining
-application tables, including `team_position_capabilities` and
-`user_team_positions`, so it can still grant OPERATIONAL capabilities;
-narrowing that is a final pre-go-live sweep scheduled after Layers 2
-and 3. Independently of privileges, migration 0004's
+credential: it can administer Auth (create users, set passwords) and read
+application data, but it can no longer mutate application tables/sequences
+or execute application functions through SQL. Independently of privileges,
+migration 0004's
 `forbid_mutation` triggers make the grant log append-only for EVERY role
 including the table owner, so recorded governance history cannot be
 rewritten or erased by any credential at all.

@@ -36,6 +36,13 @@ export interface IssuedPermitSnapshot {
   status: 'ISSUED';
   company: string | null;
   companyOther: string | null;
+  /** Added compatibly within V2; absent on historical V2 snapshots. */
+  applicantIdentity?: {
+    kind: 'NORMAL' | 'PRIVILEGED';
+    displayName: string;
+    companyCode: 'E_SET' | 'ZPL' | 'SGRE';
+    companyName: string;
+  } | undefined;
   createdBy: string;
   submittedAt: string | null;
   issuedAt: string;
@@ -125,6 +132,15 @@ export function buildIssuedPermitSnapshot(
     status: 'ISSUED',
     company: permit.company,
     companyOther: permit.company_other,
+    ...(permit.applicant_identity_kind && permit.applicant_display_name &&
+        permit.applicant_company_code && permit.applicant_company_name
+      ? { applicantIdentity: {
+          kind: permit.applicant_identity_kind,
+          displayName: permit.applicant_display_name,
+          companyCode: permit.applicant_company_code,
+          companyName: permit.applicant_company_name,
+        } }
+      : {}),
     createdBy: permit.created_by,
     submittedAt: permit.submitted_at ? toIsoTimestamp(permit.submitted_at) : null,
     issuedAt: toIsoTimestamp(permit.issued_at),

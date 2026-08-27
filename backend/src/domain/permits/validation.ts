@@ -107,19 +107,9 @@ export const createPermitBodySchema = z.object({ permitType: permitTypeSchema })
 export const updatePermitBodySchema = z
   .object({
     version: z.number().int().positive(),
-    company: companySchema.optional(),
-    companyOther: z.string().trim().min(1).max(200).optional(),
     form: z.unknown().optional(),
   })
-  .strict()
-  .superRefine((body, ctx) => {
-    if (body.company === 'OTHER' && !body.companyOther) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'companyOther is required when company is OTHER', path: ['companyOther'] });
-    }
-    if (body.company !== undefined && body.company !== 'OTHER' && body.companyOther !== undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'companyOther is only allowed when company is OTHER', path: ['companyOther'] });
-    }
-  });
+  .strict();
 
 /**
  * Editing the JSA linked to a DRAFT/PENDING_CORRECTION permit. `version`

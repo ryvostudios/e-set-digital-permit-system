@@ -253,3 +253,12 @@ test('the document model is a pure function of the snapshot - two builds are dee
   const snapshot = makeSnapshot();
   assert.deepEqual(buildIssuedDocumentPages(snapshot), buildIssuedDocumentPages(snapshot));
 });
+
+test('applicant paper wording uses frozen normal identity and privileged identity is name-only', () => {
+  const normal = { ...makeSnapshot(), applicantIdentity: { kind: 'NORMAL' as const, displayName: 'Ali Khan', companyCode: 'ZPL' as const, companyName: 'ZPL' } };
+  const privileged = { ...makeSnapshot(), applicantIdentity: { kind: 'PRIVILEGED' as const, displayName: 'Sana Iqbal', companyCode: 'E_SET' as const, companyName: 'E-SET' } };
+  assert.match(JSON.stringify(buildIssuedDocumentPages(normal)), /Mr\. Ali Khan of Company ZPL/);
+  const rendered = JSON.stringify(buildIssuedDocumentPages(privileged));
+  assert.match(rendered, /Sana Iqbal/);
+  assert.doesNotMatch(rendered, /Mr\.|of Company|CEO|Site Manager/);
+});

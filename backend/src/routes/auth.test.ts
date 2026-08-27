@@ -250,3 +250,48 @@ test('a ZPL employee whose POSITION is called "Site Manager" holds no privileged
     await close();
   }
 });
+
+test('an individually granted permission appears in the effective capabilities', async () => {
+  // `permit.view_all` is granted to a PERSON, never to a Team +
+  // Position, so `/auth/me` is where the frontend learns the caller
+  // holds it. It is unioned in by `resolveUserCapabilities`, so the
+  // contract needs no separate field.
+  grantedCapabilities = ['permit.create', 'permit.submit', 'permit.view_all'];
+  mockProfileRows = [{
+    display_name: 'Ayesha Khan',
+    company_code: 'ZPL',
+    company_name: 'ZPL',
+    team_name: 'ZPL',
+    position_name: 'Engineer',
+  }];
+  const { url, close } = await startServer();
+  try {
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const body = (await res.json()) as { capabilities: string[]; profile: { company: { code: string } } };
+    assert.ok(body.capabilities.includes('permit.view_all'));
+    // A cross-company employee is fine: the permission is deliberately
+    // company-agnostic.
+    assert.equal(body.profile.company.code, 'ZPL');
+  } finally {
+    await close();
+  }
+});
+
+test('/auth/me never exposes credential internals or raw audit rows', async () => {
+  grantedCapabilities = ['permit.view_all'];
+  mockPrivilegedRoles = [];
+  const { url, close } = await startServer();
+  try {
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const body = (await res.json()) as Record<string, unknown>;
+    const serialized = JSON.stringify({ ...body, mustChangePassword: undefined }).toLowerCase();
+    for (const forbidden of [
+      'credential_version', 'credentialversion', 'credential_reset_pending',
+      'resetpending', 'deleted_at', 'audit', 'ordinal', 'actor_user_id', 'password', 'token',
+    ]) {
+      assert.ok(!serialized.includes(forbidden), `/auth/me must not expose ${forbidden}`);
+    }
+  } finally {
+    await close();
+  }
+});

@@ -12,13 +12,11 @@ import {
   updatePermitBodySchema,
 } from './validation.js';
 
-test('company/companyOther accepts exactly the agreed exclusive combinations', () => {
-  assert.equal(updatePermitBodySchema.safeParse({ version: 1, company: 'OTHER', companyOther: 'Vendor' }).success, true);
-  assert.equal(updatePermitBodySchema.safeParse({ version: 1, company: 'OTHER' }).success, false);
-  for (const company of ['ESET', 'SGRE', 'ZPL'] as const) {
-    assert.equal(updatePermitBodySchema.safeParse({ version: 1, company }).success, true);
-    assert.equal(updatePermitBodySchema.safeParse({ version: 1, company, companyOther: 'forbidden' }).success, false);
-  }
+test('applicant company identity is never accepted from a permit-edit client', () => {
+  for (const body of [
+    { version: 1, company: 'ESET' }, { version: 1, company: 'OTHER', companyOther: 'Vendor' },
+    { version: 1, companyCode: 'ZPL' }, { version: 1, companyId: '00000000-0000-4000-8000-000000000001' },
+  ]) assert.equal(updatePermitBodySchema.safeParse(body).success, false);
 });
 
 test('closePermitBodySchema accepts version alone (closureRemarks stays optional - not required, per the unresolved-mandatory-remarks decision)', () => {
@@ -224,18 +222,17 @@ test('a client can never choose a form version, a status, or an identity at crea
   }
 });
 
-test('updatePermitBodySchema carries an opaque form payload alongside the documented company fields', () => {
+test('updatePermitBodySchema carries only version and opaque form payload', () => {
   const withForm = updatePermitBodySchema.safeParse({ version: 3, form: { windFarm: 'Jhimpir' } });
   assert.equal(withForm.success, true);
   if (withForm.success) assert.deepEqual(withForm.data.form, { windFarm: 'Jhimpir' });
 
   // Omitting `form` entirely leaves the stored form untouched, so the
   // key must be genuinely absent rather than present-and-undefined.
-  const withoutForm = updatePermitBodySchema.safeParse({ version: 3, company: 'ESET' });
+  const withoutForm = updatePermitBodySchema.safeParse({ version: 3 });
   assert.equal(withoutForm.success, true);
   if (withoutForm.success) assert.equal('form' in withoutForm.data, false);
 
-  // The pre-existing company/companyOther contract is unchanged.
   assert.equal(updatePermitBodySchema.safeParse({ version: 1, company: 'OTHER' }).success, false);
   assert.equal(updatePermitBodySchema.safeParse({ version: 1, company: 'ESET', companyOther: 'x' }).success, false);
   assert.equal(updatePermitBodySchema.safeParse({ version: 0, form: {} }).success, false);
