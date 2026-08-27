@@ -55,9 +55,25 @@ const V1_JSA = {
   },
 };
 
-test('the cutover switch is still V1 - flipping it is the whole cutover', () => {
-  // Guards against the flip landing before the frontend can render V2.
-  assert.equal(ACTIVE_FORM_GENERATION, 'V1');
+test('new drafts are created in the authoritative V2 generation', () => {
+  assert.equal(ACTIVE_FORM_GENERATION, 'V2');
+  // A permit and its JSA are one document, so the JSA generation the
+  // server picks must move with it rather than being chosen separately.
+  assert.equal(permitFormVersionFor('COLD_WORK', ACTIVE_FORM_GENERATION), 'COLD_WORK_V2');
+  assert.equal(jsaFormVersionFor(ACTIVE_FORM_GENERATION), 'JSA_V2');
+});
+
+test('the generation of an existing permit comes from its stored version, never the active switch', () => {
+  // This is what stops the cutover reaching backwards: a V1 permit stays
+  // V1 forever, and no request can move it either way. If dispatch ever
+  // consulted ACTIVE_FORM_GENERATION for a stored permit, flipping the
+  // switch would silently reinterpret existing safety records.
+  assert.equal(generationOfPermitFormVersion('COLD_WORK_V1'), 'V1');
+  assert.equal(generationOfPermitFormVersion('COLD_WORK_V2'), 'V2');
+  // An unknown version is refused outright rather than falling back to
+  // whatever the switch currently says.
+  assert.equal(generationOfPermitFormVersion('COLD_WORK_V9'), null);
+  assert.equal(generationOfPermitFormVersion(null), null);
 });
 
 test('each generation names its own version per permit type', () => {

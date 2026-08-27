@@ -273,3 +273,18 @@ test('permit search accepts the new permit-type filter and still rejects unknown
   // Existing bounds are untouched.
   assert.equal(permitSearchQuerySchema.safeParse({ pageSize: '1000' }).success, false);
 });
+
+test('the client cannot ask for a form generation - only the permit type is accepted', () => {
+  // The whole V2 cutover rests on the SERVER choosing the generation. If
+  // a request could name one, an applicant could keep producing V1
+  // documents after the cutover, or force V2 onto a permit type before
+  // it was ready. `.strict()` is what makes that impossible.
+  assert.equal(createPermitBodySchema.safeParse({ permitType: 'WTG_WORK' }).success, true);
+  for (const smuggled of [
+    { permitType: 'WTG_WORK', formVersion: 'WTG_WORK_V1' },
+    { permitType: 'WTG_WORK', form_version: 'WTG_WORK_V1' },
+    { permitType: 'WTG_WORK', generation: 'V1' },
+  ]) {
+    assert.equal(createPermitBodySchema.safeParse(smuggled).success, false);
+  }
+});

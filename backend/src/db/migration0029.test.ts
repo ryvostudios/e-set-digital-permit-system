@@ -98,8 +98,16 @@ test('the whole chain 0001 -> 0029 applies cleanly', async () => {
   const db = await substrate();
   try {
     const names = await migrationNames();
-    assert.equal(names.length, 29, 'exactly 29 migrations');
+    // 0029 must be the 29th link in a gapless chain. The TOTAL number of
+    // migrations is deliberately not pinned here - later migrations are
+    // expected, and each one asserts its own position.
+    assert.ok(names.length >= 29, 'the chain must reach at least 0029');
     assert.match(names[28]!, /^0029_/);
+    assert.deepEqual(
+      names.slice(0, 29).map((name) => Number(name.slice(0, 4))),
+      Array.from({ length: 29 }, (_, index) => index + 1),
+      'the chain through 0029 must have no gaps',
+    );
     await applyThrough(db, 29);
   } finally {
     await db.close();

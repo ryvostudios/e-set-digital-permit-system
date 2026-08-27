@@ -48,13 +48,24 @@ export type FormGeneration = 'V1' | 'V2';
 /**
  * THE CUTOVER SWITCH: the generation NEW drafts are created with.
  *
- * Deliberately still 'V1'. Migration 0029 makes V2 storable and every
- * read/write path below understands it, but flipping this constant makes
- * `Apply for permit` start producing payloads the CURRENT frontend cannot
- * render - so the flip belongs with the frontend renderers, not before
- * them. Changing this one value is the whole cutover.
+ * Now 'V2' - the authoritative fixed-question forms. Everything this flip
+ * depended on is in place: migration 0029 makes V2 storable, migration
+ * 0030 gives the runtime login the least-privilege JSA write it needs (so
+ * Save Draft works at all), and the frontend renders the real permit and
+ * two-page JSA continuously.
+ *
+ * THE SERVER DECIDES, AND ONLY HERE. This constant is read at creation
+ * only, and the value it produces is written to `permits.form_version`.
+ * Every later read, validation and projection dispatches on that STORED
+ * version - so a client cannot ask for a generation, downgrade a V2
+ * permit to V1, or influence which schema validates its payload. The
+ * request has no say in it.
+ *
+ * READ COMPATIBILITY IS UNCHANGED. Existing V1 permits keep being parsed,
+ * rendered and edited as V1 for as long as they exist; flipping this
+ * rewrites nothing.
  */
-export const ACTIVE_FORM_GENERATION: FormGeneration = 'V1';
+export const ACTIVE_FORM_GENERATION: FormGeneration = 'V2';
 
 const PERMIT_VERSION_GENERATIONS: ReadonlyMap<string, FormGeneration> = new Map([
   ...Object.values(PERMIT_FORM_VERSIONS).map((version) => [version, 'V1'] as const),

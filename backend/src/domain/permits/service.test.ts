@@ -24,18 +24,20 @@ import {
   submitPermit,
   updateDraftPermit,
   updateLinkedJsa,
+  type UpdateDraftOutcome,
   type JsaRow,
   type PermitRow,
+  type Company,
   type PermitsServiceDeps,
 } from './service.js';
-import { PERMIT_FORM_VERSIONS, PERMIT_TYPES } from './forms.js';
+import { PERMIT_TYPES } from './forms.js';
 import {
   makeHotWorkForm,
-  makeJsaForm,
   makeJsaFormColumns,
   makePermitFormColumns,
-  makeWtgWorkForm,
 } from './formFixtures.test.js';
+import { answeredJsaV2, answeredWtgPermitV2 } from '../../test/v2Forms.js';
+import { ACTIVE_FORM_GENERATION, jsaFormVersionFor, permitFormVersionFor } from './formGeneration.js';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 
@@ -281,6 +283,13 @@ class FakeDb {
   removeWorkforceProfile(userId: string): void {
     this.workforceProfiles.delete(userId);
     this.usersWithoutSigningIdentity.add(userId);
+  }
+
+  /** Test fixture setup: restores the legacy "draft with no company recorded" state. */
+  clearPermitCompany(permitId: string): void {
+    const permit = this.permits.get(permitId);
+    if (!permit) throw new Error(`FakeDb: no permit ${permitId}`);
+    this.permits.set(permitId, { ...permit, company: null, company_other: null });
   }
 
   /** Test fixture setup: undoes the fake's draft-creation form shortcut, restoring the real "draft with no form yet" state. */
@@ -1239,17 +1248,47 @@ class FakeDb {
   }
 }
 
+/**
+ * Fills a draft with a COMPLETE authoritative document.
+ *
+ * New drafts are created in the active generation (V2), and a V2 permit
+ * may not be submitted while any printed safety question is unanswered -
+ * that refusal is the point of the contract. So every helper that drives
+ * a permit past DRAFT has to answer the form first, exactly as an
+ * applicant would. The payloads come from the catalogue, so they stay
+ * complete as the forms change.
+ */
+async function fillDraftForSubmission(
+  db: FakeDb,
+  actorUserId: string,
+  permitId: string,
+  version: number,
+  company: { company: Company; companyOther?: string } = { company: 'ESET' },
+): Promise<UpdateDraftOutcome> {
+  const updated = await updateDraftPermit(
+    actorUserId,
+    permitId,
+    { expectedVersion: version, ...company, form: answeredWtgPermitV2() },
+    db.deps(),
+  );
+  if (updated.outcome !== 'ok') return updated;
+  const jsa = await updateLinkedJsa(
+    actorUserId,
+    permitId,
+    { expectedVersion: updated.permit.version, form: answeredJsaV2() },
+    db.deps(),
+  );
+  if (jsa.outcome !== 'ok') throw new Error('setup failed: updateLinkedJsa');
+  // The permit row AFTER both writes, so the caller version token is current.
+  return { outcome: 'ok', permit: jsa.permit };
+}
+
 /** Drives a fresh permit through DRAFT -> PENDING_CRO -> PENDING_HSE for tests that start from PENDING_HSE. */
 async function createPendingHsePermit(db: FakeDb, actorUserId = 'owner'): Promise<PermitRow> {
   const { permit } = await createDraftPermit(actorUserId, 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit(
-    actorUserId,
-    permit.id,
-    { expectedVersion: permit.version, company: 'ESET' },
-    db.deps(),
-  );
-  if (updated.outcome !== 'ok') throw new Error('setup failed: updateDraftPermit');
-  const submitted = await submitPermit(actorUserId, permit.id, { expectedVersion: updated.permit.version }, db.deps());
+  const ready = await fillDraftForSubmission(db, actorUserId, permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit(actorUserId, permit.id, { expectedVersion: ready.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed: submitPermit');
   const forwarded = await forwardToHseReview(
     'cro-1',
@@ -1327,14 +1366,15 @@ test('updateDraftPermit rejects a stale version instead of silently overwriting'
 test('updateDraftPermit rejects updating a permit that is no longer DRAFT', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('owner', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   assert.equal(submitted.outcome, 'ok');
 
   const result = await updateDraftPermit(
     'owner',
     permit.id,
-    { expectedVersion: permit.version + 2, company: 'SGRE' },
+    { expectedVersion: ready.permit.version + 1, company: 'SGRE' },
     db.deps(),
   );
 
@@ -1344,8 +1384,13 @@ test('updateDraftPermit rejects updating a permit that is no longer DRAFT', asyn
 test('submitPermit derives and freezes applicant company when the legacy draft company is missing', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  // The document is complete, but the legacy `company` column is not set -
+  // which is the thing under test, so it is cleared after filling.
+  const ready = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  db.clearPermitCompany(permit.id);
 
-  const result = await submitPermit('owner', permit.id, { expectedVersion: permit.version }, db.deps());
+  const result = await submitPermit('owner', permit.id, { expectedVersion: ready.permit.version }, db.deps());
 
   assert.equal(result.outcome, 'ok');
   if (result.outcome === 'ok') {
@@ -1357,12 +1402,10 @@ test('submitPermit derives and freezes applicant company when the legacy draft c
 test('submitPermit requires companyOther when company is OTHER before allowing submission', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit(
-    'owner',
-    permit.id,
-    { expectedVersion: permit.version, company: 'OTHER', companyOther: 'Acme Contracting' },
-    db.deps(),
-  );
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version, {
+    company: 'OTHER',
+    companyOther: 'Acme Contracting',
+  });
   assert.equal(updated.outcome, 'ok');
   if (updated.outcome !== 'ok') return;
 
@@ -1374,12 +1417,7 @@ test('submitPermit requires companyOther when company is OTHER before allowing s
 test('submitPermit performs the only implemented transition, DRAFT -> PENDING_CRO, once the required field is set', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit(
-    'owner',
-    permit.id,
-    { expectedVersion: permit.version, company: 'ESET' },
-    db.deps(),
-  );
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   assert.equal(updated.outcome, 'ok');
   if (updated.outcome !== 'ok') return;
 
@@ -1394,12 +1432,7 @@ test('submitPermit performs the only implemented transition, DRAFT -> PENDING_CR
 test('submitPermit rejects submitting an already-submitted permit (invalid transition rejection)', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit(
-    'owner',
-    permit.id,
-    { expectedVersion: permit.version, company: 'ESET' },
-    db.deps(),
-  );
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   assert.equal(updated.outcome, 'ok');
   if (updated.outcome !== 'ok') return;
   const firstSubmit = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
@@ -1419,8 +1452,9 @@ test('submitPermit rejects submitting an already-submitted permit (invalid trans
 test('lifecycle events are only ever inserted, never updated or deleted (immutability at the application boundary)', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  await submitPermit('owner', permit.id, { expectedVersion: ready.permit.version }, db.deps());
 
   const lifecycleEventQueries = db.queries.filter((q) => q.sql.includes('permit_lifecycle_events'));
   assert.ok(lifecycleEventQueries.length >= 2);
@@ -1439,8 +1473,9 @@ test('createDraftPermit/submitPermit only ever write event/status pairs the data
   // assertion that both real call sites (CREATED/SUBMITTED) stay compliant.
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  await submitPermit('owner', permit.id, { expectedVersion: ready.permit.version }, db.deps());
 
   const insertedEvents = db.queries.filter((q) => q.sql.startsWith('INSERT INTO permit_lifecycle_events'));
   assert.equal(insertedEvents.length, 2);
@@ -1479,12 +1514,7 @@ test('forwardToHseReview rejects a permit that is not PENDING_CRO (wrong state r
 test('forwardToHseReview rejects a stale version', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit(
-    'owner',
-    permit.id,
-    { expectedVersion: permit.version, company: 'ESET' },
-    db.deps(),
-  );
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   assert.equal(updated.outcome, 'ok');
   if (updated.outcome !== 'ok') return;
   const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
@@ -1505,12 +1535,7 @@ test('forwardToHseReview atomically opens the HSE review window (exactly 5 minut
   const db = new FakeDb();
   db.now = new Date('2026-01-01T00:00:00.000Z');
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit(
-    'owner',
-    permit.id,
-    { expectedVersion: permit.version, company: 'ESET' },
-    db.deps(),
-  );
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   assert.equal(updated.outcome, 'ok');
   if (updated.outcome !== 'ok') return;
   const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
@@ -1795,12 +1820,7 @@ test('closePermit rejects a DRAFT permit (wrong state rejected)', async () => {
 test('closePermit rejects a PENDING_CRO permit (wrong state rejected)', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit(
-    'owner',
-    permit.id,
-    { expectedVersion: permit.version, company: 'ESET' },
-    db.deps(),
-  );
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   assert.equal(updated.outcome, 'ok');
   if (updated.outcome !== 'ok') return;
   const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
@@ -2091,8 +2111,9 @@ function backdateIssuedAt(db: FakeDb, permit: PermitRow, issuedAtIso: string): P
 test('croSendBackToApplicant: PENDING_CRO -> PENDING_CORRECTION, recording the CRO actor and an optional reason', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
 
   const result = await croSendBackToApplicant(
@@ -2128,8 +2149,9 @@ test('croSendBackToApplicant rejects a permit that is not PENDING_CRO (wrong sta
 test('croSendBackToApplicant rejects a stale version', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
 
   const result = await croSendBackToApplicant('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
   assert.deepEqual(result, { outcome: 'conflict', reason: 'stale_version' });
@@ -2138,8 +2160,9 @@ test('croSendBackToApplicant rejects a stale version', async () => {
 test('the applicant CAN edit a PENDING_CORRECTION permit (updateDraftPermit widened beyond DRAFT)', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
   const sentBack = await croSendBackToApplicant(
     'cro-1',
@@ -2165,8 +2188,9 @@ test('the applicant CAN edit a PENDING_CORRECTION permit (updateDraftPermit wide
 test('resubmitPermit: PENDING_CORRECTION -> PENDING_CRO, only by the original applicant', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
   const sentBack = await croSendBackToApplicant(
     'cro-1',
@@ -2216,8 +2240,9 @@ test('resubmitPermit rejects a permit that is not PENDING_CORRECTION', async () 
 test('resubmitPermit rejects a stale version', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
   await croSendBackToApplicant('cro-1', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
 
@@ -2228,8 +2253,9 @@ test('resubmitPermit rejects a stale version', async () => {
 test('resubmitPermit rejects when the frozen applicant identity is missing', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
   const sentBack = await croSendBackToApplicant(
     'cro-1',
@@ -3188,8 +3214,9 @@ test('listPermitsByStatus: pagination metadata is accurate and ordering is oldes
 test('getPermitLifecycleEvents returns the append-only history for a permit, in order', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  await submitPermit('owner', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  await submitPermit('owner', permit.id, { expectedVersion: ready.permit.version }, db.deps());
 
   const events = await getPermitLifecycleEvents(permit.id, db.deps());
 
@@ -3236,8 +3263,9 @@ test('submitPermit notifies every CRO-capability holder, de-duplicated across mu
   db.grantCapability('cro-b', 'permit.hold');
 
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   assert.equal(submitted.outcome, 'ok');
 
   const recipients = db.notifications.filter((n) => n.permit_id === permit.id).map((n) => n.recipient_user_id);
@@ -3249,8 +3277,9 @@ test('resubmitPermit notifies CRO recipients with a distinct notification type f
   const db = new FakeDb();
   db.grantCapability('cro-a', 'permit.close');
   const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
   const sentBack = await croSendBackToApplicant('cro-a', permit.id, { expectedVersion: submitted.permit.version }, db.deps());
   if (sentBack.outcome !== 'ok') throw new Error('setup failed');
@@ -3268,8 +3297,9 @@ test('forwardToHseReview notifies every HSE-capability holder', async () => {
   db.grantCapability('hse-a', 'permit.hse_review');
   const pendingCro = await (async () => {
     const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
-    await updateDraftPermit('applicant-1', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
-    const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: permit.version + 1 }, db.deps());
+    const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+    if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+    const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
     if (submitted.outcome !== 'ok') throw new Error('setup failed');
     return submitted.permit;
   })();
@@ -3430,9 +3460,10 @@ test('submitPermit fails closed and rolls back when no CRO recipient exists', as
   const db = new FakeDb();
   db.denyRecipientsFor('permit.cro_review', 'permit.forward_hse', 'permit.send_back', 'permit.close', 'permit.hold', 'permit.cancel');
   const { permit } = await createDraftPermit('applicant', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant', permit.id, 1);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
   const beforeEvents = db.lifecycleEvents.length;
-  const result = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, db.deps());
+  const result = await submitPermit('applicant', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   assert.deepEqual(result, { outcome: 'conflict', reason: 'no_responsible_recipient', responsibility: 'CRO' });
   assert.equal(db.permits.get(permit.id)?.status, 'DRAFT');
   assert.equal(db.lifecycleEvents.length, beforeEvents);
@@ -3442,8 +3473,9 @@ test('submitPermit fails closed and rolls back when no CRO recipient exists', as
 test('resubmitPermit fails closed and rolls back when no CRO recipient exists', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('applicant', 'UTC', 'WTG_WORK', db.deps());
-  await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, db.deps());
-  const submitted = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant', permit.id, 1);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant', permit.id, { expectedVersion: ready.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
   const corrected = await croSendBackToApplicant('cro', permit.id, { expectedVersion: submitted.permit.version, reason: 'correct' }, db.deps());
   if (corrected.outcome !== 'ok') throw new Error('setup failed');
@@ -3459,8 +3491,9 @@ test('fallback-only CRO is not an HSE recipient: forward rolls back every field 
   const forwardDb = new FakeDb();
   forwardDb.grantCapability('fallback-cro', 'permit.fallback_approve');
   const { permit } = await createDraftPermit('applicant', 'UTC', 'WTG_WORK', forwardDb.deps());
-  await updateDraftPermit('applicant', permit.id, { expectedVersion: 1, company: 'ESET' }, forwardDb.deps());
-  const submitted = await submitPermit('applicant', permit.id, { expectedVersion: 2 }, forwardDb.deps());
+  const ready = await fillDraftForSubmission(forwardDb, 'applicant', permit.id, 1);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant', permit.id, { expectedVersion: ready.permit.version }, forwardDb.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
   forwardDb.denyRecipientsFor('permit.hse_review');
   const forwardEvents = forwardDb.lifecycleEvents.length;
@@ -3505,14 +3538,14 @@ test('createDraftPermit fixes the permit template and derives its form version s
   for (const permitType of PERMIT_TYPES) {
     const { permit, jsa } = await createDraftPermit('owner', 'UTC', permitType, db.deps());
     assert.equal(permit.permit_type, permitType);
-    assert.equal(permit.form_version, PERMIT_FORM_VERSIONS[permitType]);
+    assert.equal(permit.form_version, permitFormVersionFor(permitType, ACTIVE_FORM_GENERATION));
     assert.equal(permit.status, 'DRAFT');
     assert.ok(jsa.id);
   }
   // The version is never taken from a caller - it is looked up from the
   // type, and the INSERT binds both.
   const insert = db.queries.find((q) => q.sql.startsWith('INSERT INTO permits'));
-  assert.deepEqual(insert?.params.slice(3), ['WTG_WORK', 'WTG_WORK_V1']);
+  assert.deepEqual(insert?.params.slice(3), ['WTG_WORK', permitFormVersionFor('WTG_WORK', ACTIVE_FORM_GENERATION)]);
 });
 
 test('a draft form edit stores the validated payload and its derived relational projection', async () => {
@@ -3520,7 +3553,7 @@ test('a draft form edit stores the validated payload and its derived relational 
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
   db.clearPermitForm(permit.id);
 
-  const form = makeWtgWorkForm({ windFarm: 'Gharo', wtgNumber: 'WTG-11' });
+  const form = answeredWtgPermitV2({ windFarmName: 'Gharo', wtgNumber: 'WTG-11' });
   const result = await updateDraftPermit(
     'owner',
     permit.id,
@@ -3532,7 +3565,7 @@ test('a draft form edit stores the validated payload and its derived relational 
   assert.deepEqual(result.permit.form_payload, form);
   assert.equal(result.permit.wind_farm, 'Gharo');
   assert.equal(result.permit.wtg_number, 'WTG-11');
-  assert.equal(result.permit.work_description, form.descriptionOfWork);
+  assert.equal(result.permit.work_description, 'Work');
   assert.equal(result.permit.version, permit.version + 1);
 });
 
@@ -3555,7 +3588,7 @@ test('an unknown form property is rejected rather than stored', async () => {
   const result = await updateDraftPermit(
     'owner',
     permit.id,
-    { expectedVersion: permit.version, form: { ...makeWtgWorkForm(), croSignature: 'Bilal Ahmed' } },
+    { expectedVersion: permit.version, form: { ...answeredWtgPermitV2(), croSignature: 'Bilal Ahmed' } },
     db.deps(),
   );
   assert.equal(result.outcome, 'invalid');
@@ -3568,7 +3601,7 @@ test('form editing follows the same ownership/status/version rules as every othe
   const asOther = await updateDraftPermit(
     'someone-else',
     permit.id,
-    { expectedVersion: permit.version, form: makeWtgWorkForm() },
+    { expectedVersion: permit.version, form: answeredWtgPermitV2() },
     db.deps(),
   );
   assert.deepEqual(asOther, { outcome: 'not_found' });
@@ -3576,7 +3609,7 @@ test('form editing follows the same ownership/status/version rules as every othe
   const stale = await updateDraftPermit(
     'owner',
     permit.id,
-    { expectedVersion: permit.version + 5, form: makeWtgWorkForm() },
+    { expectedVersion: permit.version + 5, form: answeredWtgPermitV2() },
     db.deps(),
   );
   assert.deepEqual(stale, { outcome: 'conflict', reason: 'stale_version' });
@@ -3589,7 +3622,7 @@ test('an ISSUED permit form and JSA are immutable through the ordinary edit path
   const permitEdit = await updateDraftPermit(
     'owner',
     issued.id,
-    { expectedVersion: issued.version, form: makeWtgWorkForm({ windFarm: 'Rewritten' }) },
+    { expectedVersion: issued.version, form: answeredWtgPermitV2({ windFarmName: 'Rewritten' }) },
     db.deps(),
   );
   assert.deepEqual(permitEdit, { outcome: 'conflict', reason: 'not_editable' });
@@ -3597,7 +3630,7 @@ test('an ISSUED permit form and JSA are immutable through the ordinary edit path
   const jsaEdit = await updateLinkedJsa(
     'owner',
     issued.id,
-    { expectedVersion: issued.version, form: makeJsaForm() },
+    { expectedVersion: issued.version, form: answeredJsaV2() },
     db.deps(),
   );
   assert.deepEqual(jsaEdit, { outcome: 'conflict', reason: 'not_editable' });
@@ -3606,7 +3639,7 @@ test('an ISSUED permit form and JSA are immutable through the ordinary edit path
 test('a permit sent back for correction can be edited again, and its form change is stored', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   if (updated.outcome !== 'ok') throw new Error('setup failed');
   const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -3616,7 +3649,7 @@ test('a permit sent back for correction can be edited again, and its form change
   const corrected = await updateDraftPermit(
     'owner',
     permit.id,
-    { expectedVersion: sentBack.permit.version, form: makeWtgWorkForm({ windFarm: 'Corrected Farm' }) },
+    { expectedVersion: sentBack.permit.version, form: answeredWtgPermitV2({ windFarmName: 'Corrected Farm' }) },
     db.deps(),
   );
   assert.equal(corrected.outcome, 'ok');
@@ -3627,12 +3660,12 @@ test('the linked JSA is edited under the permit own lock, ownership, and version
   const db = new FakeDb();
   const { permit, jsa } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
 
-  const form = makeJsaForm();
+  const form = answeredJsaV2();
   const result = await updateLinkedJsa('owner', permit.id, { expectedVersion: permit.version, form }, db.deps());
   assert.equal(result.outcome, 'ok');
   if (result.outcome !== 'ok') return;
   assert.equal(result.jsa.id, jsa.id, 'the same JSA row is edited - never replaced');
-  assert.equal(result.jsa.form_version, 'JSA_V1');
+  assert.equal(result.jsa.form_version, jsaFormVersionFor(ACTIVE_FORM_GENERATION));
   assert.deepEqual(result.jsa.form_payload, form);
   assert.equal(result.jsa.site_or_wtg, form.page1.siteOrWtg);
   assert.equal(result.jsa.job_description, form.page1.jobOrWork);
@@ -3656,7 +3689,7 @@ test('the linked JSA is edited under the permit own lock, ownership, and version
 test('a permit cannot be submitted while its own form or its JSA is incomplete', async () => {
   const db = new FakeDb();
   const { permit, jsa } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   if (updated.outcome !== 'ok') throw new Error('setup failed');
 
   db.clearPermitForm(permit.id);
@@ -3666,7 +3699,7 @@ test('a permit cannot be submitted while its own form or its JSA is incomplete',
   const restored = await updateDraftPermit(
     'owner',
     permit.id,
-    { expectedVersion: updated.permit.version, form: makeWtgWorkForm() },
+    { expectedVersion: updated.permit.version, form: answeredWtgPermitV2() },
     db.deps(),
   );
   if (restored.outcome !== 'ok') throw new Error('setup failed');
@@ -3678,7 +3711,7 @@ test('a permit cannot be submitted while its own form or its JSA is incomplete',
   const jsaCompleted = await updateLinkedJsa(
     'owner',
     permit.id,
-    { expectedVersion: restored.permit.version, form: makeJsaForm() },
+    { expectedVersion: restored.permit.version, form: answeredJsaV2() },
     db.deps(),
   );
   if (jsaCompleted.outcome !== 'ok') throw new Error('setup failed');
@@ -3695,7 +3728,7 @@ test('the applicant signs by submitting: the signature is the authenticated acto
     position_name: 'Technician',
   });
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   if (updated.outcome !== 'ok') throw new Error('setup failed');
   await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
 
@@ -3736,7 +3769,7 @@ test('a signer with no workforce profile FAILS CLOSED: the whole transition roll
   const db = new FakeDb();
   db.removeWorkforceProfile('owner');
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   if (updated.outcome !== 'ok') throw new Error('setup failed');
 
   const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
@@ -3754,7 +3787,7 @@ test('a CRO with no signing identity cannot forward, and an HSE with none cannot
   const forwardDb = new FakeDb();
   forwardDb.removeWorkforceProfile('cro-1');
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', forwardDb.deps());
-  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, forwardDb.deps());
+  const updated = await fillDraftForSubmission(forwardDb, 'owner', permit.id, permit.version);
   if (updated.outcome !== 'ok') throw new Error('setup failed');
   const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, forwardDb.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');
@@ -3840,7 +3873,7 @@ test('a resubmitted permit is issued carrying the LAST applicant signature, with
     position_name: 'Technician',
   });
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
-  const updated = await updateDraftPermit('owner', permit.id, { expectedVersion: permit.version, company: 'ESET' }, db.deps());
+  const updated = await fillDraftForSubmission(db, 'owner', permit.id, permit.version);
   if (updated.outcome !== 'ok') throw new Error('setup failed');
   const submitted = await submitPermit('owner', permit.id, { expectedVersion: updated.permit.version }, db.deps());
   if (submitted.outcome !== 'ok') throw new Error('setup failed');

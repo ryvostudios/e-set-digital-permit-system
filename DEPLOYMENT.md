@@ -311,6 +311,39 @@ they depend on the actual deployment topology:
   privileged grants/functions/sequences, schema creation, bootstrap state,
   and the migration ledger are all denied to `app_runtime`.
 
+  Migrations 0029-0030 are **APPLIED / LIVE-VERIFIED**. 0029 widens two
+  CHECKs so the authoritative V2 form contract is storable and grants
+  nothing. 0030 carries the only new `app_runtime` privilege of this
+  batch, and unlike the earlier deltas it is applied BY the migration
+  rather than by the operator afterwards:
+
+  ```sql
+  GRANT UPDATE (form_version, form_payload, site_or_wtg, job_description)
+  ON TABLE public.jsas
+  TO app_runtime;
+  ```
+
+  This is a column-level UPDATE grant, for the same reason as the two
+  above: do not replace it with table-level UPDATE, and do not grant
+  UPDATE on `id`, `jsa_sequence`, `created_by`, `created_at` or
+  `updated_at`. It closes a provisioning gap - `app_runtime` held INSERT
+  and SELECT on `jsas` but no UPDATE, the one workflow table where it was
+  missing, so the JSA half of Save Draft failed with 42501 and no stored
+  JSA had ever held a payload.
+
+  The grant is paired with a database trigger,
+  `jsas_content_editable_only_trigger`, which refuses any change to those
+  four columns unless EVERY permit linked to that JSA is currently DRAFT
+  or PENDING_CORRECTION. A column privilege says which columns may be
+  written but never when, so without the trigger the runtime login could
+  rewrite the safety content of an ISSUED, CLOSED or CANCELLED permit.
+  The trigger applies to every role including the table owner, and a JSA
+  shared by a renewal lineage is frozen as soon as any permit in that
+  lineage leaves DRAFT. No DELETE, TRUNCATE, REFERENCES or TRIGGER
+  privilege is granted anywhere by this migration; `service_role`,
+  `privileged_runtime`, RLS and the PUBLIC/anon/authenticated denial are
+  untouched.
+
   `BOOTSTRAP_CEO_NAME` is now REQUIRED by `npm run bootstrap:ceo`: a CEO
   is a privileged system account whose only identity field is their
   authoritative personal display name. The bootstrap refuses to adopt a
