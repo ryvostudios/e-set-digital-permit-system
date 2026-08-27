@@ -21,6 +21,7 @@ let appAccessState: 'ACTIVE' | 'DISABLED' | null = 'ACTIVE';
 let mockMustChangePassword = false;
 let mockProfileRows: Record<string, unknown>[] = [];
 let mockPrivilegedRoles: string[] = [];
+let mockPrivilegedDisplayName: string | null = null;
 
 const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
@@ -42,6 +43,9 @@ before(() => {
     if (sql.includes('FROM privileged_access_events')) {
       return { rows: mockPrivilegedRoles.map((role) => ({ role, action: 'GRANTED' })) };
     }
+    if (sql.includes('FROM privileged_identities')) {
+      return { rows: mockPrivilegedDisplayName ? [{ display_name: mockPrivilegedDisplayName }] : [] };
+    }
     return { rows: grantedCapabilities.map((name) => ({ name })) };
   }) as unknown as typeof Pool.prototype.query;
 });
@@ -57,6 +61,7 @@ beforeEach(() => {
   mockMustChangePassword = false;
   mockProfileRows = [];
   mockPrivilegedRoles = [];
+  mockPrivilegedDisplayName = null;
 });
 
 async function startServer(): Promise<{ url: string; close: () => Promise<void> }> {
@@ -154,15 +159,66 @@ test('GET /auth/me fails closed when application access state is missing', async
 test('a privileged system account reports its roles and NO company, team or position', async () => {
   // CEO and E-SET SITE_MANAGER have no workforce profile at all, so
   // `/auth/me` reports a null profile rather than pretending they are
-  // normal E-SET company members.
+  // normal E-SET company members - and carries their authoritative
+  // personal name in `privilegedDisplayName` instead.
   mockProfileRows = [];
   mockPrivilegedRoles = ['SITE_MANAGER'];
+  mockPrivilegedDisplayName = 'Bilal Ahmed';
   const { url, close } = await startServer();
   try {
     const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
-    const body = (await res.json()) as { profile: unknown; privilegedRoles: string[] };
+    const body = (await res.json()) as {
+      profile: unknown;
+      privilegedRoles: string[];
+      privilegedDisplayName: string | null;
+    };
     assert.equal(body.profile, null);
     assert.deepEqual(body.privilegedRoles, ['SITE_MANAGER']);
+    assert.equal(body.privilegedDisplayName, 'Bilal Ahmed');
+    // No company, team or position is fabricated anywhere in the payload.
+    assert.doesNotMatch(JSON.stringify(body), /E_SET|E-SET|ZPL|SGRE|teamName|positionName/);
+  } finally {
+    await close();
+  }
+});
+
+test('a CEO reports the CEO role and an authoritative personal name', async () => {
+  mockProfileRows = [];
+  mockPrivilegedRoles = ['CEO'];
+  mockPrivilegedDisplayName = 'Sana Iqbal';
+  const { url, close } = await startServer();
+  try {
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const body = (await res.json()) as { privilegedRoles: string[]; privilegedDisplayName: string };
+    assert.deepEqual(body.privilegedRoles, ['CEO']);
+    assert.equal(body.privilegedDisplayName, 'Sana Iqbal');
+  } finally {
+    await close();
+  }
+});
+
+test('a normal employee carries no privileged display name', async () => {
+  mockProfileRows = [{
+    display_name: 'Ayesha Khan',
+    company_code: 'E_SET',
+    company_name: 'E-SET',
+    team_name: 'Civil',
+    position_name: 'Worker',
+  }];
+  mockPrivilegedRoles = [];
+  mockPrivilegedDisplayName = null;
+  const { url, close } = await startServer();
+  try {
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const body = (await res.json()) as {
+      profile: { displayName: string };
+      privilegedDisplayName: string | null;
+      privilegedRoles: string[];
+    };
+    // Exactly one identity source is ever populated.
+    assert.equal(body.profile.displayName, 'Ayesha Khan');
+    assert.equal(body.privilegedDisplayName, null);
+    assert.deepEqual(body.privilegedRoles, []);
   } finally {
     await close();
   }

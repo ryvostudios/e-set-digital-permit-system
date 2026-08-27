@@ -28,7 +28,8 @@ test('real PostgreSQL transaction rolls back fallback-only CRO forward when no H
       CREATE TABLE issued_document_snapshots (id uuid PRIMARY KEY);
       CREATE TABLE capabilities (id uuid PRIMARY KEY, name text NOT NULL UNIQUE);
       CREATE TABLE team_position_capabilities (team_position_id uuid NOT NULL, capability_id uuid NOT NULL REFERENCES capabilities(id));
-      CREATE TABLE user_team_positions (user_id uuid NOT NULL, team_position_id uuid NOT NULL);
+      CREATE TABLE user_team_positions (user_id uuid NOT NULL, team_position_id uuid NOT NULL,
+        ended_at timestamptz);
       CREATE TABLE teams (id uuid PRIMARY KEY, name text NOT NULL);
       CREATE TABLE positions (id uuid PRIMARY KEY, name text NOT NULL);
       CREATE TABLE team_positions (id uuid PRIMARY KEY, team_id uuid NOT NULL REFERENCES teams(id), position_id uuid NOT NULL REFERENCES positions(id));

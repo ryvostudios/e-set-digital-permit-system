@@ -8,6 +8,9 @@ class FakeBootstrapSystem {
   reservation: { email: string; status: 'RESERVED' | 'COMPLETED'; token: string | null; authUserId: string | null; stale: boolean } | null = null;
   ceos = new Set<string>();
   authUsers = new Map<string, string>();
+  /** Auth ids that already belong to a NORMAL employee (a workforce profile). */
+  workforceEmployees = new Set<string>();
+  privilegedIdentities = new Map<string, string>();
   createCalls = 0;
   failAuthPersistenceOnce = false;
   access = new Map<string, 'ACTIVE' | 'DISABLED'>();
@@ -53,6 +56,13 @@ class FakeBootstrapSystem {
     }
     if (sql.startsWith('INSERT INTO app_user_access')) { if (!this.access.has(String(params[0]))) this.access.set(String(params[0]), 'ACTIVE'); return { rows: [] }; }
     if (sql.includes('FROM app_user_access') && sql.startsWith('SELECT')) { const state = this.access.get(String(params[0])); return { rows: state ? [{ state, must_change_password: false }] : [] }; }
+    if (sql.startsWith('SELECT user_id FROM workforce_profiles')) {
+      return { rows: this.workforceEmployees.has(String(params[0])) ? [{ user_id: params[0] }] : [] };
+    }
+    if (sql.startsWith('INSERT INTO privileged_identities')) {
+      this.privilegedIdentities.set(String(params[0]), String(params[1]));
+      return { rows: [] };
+    }
     if (sql.startsWith('INSERT INTO privileged_access_events')) { this.ceos.add(String(params[0])); return { rows: [] }; }
     if (sql.startsWith('UPDATE initial_ceo_bootstrap') && sql.includes("status = 'COMPLETED'")) {
       if (this.reservation?.status === 'RESERVED' && this.reservation.token === params[0]) {
@@ -73,7 +83,7 @@ class FakeBootstrapSystem {
   }
 }
 
-const input = { email: 'ceo@example.com', password: 'a-strong-temporary-password' };
+const input = { email: 'ceo@example.com', password: 'a-strong-temporary-password', name: 'Sana Iqbal' };
 
 test('CEO bootstrap creates exactly one authoritative CEO and rejects a duplicate', async () => {
   const system = new FakeBootstrapSystem();
@@ -128,4 +138,31 @@ test('CEO bootstrap CLI failure output cannot reveal password, token, service se
   const rendered = output.join('\n');
   assert.equal(rendered, 'bootstrap:ceo: failed safely');
   assert.doesNotMatch(rendered, /strong-temporary|abc123|sb_secret|SUPER_SECRET_TOKEN|https:/);
+});
+
+test('the bootstrapped CEO gets an authoritative privileged display name and NO workforce identity', async () => {
+  const system = new FakeBootstrapSystem();
+  const result = await bootstrapInitialCeo(input, system.deps('claim-name'));
+  assert.equal(result.outcome, 'ok');
+  assert.deepEqual([...system.privilegedIdentities.values()], ['Sana Iqbal']);
+  // A privileged system account has no company, team or position, so the
+  // bootstrap must never write a workforce profile or an assignment.
+  assert.equal(system.workforceEmployees.size, 0);
+});
+
+test('the bootstrap REFUSES to adopt an Auth identity that belongs to a normal employee', async () => {
+  const system = new FakeBootstrapSystem();
+  // The email already has an Auth identity, and that identity is a
+  // normal organizational employee - the exact reuse that would make one
+  // person simultaneously an employee and the CEO.
+  system.authUsers.set('ceo@example.com', 'auth-existing-employee');
+  system.workforceEmployees.add('auth-existing-employee');
+
+  const result = await bootstrapInitialCeo(input, system.deps('claim-employee'));
+  assert.deepEqual(result, { outcome: 'conflict', reason: 'email_belongs_to_employee' });
+
+  // Nothing was granted, named, or converted; the employee is untouched.
+  assert.equal(system.ceos.size, 0);
+  assert.equal(system.privilegedIdentities.size, 0);
+  assert.ok(system.workforceEmployees.has('auth-existing-employee'));
 });

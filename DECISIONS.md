@@ -514,30 +514,161 @@ confirmed.
   active privileged grants, so no mapping was required and none was
   invented.
 
-### Confirmed organization structure (reference data - NOT inserted by any migration yet)
-- E-SET teams and positions: Admin (Admin Lead, Assistant Admin); Civil
-  (Team Lead, Supervisor, Worker); WTG (Team Lead, Engineer, Technician);
-  E-BOP (Team Lead, CRO, Technician); HSE (Team Lead, Paramedic).
-- ZPL: one organizational team containing Site Manager, Asset Manager,
-  Engineer, HSE.
-- SGRE: one organizational team containing Team Lead.
-- All of these are normal Team + Positions an E-SET Site Manager may
-  assign when creating employees, including E-BOP CRO. Migration 0018
-  deliberately inserts NO organization data - teams, positions,
-  team_positions and their `site_manager_assignable` approval remain
-  operator-provisioned, and no capability mapping is invented for them.
+### Organization Structure (implemented; migrations 0019 + 0020 applied and live-verified)
+- Teams belong to exactly ONE company (`teams.company_id`, migration
+  0019), and a team name is unique per company rather than globally. This
+  is what makes "ZPL HSE is not an E-SET permit HSE approver" structural:
+  E-SET's `HSE` team and ZPL's `HSE` POSITION are different objects, and a
+  ZPL employee cannot be placed on an E-SET team at all - the database
+  refuses a workforce profile whose company does not own the team behind
+  its assignment.
+- The confirmed launch structure, seeded by migration 0020 and by nothing
+  else: E-SET Admin (Admin Lead, Assistant Admin), Civil (Team Lead,
+  Supervisor, Worker), WTG (Team Lead, Engineer, Technician), E-BOP (Team
+  Lead, CRO, Technician), HSE (Team Lead, Paramedic); ZPL (Site Manager,
+  Asset Manager, Engineer, HSE); SGRE (Team Lead). `positions.name` is
+  globally unique, so "Team Lead" is one row shared by five teams - it is
+  always the Team + Position PAIR that carries meaning.
+- Every one of the 18 launch combinations is approved for employee
+  provisioning (`site_manager_assignable = TRUE`), E-BOP CRO included.
+  The flag means only "a manager may place an employee here" and grants
+  nothing.
+- Initial capability mapping, seeded by 0020 and asserted by the
+  migration's own self-verification block:
+  - Permit application (`permit.create`, `permit.submit`): all 17 normal
+    launch combinations EXCEPT E-SET E-BOP CRO. CRO reviews permits and
+    does not apply for them.
+  - CRO workflow authority (`permit.cro_review`, `permit.send_back`,
+    `permit.forward_hse`, `permit.fallback_approve`, `permit.hold`,
+    `permit.resume`, `permit.cancel`, `permit.close`, `permit.renew`):
+    ONLY E-SET E-BOP CRO. Each of those capabilities is held by exactly
+    one Team + Position in the whole system.
+  - HSE approval (`permit.hse_review`, which gates both HSE approval and
+    the HSE send-back): ONLY E-SET HSE Team Lead and E-SET HSE Paramedic.
+    ZPL HSE and SGRE hold none.
+  - Account management is NOT mapped to any Team + Position, by design.
+- No migration seeds a person: no employee, workforce profile,
+  assignment, privileged identity, or privileged grant is created by
+  0019 or 0020.
 
-### Not yet implemented, and deliberately out of scope for migration 0018
+### Privileged System Identities (implemented; migration 0019 applied and live-verified)
+- `privileged_identities` (migration 0019) is the authoritative home for
+  a CEO's or E-SET SITE_MANAGER's personal display name - the one
+  identity field a privileged system account has. It holds no company,
+  team, position, email, or metadata, and a name is never derived from an
+  email address or `user_metadata`.
+- IDENTITY IS NOT AUTHORITY. A row there confers nothing; whether a user
+  is currently CEO or SITE_MANAGER is still derived exclusively from the
+  latest `privileged_access_events` row per role. A named identity with
+  no active grant has exactly the authority of an unnamed one: none.
+- The privileged/employee invariant is now closed in BOTH directions:
+  migration 0018 refuses a workforce profile for an actively privileged
+  user, and migration 0019 refuses a privileged GRANT - and a privileged
+  identity - for a user holding a workforce profile. A REVOKE is never
+  blocked, because withdrawing authority must always be possible.
+- Promotion is not a workflow. Nothing deletes an employee's profile,
+  ends their assignment, or rewrites history to let a grant succeed; a
+  normal employee simply cannot become a privileged account. If that is
+  ever wanted it must be an explicit, separately designed transition.
+- The CEO bootstrap CLI now requires `BOOTSTRAP_CEO_NAME`, writes the
+  CEO's `privileged_identities` row in the same transaction as the grant,
+  and REFUSES to adopt a pre-existing Auth identity that belongs to a
+  normal employee (checked once before the reservation is finalized and
+  again inside the transaction, with migration 0019's trigger as the
+  final backstop).
+
+### Privileged Role Administration (implemented; CEO-only)
+- Only the CEO may establish, grant, or revoke SITE_MANAGER. A Site
+  Manager holds full authority over NORMAL employees and none whatsoever
+  over the privileged tier: they cannot create a CEO, mint another Site
+  Manager, or grant/revoke any privileged role. Enforced by requiring the
+  CEO role specifically, not merely "some privileged role".
+- Multiple active E-SET Site Managers are expected and supported; each
+  holds identical full Site Manager authority. Nothing is a singleton.
+- `POST /admin/site-managers` establishes a new privileged account: a new
+  Auth identity, an authoritative display name, a SITE_MANAGER grant, and
+  `must_change_password = TRUE`, using the same Auth-first/compensate
+  ordering as employee provisioning. It never touches
+  `workforce_profiles`, `user_team_positions`, or a company.
+- `POST /admin/site-managers/:id/grant` re-grants a previously revoked
+  Site Manager. It cannot bootstrap a bare Auth id: the target must
+  already have a privileged identity, so authority always has a name
+  behind it. `.../revoke` withdraws authority while leaving the account,
+  its name and its login intact, and takes effect on the target's very
+  next request.
+- `privileged_access_events` is append-only and records actor, target,
+  role, action and reason, so the grant log IS the audit trail for this
+  tier and cannot be edited or deleted - including by the backend.
+- PRIVILEGED WRITES USE A SEPARATE DATABASE LOGIN. The ordinary
+  `app_runtime` credential has no INSERT on the grant log, no sequence
+  privilege, and no EXECUTE on the function that writes it - it has no
+  route to privileged authority at all. Grants and revokes travel over a
+  dedicated `privileged_runtime` login (CONNECT + schema USAGE + EXECUTE
+  on one hardened function, and no table privilege whatsoever) through a
+  small pool whose only exported operations are
+  `recordSiteManagerGrant`/`recordSiteManagerRevoke`. Possession of
+  `DATABASE_URL` alone is therefore NOT sufficient to grant SITE_MANAGER,
+  even by passing the real CEO's id as the actor - which is exactly why
+  granting `app_runtime` EXECUTE was rejected.
+- Two independent gates guard every change, neither sufficient alone: the
+  HTTP layer re-resolves the caller as an active CEO, and migration
+  0019's `record_site_manager_grant()` independently re-derives the
+  supplied actor's CEO status, hardcodes the role literal `SITE_MANAGER`
+  (never a parameter, so CEO is unreachable by any argument), and refuses
+  a self-change, a CEO target, a workforce employee, or a target with no
+  privileged identity. It is the only SECURITY DEFINER function in the
+  schema; justification, hardening and residual risk are documented in
+  the migration and DEPLOYMENT.md.
+- OUTSTANDING, NOT CLOSED BY LAYER 1: Supabase's project-wide default
+  privileges give `service_role` full DML on every table in `public`,
+  including `privileged_access_events`. A holder of the Supabase service
+  key can therefore still append a privileged event directly, through
+  PostgREST. This is pre-existing and schema-wide, not introduced here;
+  migration 0021 removed the equivalent EXECUTE grant on the privileged
+  grant function, but narrowing `service_role` across the schema is a
+  project-wide operator decision recorded in DEPLOYMENT.md and SECURITY.md.
+  Migration 0004's `forbid_mutation` triggers still make the log
+  append-only for that role too, so tampering with existing history
+  remains impossible for every credential.
+- When the privileged channel is unconfigured, CEO administration returns
+  a sanitized 503 and every other endpoint is unaffected. A failed grant
+  during Site Manager creation leaves a named account holding NO
+  privilege and no capabilities - less authority than intended, never
+  more - and the CEO simply retries the grant.
+
+### One Current Assignment, With History (implemented; migration 0019)
+- A normal employee holds exactly ONE current Team + Position at a time.
+  `user_team_positions.ended_at IS NULL` marks it, and a partial unique
+  index on `(user_id) WHERE ended_at IS NULL` makes "exactly one" a
+  database fact rather than an application convention.
+- History is preserved in place: a transfer stamps `ended_at` on the old
+  row and adds the new one. Nothing is ever deleted - migration 0016's
+  ON DELETE RESTRICT composite foreign key would refuse it anyway, and
+  destroying history to enforce uniqueness is explicitly not the design.
+- ONLY THE CURRENT ASSIGNMENT GRANTS ANYTHING. `resolveUserCapabilities`,
+  `resolveUserIdsWithCapabilities` (notification recipients),
+  `resolveSigningIdentity`, and `/auth/me` all filter to
+  `ended_at IS NULL`. Without that filter a transferred employee would
+  retain the capabilities of every role they had ever held - a CRO who
+  moved to Civil could still close permits - which is exactly what the
+  one-current-assignment rule exists to prevent.
+- An employee's primary assignment must be one they CURRENTLY hold
+  (0019 trigger), so a transferred employee's signing designation and
+  profile can never resolve through a retired assignment.
+- `started_at`/`ended_at` are database-authoritative and cannot be
+  backdated by an application or client clock.
+
+### Not yet implemented (next backend layers)
 - **Privileged permit application.** CEO and E-SET SITE_MANAGER may apply
   for permits, with the E-SET business context derived server-side (never
   client-selectable) and with ONLY their personal name shown in the
   applicant identity field and on the PDF - no "CEO", "Site Manager" or
-  "E-SET" beside it. This is NOT implemented. It requires an authoritative
-  privileged display-name store and a signature identity that carries no
-  Team + Position, and `permit_signatures` (migration 0016) requires both
-  today, so it needs its own migration. Until then a privileged account
-  has no signing identity and every action that would produce a signature
-  fails closed for them.
+  "E-SET" beside it. NOT yet implemented. The authoritative privileged
+  display-name store now exists (migration 0019), but `permit_signatures`
+  (migration 0016) still requires a Team + Position on every signature
+  row, so a signature identity that carries none needs its own migration.
+  Until then a privileged account has no signing identity and every
+  action that would produce a signature fails closed for them.
 - **Server-derived permit applicant identity.** For normal employees the
   applicant name and Company must come from the authenticated authoritative
   profile and be uneditable by the applicant, with the paper wording

@@ -2,13 +2,26 @@ import { query, type QueryFn } from '../db/pool.js';
 
 /**
  * Resolves the set of capability names granted to `userId` via their
- * Team + Position assignment(s):
+ * CURRENT Team + Position assignment:
  *   user_team_positions -> team_positions -> team_position_capabilities -> capabilities
  * Capabilities are derived from the explicit Team + Position combination,
- * never from a Position alone. A user with no assignments, or whose
- * assignments grant nothing, resolves to an empty set - callers must
+ * never from a Position alone. A user with no assignment, or whose
+ * assignment grants nothing, resolves to an empty set - callers must
  * treat that as "no capabilities" (default-deny), never as an error to
  * be ignored.
+ *
+ * ONLY THE CURRENT ASSIGNMENT COUNTS. Migration 0019 keeps every
+ * assignment a user has ever held and marks the retired ones with
+ * `ended_at`, so authorization must filter to `ended_at IS NULL` - a
+ * partial unique index guarantees there is at most one such row per
+ * user. Without this filter a transferred employee would silently retain
+ * the capabilities of every position they had ever held, which is
+ * exactly the escalation the one-current-assignment rule exists to
+ * prevent. History is for audit; only the current row grants anything.
+ *
+ * Privileged system authority (CEO / E-SET SITE_MANAGER) is deliberately
+ * NOT resolved here and can never be obtained through this path - it
+ * comes solely from `privileged_access_events` (authz/privilegedAccess.ts).
  */
 export async function resolveUserCapabilities(userId: string): Promise<Set<string>> {
   const result = await query<{ name: string }>(
@@ -16,7 +29,8 @@ export async function resolveUserCapabilities(userId: string): Promise<Set<strin
        FROM user_team_positions utp
        JOIN team_position_capabilities tpc ON tpc.team_position_id = utp.team_position_id
        JOIN capabilities c ON c.id = tpc.capability_id
-      WHERE utp.user_id = $1`,
+      WHERE utp.user_id = $1
+        AND utp.ended_at IS NULL`,
     [userId],
   );
   return new Set(result.rows.map((row) => row.name));
@@ -24,15 +38,17 @@ export async function resolveUserCapabilities(userId: string): Promise<Set<strin
 
 /**
  * The reverse lookup of `resolveUserCapabilities`: every distinct user
- * who holds AT LEAST ONE of `capabilityNames`, via the same Team +
- * Position -> Capabilities join. Used to resolve workflow-notification
- * recipients server-side (domain/notifications/recipients.ts) - a
- * client can never choose or influence who receives a notification,
- * only the authoritative capability model can. `DISTINCT` is what
- * prevents a user who holds more than one matching capability (or
- * reaches it via more than one Team + Position assignment) from being
- * returned twice - "avoid duplicate recipients where a user has
- * multiple assignments".
+ * who holds AT LEAST ONE of `capabilityNames` through their CURRENT
+ * assignment, via the same Team + Position -> Capabilities join. Used to
+ * resolve workflow-notification recipients server-side
+ * (domain/notifications/recipients.ts) - a client can never choose or
+ * influence who receives a notification, only the authoritative
+ * capability model can. `DISTINCT` is what prevents a user reachable
+ * through more than one matching capability from being returned twice.
+ *
+ * The `ended_at IS NULL` filter matters just as much here: a transferred
+ * employee must drop out of the CRO/HSE notification queue immediately,
+ * not keep receiving permits addressed to a role they no longer hold.
  *
  * Takes an injectable `queryFn` (rather than always using the module's
  * own pooled `query`) so a caller that needs this resolved INSIDE an
@@ -52,7 +68,8 @@ export async function resolveUserIdsWithCapabilities(
        FROM user_team_positions utp
        JOIN team_position_capabilities tpc ON tpc.team_position_id = utp.team_position_id
        JOIN capabilities c ON c.id = tpc.capability_id
-      WHERE c.name = ANY($1)`,
+      WHERE c.name = ANY($1)
+        AND utp.ended_at IS NULL`,
     [capabilityNames],
   );
   return result.rows.map((row) => row.user_id);

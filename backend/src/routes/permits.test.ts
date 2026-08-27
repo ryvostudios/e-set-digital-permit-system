@@ -903,11 +903,28 @@ test('GET /permits/:id returns detail+JSA+availableActions for the owner, even w
   }
 });
 
+/**
+ * An `issued_at` that is deterministically "earlier today" in the site
+ * timezone used by these fixtures (UTC): the most recent UTC midnight.
+ *
+ * `Date.now() - 60_000` was not safe here. A permit's validity runs to
+ * the NEXT midnight after issuance, so a run that started within 60
+ * seconds of 00:00 UTC produced an `issued_at` on the PREVIOUS day whose
+ * expiry had already passed - making these tests fail for roughly one
+ * minute a day. Anchoring to the current UTC midnight is always in the
+ * past and always expires tomorrow, with no sleep, no retry, and no
+ * change to the production next-midnight rule being exercised.
+ */
+function issuedEarlierTodayUtc(): string {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+}
+
 test('GET /permits/:id: an ISSUED permit reports isValid=true before its expiry', async () => {
   mockPermitDetailRow = makePermitDetailRow({
     status: 'ISSUED',
     created_by: AUTHENTICATED_USER_ID,
-    issued_at: new Date(Date.now() - 60_000).toISOString(), // issued a minute ago, well before midnight
+    issued_at: issuedEarlierTodayUtc(), // issued earlier today, deterministically before its next-midnight expiry
     site_timezone: 'UTC',
   });
   grantedCapabilities = [];
@@ -926,7 +943,7 @@ test('GET /permits/:id: a CLOSED permit always reports isValid=false, even stric
   mockPermitDetailRow = makePermitDetailRow({
     status: 'CLOSED',
     created_by: AUTHENTICATED_USER_ID,
-    issued_at: new Date(Date.now() - 60_000).toISOString(), // same recent issuance - would still be "valid" by time alone
+    issued_at: issuedEarlierTodayUtc(), // same issuance - would still be "valid" by time alone
     site_timezone: 'UTC',
     closed_by: AUTHENTICATED_USER_ID,
     closed_at: new Date().toISOString(),
@@ -1050,7 +1067,7 @@ test('GET /permits/:id: a HELD permit is visible via any of resume/cancel/close,
   mockPermitDetailRow = makePermitDetailRow({
     status: 'HELD',
     created_by: 'someone-else',
-    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    issued_at: issuedEarlierTodayUtc(),
     site_timezone: 'UTC',
   });
   grantedCapabilities = ['permit.resume'];
@@ -1071,7 +1088,7 @@ test('GET /permits/:id: a CANCELLED permit is visible via permit.cancel and expo
   mockPermitDetailRow = makePermitDetailRow({
     status: 'CANCELLED',
     created_by: 'someone-else',
-    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    issued_at: issuedEarlierTodayUtc(),
     site_timezone: 'UTC',
   });
   grantedCapabilities = ['permit.cancel'];
@@ -1091,7 +1108,7 @@ test('GET /permits/:id: an ISSUED permit exposes hold/cancel/close together when
   mockPermitDetailRow = makePermitDetailRow({
     status: 'ISSUED',
     created_by: 'someone-else',
-    issued_at: new Date(Date.now() - 60_000).toISOString(),
+    issued_at: issuedEarlierTodayUtc(),
     site_timezone: 'UTC',
   });
   grantedCapabilities = ['permit.hold', 'permit.cancel', 'permit.close'];

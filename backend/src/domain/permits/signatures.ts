@@ -68,9 +68,12 @@ export class SigningIdentityUnavailableError extends Error {
  * Resolves the authoritative signing identity for `userId`. The join
  * through `user_team_positions` re-proves, at signing time, that the
  * profile's primary Team + Position is an assignment this same user
- * actually holds - the same invariant migration 0016's composite foreign
- * key enforces structurally, checked again here so a signature is never
- * produced from a profile whose assignment has since been revoked.
+ * CURRENTLY holds (`ended_at IS NULL`, migration 0019) - the same
+ * invariant migration 0016's composite foreign key enforces
+ * structurally, checked again here so a signature is never produced from
+ * a profile whose assignment has since been ended or revoked. A
+ * transferred employee signs with their new designation or not at all;
+ * they never sign with a retired one.
  *
  * Note this resolves the SIGNING DESIGNATION only. Authorization is
  * unchanged and still comes solely from `authz/capabilities.ts`; holding
@@ -92,6 +95,7 @@ export async function resolveSigningIdentity(queryFn: QueryFn, userId: string): 
        JOIN companies c ON c.id = wp.company_id
        JOIN user_team_positions utp
          ON utp.user_id = wp.user_id AND utp.team_position_id = wp.primary_team_position_id
+        AND utp.ended_at IS NULL
        JOIN team_positions tp ON tp.id = wp.primary_team_position_id
        JOIN teams t ON t.id = tp.team_id
        JOIN positions p ON p.id = tp.position_id

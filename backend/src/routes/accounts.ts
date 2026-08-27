@@ -7,6 +7,11 @@ import {
 import { createSupabaseAccountAdmin } from '../domain/accounts/admin.js';
 import { resolveProvisioningCompany } from '../domain/accounts/companies.js';
 import {
+  createSiteManagerAccount,
+  grantSiteManager,
+  revokeSiteManager,
+} from '../domain/accounts/privilegedManagement.js';
+import {
   changeOwnPassword,
   createEmployeeAccount,
   defaultAccountsServiceDeps,
@@ -16,9 +21,14 @@ import {
 import {
   changePasswordBodySchema,
   createEmployeeBodySchema,
+  createSiteManagerBodySchema,
   employeeIdParamsSchema,
+  privilegedRoleChangeBodySchema,
+  privilegedUserIdParamsSchema,
   resetEmployeePasswordBodySchema,
 } from '../domain/accounts/validation.js';
+import { resolvePrivilegedAccess } from '../authz/privilegedAccess.js';
+import { createPrivilegedAccessAdmin, type PrivilegedAccessAdmin } from '../db/privilegedPool.js';
 import { requireAuth, requireAuthDuringPasswordChange } from '../middleware/auth.js';
 import { accountLimiter, managerAccountLimiter } from '../middleware/rateLimit.js';
 
@@ -305,3 +315,209 @@ accountsRouter.post(
     res.status(200).json({ status: 'ok', employee: { userId: params.data.id, mustChangePassword: true } });
   },
 );
+
+
+/**
+ * Privileged administration is unavailable rather than partially working
+ * when the separate `PRIVILEGED_DATABASE_URL` channel is not configured -
+ * the same fail-closed posture the Auth Admin credential uses. The
+ * response never names the missing credential.
+ */
+function sendPrivilegedChannelUnavailable(res: Response): void {
+  res.status(503).json({
+    error: 'privileged_management_unavailable',
+    message: 'Privileged account administration is not available right now',
+  });
+}
+
+/** Resolves the narrow privileged adapter, or null when its dedicated login is absent. */
+function resolvePrivilegedAdmin(): PrivilegedAccessAdmin | null {
+  return createPrivilegedAccessAdmin();
+}
+
+/**
+ * CEO-ONLY authority. Site Manager administration is deliberately a
+ * narrower gate than `authorize()` above: holding SOME privileged role is
+ * not enough, because a Site Manager must never be able to mint or
+ * unmake another Site Manager, nor reach the CEO tier. Resolved from the
+ * append-only grant log on every request, so a revoked CEO loses this
+ * immediately.
+ */
+async function authorizeCeo(req: Request, res: Response): Promise<string | null> {
+  const userId = getAuthenticatedUserId(req, res);
+  if (!userId) return null;
+  try {
+    const roles = await resolvePrivilegedAccess(userId);
+    if (!roles.has('CEO')) {
+      sendForbidden(res);
+      return null;
+    }
+    return userId;
+  } catch {
+    sendForbidden(res);
+    return null;
+  }
+}
+
+/**
+ * CEO establishes a new E-SET SITE_MANAGER privileged account.
+ *
+ * This is NOT the employee endpoint and shares none of its machinery: it
+ * writes `privileged_identities` and `privileged_access_events` and
+ * never `workforce_profiles`, `user_team_positions` or a company - so
+ * the account it creates has an authoritative personal name and no
+ * fabricated organizational membership. Multiple active Site Managers
+ * are expected; nothing here is a singleton.
+ */
+accountsRouter.post(
+  '/admin/site-managers',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorizeCeo(req, res);
+    if (!actorUserId) return;
+
+    const body = createSiteManagerBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const deps = resolveDeps();
+    if (!deps) {
+      sendAccountAdminUnavailable(res);
+      return;
+    }
+    // Both credentials must be present before ANY Auth work begins:
+    // creating an Auth identity we could not then grant would leave a
+    // named account with no authority for no reason.
+    const privileged = resolvePrivilegedAdmin();
+    if (!privileged) {
+      sendPrivilegedChannelUnavailable(res);
+      return;
+    }
+
+    const result = await createSiteManagerAccount(actorUserId, body.data, deps, privileged);
+    if (result.outcome === 'conflict') {
+      res.status(409).json({ error: 'conflict', reason: result.reason, message: 'That email cannot be used' });
+      return;
+    }
+    if (result.outcome === 'failed') {
+      if (result.reason === 'provisioning_orphan_requires_operator') {
+        console.error(
+          JSON.stringify({
+            event: 'site_manager_provisioning_orphan',
+            requestId: req.requestId,
+            orphanUserId: result.orphanUserId,
+          }),
+        );
+      }
+      if (result.reason === 'grant_not_recorded') {
+        // The account exists and is named but holds NO privilege. Safe,
+        // and retryable through the grant endpoint - so it is reported
+        // distinctly rather than as a generic provisioning failure.
+        console.error(
+          JSON.stringify({
+            event: 'site_manager_grant_not_recorded',
+            requestId: req.requestId,
+            userId: result.userId,
+          }),
+        );
+        res.status(503).json({
+          error: 'privileged_grant_failed',
+          reason: 'grant_not_recorded',
+          message: 'The account was created but its Site Manager authority was not granted. Retry the grant.',
+        });
+        return;
+      }
+      res.status(503).json({
+        error: 'provisioning_failed',
+        reason: result.reason === 'provisioning_orphan_requires_operator' ? 'provisioning_failed' : result.reason,
+        message: 'The Site Manager account could not be provisioned',
+      });
+      return;
+    }
+
+    // The temporary password is NEVER echoed back.
+    res.status(201).json({ siteManager: { userId: result.userId, mustChangePassword: true } });
+  },
+);
+
+/** CEO re-grants SITE_MANAGER to an existing, previously revoked privileged identity. */
+accountsRouter.post(
+  '/admin/site-managers/:id/grant',
+  requireAuth,
+  managerAccountLimiter,
+  (req: Request, res: Response) => changeSiteManagerGrant(req, res, 'grant'),
+);
+
+/** CEO revokes SITE_MANAGER. The account and its identity survive; only the authority is withdrawn. */
+accountsRouter.post(
+  '/admin/site-managers/:id/revoke',
+  requireAuth,
+  managerAccountLimiter,
+  (req: Request, res: Response) => changeSiteManagerGrant(req, res, 'revoke'),
+);
+
+async function changeSiteManagerGrant(
+  req: Request,
+  res: Response,
+  action: 'grant' | 'revoke',
+): Promise<void> {
+  const actorUserId = await authorizeCeo(req, res);
+  if (!actorUserId) return;
+
+  const params = privilegedUserIdParamsSchema.safeParse(req.params);
+  if (!params.success) {
+    sendValidationError(res, params.error.issues);
+    return;
+  }
+  // The body carries nothing: the role is fixed by the endpoint, so no
+  // request can widen a SITE_MANAGER change into a CEO change.
+  const body = privilegedRoleChangeBodySchema.safeParse(req.body ?? {});
+  if (!body.success) {
+    sendValidationError(res, body.error.issues);
+    return;
+  }
+
+  const deps = resolveDeps();
+  if (!deps) {
+    sendAccountAdminUnavailable(res);
+    return;
+  }
+  const privileged = resolvePrivilegedAdmin();
+  if (!privileged) {
+    sendPrivilegedChannelUnavailable(res);
+    return;
+  }
+
+  const result = action === 'grant'
+    ? await grantSiteManager(actorUserId, params.data.id, deps, privileged)
+    : await revokeSiteManager(actorUserId, params.data.id, deps, privileged);
+
+  if (result.outcome === 'not_found') {
+    res.status(404).json({ error: 'not_found', message: 'Privileged account not found' });
+    return;
+  }
+  if (result.outcome === 'refused') {
+    // A normal employee can never be promoted, the CEO tier is not
+    // reachable from here, and an account already in the requested state
+    // is a conflict rather than a silent success.
+    res.status(409).json({
+      error: 'conflict',
+      reason: result.reason,
+      message: 'That privileged role change is not permitted',
+    });
+    return;
+  }
+  if (result.outcome === 'failed') {
+    res.status(503).json({
+      error: 'privileged_change_failed',
+      reason: result.reason,
+      message: 'The privileged role could not be changed. Please try again.',
+    });
+    return;
+  }
+
+  res.status(200).json({ status: 'ok', siteManager: { userId: params.data.id, active: action === 'grant' } });
+}

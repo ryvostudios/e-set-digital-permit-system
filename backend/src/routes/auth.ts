@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { resolveUserCapabilities } from '../authz/capabilities.js';
 import { resolvePrivilegedAccess } from '../authz/privilegedAccess.js';
 import { query } from '../db/pool.js';
+import { resolvePrivilegedDisplayName } from '../domain/accounts/privilegedIdentities.js';
 import { requireAuthDuringPasswordChange } from '../middleware/auth.js';
 
 export const authRouter = Router();
@@ -18,8 +19,9 @@ export const authRouter = Router();
  * Returns null while a profile is missing - never an email, never a
  * client-supplied name, never a guess. A CEO or E-SET SITE_MANAGER is a
  * privileged SYSTEM account with no Company, Team or Position, so this is
- * legitimately null for them and `privilegedRoles` is what identifies
- * them; they are never presented as normal E-SET company members.
+ * legitimately null for them: `privilegedRoles` identifies them and
+ * `privilegedDisplayName` carries their authoritative personal name.
+ * They are never presented as normal E-SET company members.
  */
 async function loadOwnProfile(userId: string): Promise<{
   displayName: string;
@@ -40,6 +42,7 @@ async function loadOwnProfile(userId: string): Promise<{
        JOIN companies c ON c.id = wp.company_id
        JOIN user_team_positions utp
          ON utp.user_id = wp.user_id AND utp.team_position_id = wp.primary_team_position_id
+        AND utp.ended_at IS NULL
        JOIN team_positions tp ON tp.id = wp.primary_team_position_id
        JOIN teams t ON t.id = tp.team_id
        JOIN positions p ON p.id = tp.position_id
@@ -78,10 +81,11 @@ authRouter.get('/auth/me', requireAuthDuringPasswordChange, async (req: Request,
   // `mustChangePassword` is the ONLY credential information exposed - a
   // single boolean. No password, temporary password, token, credential
   // timestamp, Auth admin detail, or reason-for-reset is returned.
-  const [capabilities, privilegedRoles, profile] = await Promise.all([
+  const [capabilities, privilegedRoles, profile, privilegedDisplayName] = await Promise.all([
     resolveUserCapabilities(req.auth.id),
     resolvePrivilegedAccess(req.auth.id),
     loadOwnProfile(req.auth.id),
+    resolvePrivilegedDisplayName(req.auth.id),
   ]);
   res.status(200).json({
     // Explicitly shaped, never a spread of the internal identity object:
@@ -99,6 +103,13 @@ authRouter.get('/auth/me', requireAuthDuringPasswordChange, async (req: Request,
     // request (authz/accountManagement.ts). It exposes nothing about any
     // other account.
     privilegedRoles: [...privilegedRoles],
+    // A privileged system account's authoritative personal name, from
+    // `privileged_identities` (migration 0019). It is the ONLY identity
+    // field such an account has - there is no company, team or position
+    // to report, and none is fabricated. Null for a normal employee,
+    // whose name lives in `profile.displayName` instead, so exactly one
+    // of the two is ever populated.
+    privilegedDisplayName,
     capabilities: [...capabilities],
   });
 });

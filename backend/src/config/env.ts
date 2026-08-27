@@ -95,6 +95,28 @@ export const envSchema = z
     MIGRATION_DATABASE_URL: z.string().min(1).refine(isPostgresConnectionString, {
       message: 'MIGRATION_DATABASE_URL must be a postgresql:// or postgres:// connection string',
     }).optional(),
+    /**
+     * A SEPARATE, server-only login used for exactly one thing: appending
+     * CEO-authorized SITE_MANAGER grant/revoke events. It must be the
+     * dedicated `privileged_runtime` role, which holds only CONNECT,
+     * schema USAGE, and EXECUTE on the one hardened grant function - no
+     * table DML at all (DEPLOYMENT.md). It is never the migration owner,
+     * never `postgres`, and never the ordinary runtime login.
+     *
+     * OPTIONAL by design: the backend starts and serves every ordinary
+     * request without it. Only the CEO-only Site Manager endpoints depend
+     * on it, and they fail closed with a sanitized 503 when it is absent -
+     * the same posture the Auth Admin credential already uses. A
+     * deployment that never performs privileged administration therefore
+     * never has to hold this credential at all.
+     */
+    PRIVILEGED_DATABASE_URL: z
+      .string()
+      .min(1)
+      .refine(isPostgresConnectionString, {
+        message: 'PRIVILEGED_DATABASE_URL must be a postgresql:// or postgres:// connection string',
+      })
+      .optional(),
     DB_SSL: booleanFlag.default(true),
     // Path to a PEM-encoded CA certificate to trust for the database TLS
     // connection (e.g. Supabase's CA). Optional; when unset and DB_SSL is

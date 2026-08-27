@@ -8,12 +8,32 @@ import { getSupabaseAdminClient } from '../lib/supabaseAdmin.js';
 const bootstrapEnvSchema = z.object({
   BOOTSTRAP_CEO_EMAIL: z.string().trim().email().max(254),
   BOOTSTRAP_CEO_PASSWORD: z.string().min(12).max(256),
-  BOOTSTRAP_CEO_NAME: z.string().trim().min(1).max(120).optional(),
+  // REQUIRED: a CEO is a privileged system account whose only identity
+  // field is their authoritative personal display name (migration 0019).
+  // There is no workforce profile to fall back on, and a name is never
+  // derived from the email address.
+  BOOTSTRAP_CEO_NAME: z.string().trim().min(1).max(120),
 });
 
 export interface BootstrapAdmin {
   createUser(input: { email: string; password: string; email_confirm: true }): Promise<{ user: { id: string } | null; error: boolean }>;
   findUserByEmail(email: string): Promise<{ id: string } | null>;
+}
+
+/**
+ * Whether an Auth identity already belongs to a normal organizational
+ * employee. Reconciling the bootstrap onto such an identity would make
+ * one person simultaneously a workforce employee and the CEO - exactly
+ * the combination migrations 0018/0019 forbid in both directions - so
+ * the bootstrap refuses instead. Nothing is deleted or converted to make
+ * it succeed; promoting an employee is not an automatic workflow.
+ */
+async function isWorkforceEmployee(queryFn: QueryFn, userId: string): Promise<boolean> {
+  const result = await queryFn<{ user_id: string }>(
+    'SELECT user_id FROM workforce_profiles WHERE user_id = $1',
+    [userId],
+  );
+  return result.rows.length > 0;
 }
 
 export interface BootstrapCeoDeps {
@@ -25,7 +45,10 @@ export interface BootstrapCeoDeps {
 
 export type BootstrapCeoResult =
   | { outcome: 'ok'; userId: string; authUserCreated: boolean }
-  | { outcome: 'conflict'; reason: 'ceo_exists' | 'bootstrap_in_progress' | 'different_email_reserved' };
+  | {
+      outcome: 'conflict';
+      reason: 'ceo_exists' | 'bootstrap_in_progress' | 'different_email_reserved' | 'email_belongs_to_employee';
+    };
 
 async function findActiveCeo(queryFn: QueryFn): Promise<string | null> {
   const result = await queryFn<{ user_id: string }>(
@@ -74,7 +97,7 @@ async function findOrCreateAuthUser(admin: BootstrapAdmin, email: string, passwo
 }
 
 export async function bootstrapInitialCeo(
-  input: { email: string; password: string; name?: string | undefined },
+  input: { email: string; password: string; name: string },
   deps: BootstrapCeoDeps,
 ): Promise<BootstrapCeoResult> {
   if (await findActiveCeo(deps.query)) return { outcome: 'conflict', reason: 'ceo_exists' };
@@ -83,6 +106,16 @@ export async function bootstrapInitialCeo(
   if (conflict) return conflict;
 
   const auth = await findOrCreateAuthUser(deps.admin, input.email, input.password);
+
+  // The reconciliation path above may have adopted a PRE-EXISTING Auth
+  // identity. If that identity is a normal employee, refuse before any
+  // privileged row is written - the database would refuse the grant
+  // anyway (migration 0019), but failing here keeps the bootstrap
+  // reservation recoverable and the error precise.
+  if (await isWorkforceEmployee(deps.query, auth.userId)) {
+    return { outcome: 'conflict', reason: 'email_belongs_to_employee' };
+  }
+
   await deps.query(
     `UPDATE initial_ceo_bootstrap SET auth_user_id = $2, updated_at = now()
       WHERE singleton = TRUE AND status = 'RESERVED' AND claim_token = $1`,
@@ -107,10 +140,21 @@ export async function bootstrapInitialCeo(
       [auth.userId],
     );
     if (access.rows[0]?.state !== 'ACTIVE') return false;
+    // Re-checked INSIDE the transaction: the employee check above ran on
+    // a separate connection, so this is the one that actually races with
+    // concurrent provisioning. Migration 0019's trigger is the final
+    // backstop on the grant itself.
+    if (await isWorkforceEmployee(client.query.bind(client), auth.userId)) return false;
+    // The CEO's authoritative personal identity. No company, team or
+    // position is created - a privileged system account has none.
+    await client.query(
+      'INSERT INTO privileged_identities (user_id, display_name) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING',
+      [auth.userId, input.name],
+    );
     await client.query(
       `INSERT INTO privileged_access_events (user_id, role, action, actor_user_id, reason)
        VALUES ($1, 'CEO', 'GRANTED', NULL, $2)`,
-      [auth.userId, `Initial CEO bootstrap via bootstrap:ceo CLI${input.name ? ` (${input.name})` : ''}`],
+      [auth.userId, 'Initial CEO bootstrap via bootstrap:ceo CLI'],
     );
     const completed = await client.query(
       `UPDATE initial_ceo_bootstrap

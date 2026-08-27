@@ -139,6 +139,140 @@ they depend on the actual deployment topology:
   `anon` and `authenticated` roles remain default-deny with no table grants
   and no policies.
 
+- **Privileged identity and launch organization (migrations 0019, 0020
+  and 0021 are APPLIED and live-verified).** 0019 refuses to run
+  if any team or assignment already exists, or if any user already holds
+  both a workforce profile and an active privileged grant; 0020 refuses
+  to seed into a non-empty organization. Verify all three counts are zero
+  before applying, and never bypass a guard by deleting or reassigning
+  data.
+
+  Applied and verified live: 7 teams, 12 positions, 18 Team + Position
+  combinations all `site_manager_assignable`, 17 permit-apply holders
+  (E-SET E-BOP CRO excluded), exactly 1 CRO holder and exactly 2 E-SET HSE
+  holders, and `employee.*` mapped to no Team + Position.
+
+  The **applied** `app_runtime` privilege delta was:
+  ```sql
+  GRANT SELECT, INSERT ON TABLE public.privileged_identities TO app_runtime;
+  ```
+  That is the whole delta, and it contains nothing that can write
+  privileged authority. 0020 requires no privilege change at all.
+
+  **`app_runtime` must NOT receive, and 0019 defensively revokes:** INSERT
+  (or any privilege) on `privileged_access_events`, USAGE on its
+  `ordinal` sequence, and EXECUTE on
+  `public.record_site_manager_grant(UUID, UUID, TEXT)`. This is the
+  security boundary of the whole privileged tier. Granting EXECUTE to
+  `app_runtime` was implemented and then rejected during review: it left
+  possession of `DATABASE_URL` alone sufficient to grant SITE_MANAGER,
+  because the caller can simply pass the real CEO's id as the actor.
+  Route-level CEO checks mean nothing to someone speaking SQL directly,
+  and that credential is the one every request already uses.
+
+- **Dedicated privileged database role (operator-created, required before
+  CEO Site Manager administration works).** Create a SEPARATE login and
+  give the backend its connection string as `PRIVILEGED_DATABASE_URL`.
+  Choose and store the password out of band - it must never appear in a
+  migration, in source, in a doc example, in a test, or in git.
+
+  ```sql
+  -- Password supplied by the operator at creation time; never committed.
+  CREATE ROLE privileged_runtime
+    LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
+
+  GRANT CONNECT ON DATABASE <database> TO privileged_runtime;
+  GRANT USAGE ON SCHEMA public TO privileged_runtime;
+  GRANT EXECUTE ON FUNCTION
+    public.record_site_manager_grant(UUID, UUID, TEXT) TO privileged_runtime;
+  ```
+
+  That is its COMPLETE privilege set. It must have no SELECT on any
+  application table, no INSERT/UPDATE/DELETE/TRUNCATE anywhere, no schema
+  `CREATE`, no ownership, no `schema_migrations` access, no sequence
+  privileges, and no EXECUTE on any other function. It is neither the
+  migration owner nor `postgres`, and the Supabase `service_role` key is
+  not a database credential and must never be used as one. `NOBYPASSRLS`
+  is deliberate: unlike `app_runtime` it never needs to read past RLS,
+  because it reads nothing - the `SECURITY DEFINER` function does all the
+  work under the function owner's rights.
+
+  The backend uses this login through a small dedicated pool
+  (`backend/src/db/privilegedPool.ts`, max 2 connections) whose exported
+  surface is only `recordSiteManagerGrant` / `recordSiteManagerRevoke` -
+  no pool, client, or generic query escapes it, so no permit, account, or
+  notification service can reach through it.
+
+  There are then TWO independent gates on every grant/revoke, neither
+  sufficient alone: the HTTP layer re-resolves the authenticated caller as
+  an active CEO, and the database function independently re-derives the
+  supplied actor's CEO status. A leaked `app_runtime` credential passes
+  neither, because it cannot reach the function at all.
+
+  If `PRIVILEGED_DATABASE_URL` is absent the CEO-only Site Manager
+  endpoints return a sanitized 503 (`privileged_management_unavailable`)
+  and every other endpoint is unaffected - the backend starts and serves
+  normally. Connection strings and passwords never reach a log line;
+  database errors are sanitized through `toSafeDbErrorMessage`.
+
+  **OUTSTANDING OPERATOR DECISION - `service_role` DML.** Live
+  verification found that Supabase's default privileges on schema `public`
+  give the built-in `service_role` full `INSERT/UPDATE/DELETE/TRUNCATE` on
+  every application table, including `privileged_access_events` and
+  `privileged_identities`. `service_role` cannot log in directly
+  (`rolcanlogin = false`) but is reachable through PostgREST with the
+  Supabase service key, so a holder of that key can append a privileged
+  event directly and thereby grant SITE_MANAGER or CEO - bypassing both
+  the HTTP gate and the dedicated `privileged_runtime` channel.
+
+  This is pre-existing and schema-wide (it applies equally to migrations
+  0001-0018), NOT introduced by Layer 1, and it was deliberately not
+  changed unilaterally: narrowing `service_role` affects Supabase Studio
+  and other managed tooling across the whole project. Migration 0021 did
+  remove the equivalent `EXECUTE` grant on the privileged grant function.
+  What still holds regardless: migration 0004's `forbid_mutation` triggers
+  refuse UPDATE/DELETE/TRUNCATE on the grant log for EVERY role including
+  `service_role`, so existing history cannot be altered or erased by any
+  credential - only appended to.
+
+  If you accept the trade-off, the minimal narrowing is:
+  ```sql
+  REVOKE INSERT, UPDATE, DELETE, TRUNCATE
+    ON TABLE public.privileged_access_events FROM service_role;
+  REVOKE INSERT, UPDATE, DELETE, TRUNCATE
+    ON TABLE public.privileged_identities FROM service_role;
+  ```
+  `SELECT` is retained so dashboard/read tooling keeps working. Verify
+  nothing in your Supabase workflow writes those two tables first. Treat
+  `SUPABASE_SERVICE_ROLE_KEY` as a break-glass credential either way.
+
+  **Pre-existing gap this exposes:** `npm run bootstrap:ceo` connects with
+  `DATABASE_URL` (`app_runtime`) and writes a CEO grant directly, so it
+  needs INSERT on `privileged_access_events` AND access to
+  `initial_ceo_bootstrap` - neither of which `app_runtime` has, and
+  neither of which it should be given. That is why no CEO has ever been
+  bootstrapped here. Run the one-time bootstrap under the **operator**
+  credential (point `DATABASE_URL` at it for that single invocation)
+  rather than widening the runtime role for an operator action. Note
+  `privileged_runtime` cannot do it either: it can only grant
+  SITE_MANAGER, never CEO.
+
+  Do NOT grant `app_runtime` UPDATE or DELETE on `privileged_identities`,
+  DELETE on `user_team_positions`, any privilege on `teams`, `positions`,
+  `team_positions` or `team_position_capabilities` beyond the SELECT it
+  already holds, ownership, DDL, schema `CREATE`, or migration-ledger
+  access. Browser `anon` and `authenticated` remain default-deny with no
+  table grants and no policies.
+
+  `UPDATE` on `user_team_positions` (to stamp `ended_at` on a transfer) is
+  NOT required yet and is deliberately not granted here - the employee
+  transfer endpoint is a later layer. Grant it when that lands.
+
+  `BOOTSTRAP_CEO_NAME` is now REQUIRED by `npm run bootstrap:ceo`: a CEO
+  is a privileged system account whose only identity field is their
+  authoritative personal display name. The bootstrap refuses to adopt a
+  pre-existing Auth identity that belongs to a normal employee.
+
 - **Private PDF Storage.** Create the configured bucket manually as
   private (`public=false`), restrict MIME types to `application/pdf`, and
   set a sensible non-null size limit. Configure the four Storage S3

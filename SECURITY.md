@@ -74,6 +74,30 @@ pass.
 
 ## Privileged Management Access
 
+The privileged grant log is written through a SEPARATE database login.
+The ordinary runtime credential (`app_runtime`) holds no INSERT on
+`privileged_access_events`, no privilege on its sequence, and no EXECUTE
+on `public.record_site_manager_grant` - verified live by attempting both
+as that role and being denied. Grants and revokes travel over a dedicated
+`privileged_runtime` login whose entire privilege set is CONNECT, schema
+USAGE, and EXECUTE on that one hardened SECURITY DEFINER function. Two
+independent gates apply: the HTTP layer re-resolves the caller as an
+active CEO, and the function independently re-derives the supplied
+actor's CEO status. The role it writes is a hardcoded literal, so no
+argument can produce a CEO grant.
+
+KNOWN, UNRESOLVED: Supabase's default privileges give the built-in
+`service_role` full DML on every table in `public`, so a holder of the
+Supabase service key can append a privileged event directly through
+PostgREST, bypassing both gates. This is pre-existing and schema-wide
+rather than a property of the privileged tier, and narrowing it is a
+project-wide operator decision (exact SQL in DEPLOYMENT.md). Migration
+0021 removed the equivalent EXECUTE grant on the privileged function.
+Migration 0004's `forbid_mutation` triggers continue to make the log
+append-only for every role, `service_role` included, so recorded history
+cannot be rewritten by any credential. Treat
+`SUPABASE_SERVICE_ROLE_KEY` as a break-glass credential.
+
 Privileged management authority (CEO, Site Manager) is separate from
 operational Team + Position capabilities, and carries its own security
 requirements:

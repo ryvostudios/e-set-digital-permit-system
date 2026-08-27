@@ -62,6 +62,29 @@ export const createEmployeeBodySchema = z
   })
   .strict();
 
+/**
+ * CEO establishes an E-SET SITE_MANAGER privileged account.
+ *
+ * Deliberately carries NO company, team, or position field: a privileged
+ * system account has none, and `.strict()` means a client that supplies
+ * one is rejected rather than silently ignored. It also carries no role
+ * field - the role this endpoint grants is fixed in the service, so no
+ * request body can choose CEO.
+ */
+export const createSiteManagerBodySchema = z
+  .object({
+    email: z.string().trim().email().max(254),
+    temporaryPassword: passwordSchema,
+    displayName: z.string().trim().min(1).max(120),
+  })
+  .strict();
+
+/** Grant/revoke SITE_MANAGER. The target is the validated route parameter; the body carries nothing at all. */
+export const privilegedRoleChangeBodySchema = z.object({}).strict();
+
+/** The privileged account a CEO-only action targets. */
+export const privilegedUserIdParamsSchema = z.object({ id: z.string().uuid() }).strict();
+
 /** Site Manager forgotten-password reset. The target comes from the authenticated, validated route parameter - never from the body. */
 export const resetEmployeePasswordBodySchema = z
   .object({

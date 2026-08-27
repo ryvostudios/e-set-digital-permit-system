@@ -108,6 +108,55 @@ Versioned, plain SQL migration files, applied in filename order by
   `app_runtime` pool, SELECT on `companies` succeeding while INSERT, UPDATE,
   DELETE, TRUNCATE and `schema_migrations` access are all denied.
 
+- `0019_privileged_identity_and_assignment_history.sql`: **APPLIED /
+  LIVE-VERIFIED**. Adds `privileged_identities` (the
+  authoritative display name of a CEO / E-SET SITE_MANAGER, with no
+  company, team or position); closes the privileged/employee invariant in
+  its second direction by refusing a privileged GRANT or identity for any
+  user holding a workforce profile (a REVOKE is never blocked); binds
+  every team to exactly one company and enforces that an employee's
+  company owns the team behind their assignment; and adds
+  `started_at`/`ended_at` to `user_team_positions` with a partial unique
+  index giving each user exactly one CURRENT assignment while preserving
+  every past one. It refuses to run if any team or assignment already
+  exists, or if any user already holds both a profile and an active
+  privileged grant - none of which it will guess or silently repair. It also
+  adds `record_site_manager_grant()` - the ONLY `SECURITY DEFINER`
+  function in the schema - which a SEPARATE operator-created
+  `privileged_runtime` login executes. The ordinary runtime role receives
+  neither INSERT on `privileged_access_events` nor EXECUTE on that
+  function (0019 revokes it defensively if the role exists), so
+  possession of the ordinary database credential alone cannot grant
+  SITE_MANAGER. The role the function writes is a hardcoded literal, not
+  a parameter, so CEO is unreachable by any argument. The other five new functions are SECURITY
+  INVOKER; all six pin `search_path` to `pg_catalog` and fully qualify
+  every object. The new table is RLS-enabled with no policies and no
+  browser grants.
+
+- `0020_organization_launch_seed.sql`: **APPLIED / LIVE-VERIFIED**. Seeds the confirmed launch organization - 7 teams, 12
+  positions, 18 Team + Position combinations - marks all 18 approved for
+  employee provisioning, and seeds the initial capability mapping using
+  only capability NAMES already seeded by 0005/0009/0017. Permit
+  application goes to all combinations except E-SET E-BOP CRO; CRO
+  workflow authority and the CRO-only operational actions go to E-SET
+  E-BOP CRO alone; `permit.hse_review` goes to E-SET HSE Team Lead and
+  Paramedic alone. It creates no table, function, trigger, policy or
+  grant and needs no `app_runtime` privilege change, refuses to seed into
+  a non-empty organization, and ends with a self-verification block that
+  fails the migration if the resulting authorization shape is wrong.
+
+- `0021_privileged_function_execute_lockdown.sql`: **APPLIED /
+  LIVE-VERIFIED**. Removes the Supabase default `EXECUTE` grant that
+  `service_role` received on `public.record_site_manager_grant`, which
+  0019's role-listed REVOKE could not remove because it did not name that
+  role. Live verification found the function's ACL was
+  `{postgres=X/postgres, service_role=X/postgres}`; it is now
+  `{postgres=X/postgres}`. The migration re-asserts the full intended
+  lockdown and ends with a self-verification block that fails rather than
+  leave the privileged function over-granted. It does NOT address the
+  broader, pre-existing fact that `service_role` holds full DML on every
+  application table - see DEPLOYMENT.md for that outstanding decision.
+
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
 later, scoped implementation sections — not here.

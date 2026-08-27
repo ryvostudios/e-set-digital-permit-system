@@ -52,6 +52,7 @@ let privilegedGrants: Record<string, string[]> = {};
 let mustChangePassword = false;
 let knownTeamPositions: string[] = [];
 let knownCompanyCodes: string[] = [];
+let knownPrivilegedIdentities: string[] = [];
 let knownAccessRows: string[] = [];
 let capturedQueries: Array<{ sql: string; params: unknown[] }> = [];
 
@@ -92,6 +93,9 @@ before(() => {
           : [],
       };
     }
+    if (sql.startsWith('SELECT user_id FROM privileged_identities')) {
+      return { rows: knownPrivilegedIdentities.includes(String(params[0])) ? [{ user_id: params[0] }] : [] };
+    }
     if (sql.includes('FROM workforce_profiles')) return { rows: [] };
     return { rows: [] };
   }) as unknown as typeof Pool.prototype.query;
@@ -113,6 +117,7 @@ beforeEach(() => {
   mustChangePassword = false;
   knownTeamPositions = [TEAM_POSITION_ID];
   knownCompanyCodes = ['E_SET', 'ZPL', 'SGRE'];
+  knownPrivilegedIdentities = [];
   knownAccessRows = [EMPLOYEE_ID];
   capturedQueries = [];
 });
@@ -441,6 +446,135 @@ test('reset rejects a non-UUID target and any extra body field', async () => {
   }
 });
 
+
+const validSiteManagerBody = {
+  email: 'manager@example.com',
+  temporaryPassword: FAKE_TEMPORARY_PASSWORD,
+  displayName: 'Bilal Ahmed',
+};
+
+// ---------------------------------------------------------------------
+// Privileged tier: CEO-only Site Manager administration
+// ---------------------------------------------------------------------
+
+test('Site Manager administration requires authentication', async () => {
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await post(url, '/admin/site-managers', undefined, validSiteManagerBody)).status, 401);
+    assert.equal((await post(url, `/admin/site-managers/${EMPLOYEE_ID}/grant`, undefined, {})).status, 401);
+    assert.equal((await post(url, `/admin/site-managers/${EMPLOYEE_ID}/revoke`, undefined, {})).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('a SITE_MANAGER cannot create, grant, or revoke another SITE_MANAGER - CEO only', async () => {
+  // This asymmetry is what keeps CEO strictly above Site Manager: a Site
+  // Manager holds full authority over NORMAL employees and none at all
+  // over the privileged tier.
+  for (const path of [
+    '/admin/site-managers',
+    `/admin/site-managers/${EMPLOYEE_ID}/grant`,
+    `/admin/site-managers/${EMPLOYEE_ID}/revoke`,
+  ]) {
+    authenticatedUserId = nextActorId();
+    authorizeSiteManager();
+    const { url, close } = await startServer();
+    try {
+      const body = path.endsWith('site-managers') ? validSiteManagerBody : {};
+      const response = await post(url, path, VALID_TOKEN, body);
+      assert.equal(response.status, 403, `${path} must be CEO-only`);
+      // Refused before any Auth Admin work was attempted.
+      assert.notEqual(response.status, 503);
+    } finally {
+      await close();
+    }
+  }
+});
+
+test('an ordinary employee - including a ZPL organizational Site Manager - cannot reach the privileged tier', async () => {
+  // A ZPL "Site Manager" is Team + Position data and grants nothing. The
+  // gate reads the privileged grant log, which is empty here.
+  grantedCapabilities = ['permit.create', 'permit.submit', 'employee.create'];
+  privilegedGrants = {};
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await post(url, '/admin/site-managers', VALID_TOKEN, validSiteManagerBody)).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('a CEO passes the privileged gate and reaches the provisioning step', async () => {
+  authorizeCeo();
+  const { url, close } = await startServer();
+  try {
+    // 503 = the Auth Admin boundary, only reachable AFTER authorization.
+    const response = await post(url, '/admin/site-managers', VALID_TOKEN, validSiteManagerBody);
+    assert.equal(response.status, 503);
+    assert.equal(((await response.json()) as { error: string }).error, 'account_management_unavailable');
+  } finally {
+    await close();
+  }
+});
+
+test('Site Manager creation refuses any organizational or role field', async () => {
+  const { url, close } = await startServer();
+  try {
+    for (const extra of [
+      { role: 'CEO' },
+      { privilegedRole: 'CEO' },
+      { companyCode: 'E_SET' },
+      { companyId: COMPANY_ID },
+      { teamPositionId: TEAM_POSITION_ID },
+      { teamName: 'Admin' },
+      { positionName: 'Site Manager' },
+      { capabilities: ['permit.close'] },
+      { userId: CEO_ID },
+      { mustChangePassword: false },
+      { state: 'ACTIVE' },
+    ]) {
+      authenticatedUserId = nextActorId();
+      authorizeCeo();
+      const response = await post(url, '/admin/site-managers', VALID_TOKEN, { ...validSiteManagerBody, ...extra });
+      assert.equal(response.status, 400, `expected ${JSON.stringify(extra)} to be rejected`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('grant and revoke accept no body fields and no non-UUID target', async () => {
+  const { url, close } = await startServer();
+  try {
+    authorizeCeo();
+    assert.equal((await post(url, '/admin/site-managers/not-a-uuid/revoke', VALID_TOKEN, {})).status, 400);
+    authenticatedUserId = nextActorId();
+    authorizeCeo();
+    // The role is fixed by the endpoint: no body can widen it to CEO.
+    assert.equal((await post(url, `/admin/site-managers/${EMPLOYEE_ID}/grant`, VALID_TOKEN, { role: 'CEO' })).status, 400);
+    authenticatedUserId = nextActorId();
+    authorizeCeo();
+    assert.equal((await post(url, `/admin/site-managers/${EMPLOYEE_ID}/revoke`, VALID_TOKEN, { userId: CEO_ID })).status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test('the employee endpoints can never write a privileged grant or identity', async () => {
+  authorizeSiteManager();
+  const { url, close } = await startServer();
+  try {
+    await post(url, '/admin/employees', VALID_TOKEN, validCreateBody);
+    for (const { sql } of capturedQueries) {
+      assert.doesNotMatch(sql, /INSERT\s+INTO\s+privileged_access_events/i);
+      assert.doesNotMatch(sql, /INSERT\s+INTO\s+privileged_identities/i);
+    }
+  } finally {
+    await close();
+  }
+});
+
 // ---------------------------------------------------------------------
 // Self-service password change
 // ---------------------------------------------------------------------
@@ -589,6 +723,7 @@ test('/auth/me exposes only safe state - never a credential, token, or admin det
       'auth',
       'capabilities',
       'mustChangePassword',
+      'privilegedDisplayName',
       'privilegedRoles',
       'profile',
     ]);
@@ -596,8 +731,10 @@ test('/auth/me exposes only safe state - never a credential, token, or admin det
     assert.equal(body.accessState, 'ACTIVE');
     assert.deepEqual(body.capabilities, ['permit.create']);
     assert.deepEqual(body.privilegedRoles, []);
-    // No profile is invented when none is provisioned.
+    // No profile is invented when none is provisioned, and no privileged
+    // name is invented for a non-privileged account either.
     assert.equal(body.profile, null);
+    assert.equal(body.privilegedDisplayName, null);
 
     // `mustChangePassword` is the ONE sanctioned credential-state field
     // (a boolean). Nothing else credential-related may appear - and no
@@ -621,7 +758,7 @@ test('EVERY authenticated application route is behind the forced-password gate',
   // route added later without the gate fails this test.
   mustChangePassword = true;
   grantedCapabilities = ['permit.create', 'permit.submit', 'permit.close', 'employee.create', 'employee.reset_password'];
-  privilegedGrants = { [authenticatedUserId]: ['SITE_MANAGER'] };
+  privilegedGrants = { [authenticatedUserId]: ['CEO', 'SITE_MANAGER'] };
   const { url, close } = await startServer();
   try {
     const guarded: Array<[string, string]> = [
@@ -636,6 +773,9 @@ test('EVERY authenticated application route is behind the forced-password gate',
       ['POST', `/notifications/${EMPLOYEE_ID}/read`],
       ['POST', '/admin/employees'],
       ['POST', `/admin/employees/${EMPLOYEE_ID}/reset-password`],
+      ['POST', '/admin/site-managers'],
+      ['POST', `/admin/site-managers/${EMPLOYEE_ID}/grant`],
+      ['POST', `/admin/site-managers/${EMPLOYEE_ID}/revoke`],
     ];
     for (const [method, path] of guarded) {
       const response = method === 'GET'
