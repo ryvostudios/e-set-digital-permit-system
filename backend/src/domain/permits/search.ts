@@ -67,8 +67,22 @@ export interface PermitSearchFilters {
  * a search can never surface a permit `canViewPermit` would deny.
  */
 function buildSearchWhere(access: PermitSearchAccess, filters: PermitSearchFilters): { clause: string; params: unknown[] } {
-  const params: unknown[] = [access.viewerId, access.allowedStatuses];
-  let clause = access.viewAll ? 'TRUE' : '(p.created_by = $1 OR p.status = ANY($2))';
+  // Bind the access parameters ONLY when the clause actually references
+  // them. A broad-visibility caller needs no ownership/status predicate,
+  // so binding `viewerId`/`allowedStatuses` anyway left them unreferenced
+  // in the SQL - which PostgreSQL rejects outright ("could not determine
+  // data type of parameter $1", and on the COUNT query "bind message
+  // supplies 2 parameters, but prepared statement requires 0") rather
+  // than ignoring. Every filter below numbers itself from
+  // `params.length`, so both shapes stay correctly numbered.
+  const params: unknown[] = [];
+  let clause: string;
+  if (access.viewAll) {
+    clause = 'TRUE';
+  } else {
+    params.push(access.viewerId, access.allowedStatuses);
+    clause = '(p.created_by = $1 OR p.status = ANY($2))';
+  }
 
   if (filters.permitNumber !== undefined) {
     params.push(String(filters.permitNumber));
