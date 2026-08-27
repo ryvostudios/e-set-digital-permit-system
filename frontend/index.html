@@ -2,11 +2,25 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>E-Set Digital Permit System</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light" />
+    <!-- Brand colours, from src/styles/tokens.css. Kept in step with the manifest. -->
+    <meta name="theme-color" content="#0d4f5c" />
+    <meta name="description" content="E-SET Digital Permit System — Permit to Work for site operations." />
+    <!-- This is an internal operational system; it must never be indexed. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <!-- A permit URL is not a secret, but it should not leak to third parties either. -->
+    <meta name="referrer" content="same-origin" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>E-SET Digital Permit System</title>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      This application needs JavaScript. Please enable it, or contact your E-SET Site Manager.
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

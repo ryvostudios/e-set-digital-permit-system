@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="E-SET Permit to Work">
+  <rect width="128" height="128" fill="#0d4f5c" />
+  <rect x="42" y="36" width="44" height="56" rx="4" fill="#ffffff" opacity="0.94" />
+  <g stroke="#0d4f5c" stroke-width="5" stroke-linecap="round">
+    <path d="M52 52h24" />
+    <path d="M52 64h18" />
+    <path d="M52 76h24" />
+  </g>
+</svg>

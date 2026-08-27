@@ -1,0 +1,129 @@
+/* Reset and element defaults. Colour comes only from tokens.css. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--page-bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  line-height: var(--leading-tight);
+  font-weight: 600;
+}
+
+h1 {
+  font-size: var(--text-xl);
+}
+h2 {
+  font-size: var(--text-lg);
+}
+h3 {
+  font-size: var(--text-md);
+}
+
+p {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+}
+
+img,
+svg {
+  max-width: 100%;
+  display: block;
+}
+
+a {
+  color: var(--text-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/*
+ * ONE visible focus treatment for the whole application. Never removed,
+ * never replaced by an outline of `none` - keyboard operation of a
+ * safety system must always be visible (WCAG 2.4.7).
+ */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Content that is for assistive technology only. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A skip link that becomes visible when it takes focus. */
+.skip-link {
+  position: absolute;
+  left: var(--space-2);
+  top: -3rem;
+  z-index: 100;
+  padding: var(--space-2) var(--space-4);
+  background: var(--brand-primary);
+  color: var(--brand-on-primary);
+  border-radius: var(--radius);
+  text-decoration: none;
+  transition: top 120ms ease;
+}
+
+.skip-link:focus {
+  top: var(--space-2);
+}
+
+#root {
+  min-height: 100dvh;
+}
+
+/*
+ * Any horizontally wide content (a records table, a paper-form grid)
+ * scrolls INSIDE its own container. The page body must never scroll
+ * sideways.
+ */
+.scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}

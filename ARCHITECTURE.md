@@ -130,6 +130,24 @@ tier from Team + Position capabilities — see `WORKFLOW.md` and
 `DECISIONS.md` for the specific rules governing it. Team + Position must
 never automatically grant CEO or Site Manager authority.
 
+### Administrative directory reads
+
+Three **read-only** endpoints exist so a management screen can name the
+things the mutating account endpoints already accept. They are
+`SELECT`-only (`backend/src/domain/accounts/directory.ts`), require no
+new database privilege, and are gated by exactly the same authorization
+as the corresponding mutations — so they widen no authority:
+
+| Endpoint | Gate | Returns |
+| --- | --- | --- |
+| `GET /api/v1/admin/employees` | CEO **or** E-SET Site Manager | Paginated normal-employee directory, filterable by name/state/company. Accounts holding an active privileged grant are excluded by the query, so the privileged tier cannot be enumerated. No email address, no credential internals. |
+| `GET /api/v1/admin/organization` | CEO **or** E-SET Site Manager | The Company → Team → Position structure a manager may provision into, limited to combinations already flagged `site_manager_assignable` (migration 0020). This is the authoritative source of `teamPositionId`, so no client duplicates the organization model. Capability mappings are not exposed. |
+| `GET /api/v1/admin/site-managers` | **CEO only** | Privileged identities holding (or previously holding) `SITE_MANAGER`, with current grant state. Identities holding an active CEO grant are excluded. |
+
+The frontend holds no organization map of its own; a Team + Position it
+cannot offer is one the mutating endpoints would refuse anyway, because
+both read the same flag from the same table.
+
 ## Data Integrity as an Architectural Concern
 
 The database is the final authority on data integrity, not just storage.

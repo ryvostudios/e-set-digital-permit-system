@@ -137,6 +137,23 @@ export const employeeHistoryQuerySchema = z
   })
   .strict();
 
+/**
+ * Employee directory listing. Bounded pagination identical to the audit
+ * history above, plus the three filters that map onto genuinely existing
+ * columns (display name, account state, company code) - `.strict()`
+ * rejects any other query key rather than ignoring it, so no filter can
+ * be smuggled in that this schema does not name.
+ */
+export const employeeListQuerySchema = z
+  .object({
+    page: z.coerce.number().int().min(1).max(10_000).default(1),
+    pageSize: z.coerce.number().int().min(1).max(100).default(25),
+    search: z.string().trim().min(1).max(120).optional(),
+    state: z.enum(['ACTIVE', 'DISABLED', 'DELETED']).optional(),
+    companyCode: z.enum(COMPANY_CODES).optional(),
+  })
+  .strict();
+
 /** The privileged account a CEO-only action targets. */
 export const privilegedUserIdParamsSchema = z.object({ id: z.string().uuid() }).strict();
 

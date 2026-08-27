@@ -146,6 +146,11 @@ test('every response carries an X-Request-Id header, and an inbound one is echoe
     const unsafeValue = 'has spaces/and/slashes';
     const unsafeInbound = await fetch(`${url}/api/v1/health`, { headers: { 'x-request-id': unsafeValue } });
     assert.notEqual(unsafeInbound.headers.get('x-request-id'), unsafeValue);
+
+    // The correlation id - and ONLY it - is readable cross-origin, so a
+    // browser client can show a reference id when reporting a failure.
+    const crossOrigin = await fetch(`${url}/api/v1/health`, { headers: { origin: 'http://localhost:5173' } });
+    assert.equal(crossOrigin.headers.get('access-control-expose-headers'), 'X-Request-Id');
   } finally {
     await close();
   }

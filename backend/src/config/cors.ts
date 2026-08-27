@@ -37,4 +37,11 @@ export const corsOptions: CorsOptions = {
   },
   credentials: false,
   allowedHeaders: ['Authorization', 'Content-Type'],
+  // The correlation id `middleware/requestLog.ts` already sets on every
+  // response. Without this the browser cannot READ it cross-origin (it
+  // is not a CORS-safelisted response header), so a person could never
+  // quote a reference id to an operator when reporting a failure. It is
+  // a random UUID and carries no account, token, or infrastructure
+  // information; nothing else is exposed.
+  exposedHeaders: ['X-Request-Id'],
 };

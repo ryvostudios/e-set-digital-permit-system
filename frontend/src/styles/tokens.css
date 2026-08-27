@@ -1,0 +1,183 @@
+/*
+ * E-SET Digital Permit System - design tokens.
+ *
+ * ONE SOURCE OF TRUTH FOR COLOUR. Every component in this application
+ * reads colour from a variable declared here; no component hard-codes a
+ * hex value. Rebranding is therefore a change to this file alone.
+ *
+ * The palette is a deep petrol/slate industrial family: calm, high
+ * contrast, and readable under plant lighting on a phone. The accent is
+ * a controlled safety amber used sparingly for attention, never as
+ * decoration. There are deliberately no neon colours, no gradients as
+ * surfaces, and no glass effects: this is controlled paperwork, and it
+ * should read as such.
+ *
+ * STATUS COLOUR IS NEVER THE ONLY SIGNAL. Every status token below is
+ * paired with text in `StatusBadge`; colour reinforces the label, it
+ * never replaces it (WCAG 1.4.1).
+ */
+
+:root {
+  /* ---------- Brand ---------- */
+  --brand-primary: #0d4f5c;
+  --brand-primary-hover: #0a3f4a;
+  --brand-primary-active: #082f38;
+  --brand-primary-soft: #e3f1f3;
+  --brand-primary-border: #b7d9de;
+  --brand-on-primary: #ffffff;
+
+  --brand-secondary: #1f3a4d;
+  --brand-secondary-soft: #eaeff3;
+
+  --accent: #b8600c;
+  --accent-soft: #fdf1e3;
+  --accent-border: #f0cfa8;
+
+  /* ---------- Surfaces ---------- */
+  --page-bg: #f4f6f7;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eef1f3;
+  --surface-header: #f8fafa;
+  --sidebar-bg: #0e2a33;
+  --sidebar-fg: #cfe0e4;
+  --sidebar-fg-muted: #8fa9b1;
+  --sidebar-hover: #163b47;
+  --sidebar-selected: #1d4c5a;
+  --sidebar-border: #1b3f4a;
+
+  /* ---------- Text ---------- */
+  --text: #16232b;
+  --text-muted: #566d78;
+  --text-subtle: #7c9099;
+  --text-inverse: #ffffff;
+  --text-link: #0d4f5c;
+
+  /* ---------- Lines ---------- */
+  --border: #d5dee1;
+  --border-strong: #b3c1c6;
+  --border-input: #a9b8bd;
+  --border-form: #26404b;
+
+  /* ---------- Interaction ---------- */
+  --focus-ring: #0f7f92;
+  --hover-bg: #eef3f4;
+  --selected-bg: #e3f1f3;
+  --disabled-bg: #eceff1;
+  --disabled-fg: #94a4aa;
+  --disabled-border: #d3dadd;
+
+  /* ---------- Feedback ---------- */
+  --success: #17603a;
+  --success-soft: #e6f4ec;
+  --success-border: #b6ddc6;
+
+  --warning: #8a5a06;
+  --warning-soft: #fdf3e0;
+  --warning-border: #efd6a8;
+
+  --danger: #a32020;
+  --danger-hover: #8a1a1a;
+  --danger-soft: #fdeceb;
+  --danger-border: #f0c2bf;
+
+  --info: #10566b;
+  --info-soft: #e7f2f6;
+  --info-border: #b6d6e1;
+
+  /* ---------- Permit statuses ---------- */
+  --status-draft-fg: #4a5a63;
+  --status-draft-bg: #eef1f3;
+  --status-draft-border: #cfd8dc;
+
+  --status-pending-cro-fg: #8a5a06;
+  --status-pending-cro-bg: #fdf3e0;
+  --status-pending-cro-border: #efd6a8;
+
+  --status-pending-hse-fg: #7a4a9c;
+  --status-pending-hse-bg: #f3edf9;
+  --status-pending-hse-border: #d9c8ea;
+
+  --status-pending-correction-fg: #a3521a;
+  --status-pending-correction-bg: #fdefe4;
+  --status-pending-correction-border: #f0cfa8;
+
+  --status-issued-fg: #17603a;
+  --status-issued-bg: #e6f4ec;
+  --status-issued-border: #b6ddc6;
+
+  --status-held-fg: #8a5a06;
+  --status-held-bg: #fbf0d9;
+  --status-held-border: #e8cf95;
+
+  --status-cancelled-fg: #a32020;
+  --status-cancelled-bg: #fdeceb;
+  --status-cancelled-border: #f0c2bf;
+
+  --status-closed-fg: #33505c;
+  --status-closed-bg: #e8eef0;
+  --status-closed-border: #c4d1d6;
+
+  /* ---------- Type ---------- */
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.625rem;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+
+  /* ---------- Space ---------- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  /* ---------- Shape ---------- */
+  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(16, 34, 42, 0.06);
+  --shadow: 0 2px 6px rgba(16, 34, 42, 0.08);
+  --shadow-lg: 0 12px 32px rgba(16, 34, 42, 0.18);
+
+  /* ---------- Layout ---------- */
+  --sidebar-width: 15.5rem;
+  --topbar-height: 3.5rem;
+  --content-max: 78rem;
+
+  /*
+   * The minimum touch target this application ships (WCAG 2.5.8 asks for
+   * 24px; 44px is the comfortable field-work size on a phone with gloves).
+   */
+  --touch-target: 2.75rem;
+}
+
+/*
+ * Honour a reader who has asked for less motion. Nothing in this
+ * application depends on animation to convey meaning, so this can safely
+ * remove all of it.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

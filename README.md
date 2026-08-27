@@ -15,8 +15,7 @@ is not being ported into this system.
 
 ## Project Stage
 
-**Backend implementation in progress; frontend workflow UI not yet
-started.** This repository's documentation set is still the
+**Backend feature-complete; frontend implemented.** This repository's documentation set is still the
 authoritative source of truth for anything not yet superseded by actual
 code/migrations - see [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for
 the current, accurate implementation snapshot before assuming anything
@@ -51,13 +50,25 @@ security mode. Migration `0015_backend_integrity_hardening.sql` is
 outbox integrity protections are active without changing workflow.
 Backend production hardening (rate limiting, security headers, structured logging,
 environment validation, a `/ready` readiness endpoint) is also in place
-- see `PROJECT_CONTEXT.md` for the precise, current breakdown. `frontend/`
-is a React + Vite + TypeScript PWA scaffold with Supabase Auth wired up;
-no permit-workflow UI exists yet. The actual WhatsApp provider
+- see `PROJECT_CONTEXT.md` for the precise, current breakdown. The actual
+WhatsApp provider
 integration and Supabase Storage/PDF credentials remain unconfigured -
 each is either an unresolved business rule (`DECISIONS.md`'s Open
 Decisions) or a manual production-configuration step (`DEPLOYMENT.md`),
 not merely unscheduled.
+
+`frontend/` is a complete React + TypeScript application covering the
+whole agreed product surface: sign-in with Remember Me, the forced
+first-login password change, an operational home screen, permit
+application across all four templates with the paper-form Permit and JSA
+editors, CRO and HSE review queues, permit records/detail/history, the
+secured PDF action, notifications, the full employee lifecycle, and
+CEO-only Site Manager administration - all rendered from what
+`GET /auth/me` and the permit/account APIs actually return. Frontend
+authorization is presentation only; every screen re-asks the backend and
+shows its refusal honestly. See [`frontend/README.md`](./frontend/README.md)
+for its architecture, public environment variables, PWA caching policy,
+and the operator prerequisites it fails closed on.
 
 **Production blocker:** the official Permit/JSA field definitions and form
 layout have not yet been supplied. The immutable snapshot/PDF infrastructure
@@ -70,9 +81,11 @@ frontend must not be treated as complete or extended with guessed fields.
 - **Backend:** Node.js 24.x + Express + TypeScript, REST API (`engines` is
   authoritative; CI/deployment must use the same major)
 - **Database:** PostgreSQL via Supabase infrastructure
-- **Validation:** Zod
-- **Forms:** React Hook Form
-- **Server-state/caching:** TanStack Query
+- **Routing:** React Router
+- **Validation:** Zod (backend; the backend is the authority on every
+  request contract, and the frontend surfaces its field-level issues
+  rather than duplicating the rules)
+- **Frontend testing:** Vitest + Testing Library (jsdom)
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for full detail and rationale.
 

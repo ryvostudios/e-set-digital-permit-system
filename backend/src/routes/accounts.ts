@@ -14,6 +14,7 @@ import {
   transferEmployee,
   updateEmployeeDisplayName,
 } from '../domain/accounts/employees.js';
+import { listEmployees, listSiteManagers, loadOrganization } from '../domain/accounts/directory.js';
 import { setUserCapabilityGrant } from '../domain/accounts/userPermissions.js';
 import { resolveProvisioningCompany } from '../domain/accounts/companies.js';
 import {
@@ -35,6 +36,7 @@ import {
   createSiteManagerBodySchema,
   employeeHistoryQuerySchema,
   employeeIdParamsSchema,
+  employeeListQuerySchema,
   employeePermissionBodySchema,
   privilegedRoleChangeBodySchema,
   privilegedUserIdParamsSchema,
@@ -584,6 +586,81 @@ function sendLifecycleFailure(
     message: 'The change could not be applied. Please try again.',
   });
 }
+
+/**
+ * The normal-employee directory. READ ONLY, behind exactly the same
+ * `authorize()` gate (CEO or E-SET SITE_MANAGER privileged access) as
+ * every mutating employee endpoint below, so it grants no visibility the
+ * caller does not already have. Privileged accounts are excluded by the
+ * query itself, so this can never enumerate the CEO / Site Manager tier.
+ *
+ * Registered BEFORE `/admin/employees/:id`: Express matches in
+ * registration order, and a literal path must be declared ahead of a
+ * param route that could otherwise swallow it.
+ */
+accountsRouter.get(
+  '/admin/employees',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const parsed = employeeListQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      sendValidationError(res, parsed.error.issues);
+      return;
+    }
+    const { page, pageSize, search, state, companyCode } = parsed.data;
+    const result = await listEmployees(query, { search, state, companyCode }, { page, pageSize });
+    res.status(200).json({
+      employees: result.items,
+      pagination: {
+        page,
+        pageSize,
+        totalCount: result.totalCount,
+        totalPages: result.totalCount === 0 ? 0 : Math.ceil(result.totalCount / pageSize),
+      },
+    });
+  },
+);
+
+/**
+ * The operator-owned Team + Position structure a manager may provision
+ * into - the authoritative source for the Company/Team/Position choices
+ * on the create and transfer screens, so no `teamPositionId` ever has to
+ * be duplicated in, or guessed by, a client. Only combinations already
+ * flagged `site_manager_assignable` (migration 0020) are returned, which
+ * is the same flag the create/transfer endpoints independently re-check
+ * before writing anything.
+ */
+accountsRouter.get(
+  '/admin/organization',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    res.status(200).json({ companies: await loadOrganization(query) });
+  },
+);
+
+/**
+ * CEO-ONLY. The Site Manager tier, so the CEO administration screen can
+ * name the identities its grant/revoke endpoints act on. Gated by
+ * `authorizeCeo` - the same narrower gate those mutations use, because a
+ * Site Manager must not be able to enumerate the tier they cannot
+ * administer.
+ */
+accountsRouter.get(
+  '/admin/site-managers',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorizeCeo(req, res);
+    if (!actorUserId) return;
+    res.status(200).json({ siteManagers: await listSiteManagers(query) });
+  },
+);
 
 /** One normal employee's management view. Privileged targets are indistinguishable from missing ones. */
 accountsRouter.get(
