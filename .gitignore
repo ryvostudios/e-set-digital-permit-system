@@ -5,11 +5,17 @@ node_modules/
 .env
 .env.*
 !.env.example
+!.env.e2e
 
 # Builds
 dist/
 build/
 coverage/
+
+# Playwright artifacts (screenshots/traces - never committed)
+frontend/e2e/.artifacts/
+frontend/playwright-report/
+frontend/test-results/
 
 # Logs
 *.log
