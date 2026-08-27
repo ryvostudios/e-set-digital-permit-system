@@ -10,6 +10,7 @@ import {
   type PermitFormVersion,
   type PermitType,
 } from './forms.js';
+import { findUnansweredForSubmission, type UnansweredAnswer } from './formCompleteness.js';
 import {
   ACTIVE_FORM_GENERATION,
   type AnyPermitForm,
@@ -769,7 +770,38 @@ export type SubmitOutcome =
   | { outcome: 'conflict'; reason: 'not_draft' | 'stale_version' }
   | MissingResponsibilityRecipientOutcome
   | { outcome: 'invalid'; reason: 'missing_required_fields' }
+  /**
+   * V2 only: printed safety questions nobody has answered yet. Listed in
+   * printed order and carrying the payload path, so the editor can take
+   * the applicant straight to the first one instead of making them hunt
+   * through a long document.
+   */
+  | { outcome: 'invalid'; reason: 'unanswered_questions'; unanswered: { permit: UnansweredAnswer[]; jsa: UnansweredAnswer[] } }
   | { outcome: 'ok'; permit: PermitRow };
+
+/**
+ * V2 completeness, evaluated against the STORED payloads. Returns the
+ * refusal outcome when anything printed is still unanswered, or null when
+ * the document is ready. V1 permits are unaffected: their contract has no
+ * notion of an unanswered fixed question.
+ */
+async function findUnansweredOnSubmission(
+  client: PoolClient,
+  permit: PermitRow,
+): Promise<{ outcome: 'invalid'; reason: 'unanswered_questions'; unanswered: { permit: UnansweredAnswer[]; jsa: UnansweredAnswer[] } } | null> {
+  if (generationOfPermitFormVersion(permit.form_version) !== 'V2' || !permit.permit_type) return null;
+  const jsaResult = await client.query<{ form_payload: unknown }>(
+    'SELECT form_payload FROM jsas WHERE id = $1',
+    [permit.jsa_id],
+  );
+  const result = findUnansweredForSubmission(
+    permit.permit_type,
+    permit.form_payload,
+    jsaResult.rows[0]?.form_payload ?? null,
+  );
+  if (result.total === 0) return null;
+  return { outcome: 'invalid', reason: 'unanswered_questions', unanswered: { permit: result.permit, jsa: result.jsa } };
+}
 
 /**
  * The completeness bar a permit must clear before it may be submitted or
@@ -820,6 +852,12 @@ export async function submitPermit(
     if (!(await hasCompletedJsa(client, existing.jsa_id))) {
       return { outcome: 'invalid', reason: 'missing_required_fields' };
     }
+
+    // A DRAFT may be incomplete; a SUBMISSION may not. Every printed
+    // question must carry an answer a person actually gave - an
+    // unanswered item is never treated as 'NA'.
+    const unanswered = await findUnansweredOnSubmission(client, existing);
+    if (unanswered) return unanswered;
 
     const applicant = await resolvePermitApplicantAuthority(client.query.bind(client), actorUserId);
     if (!applicant.allowed || !applicant.identity) throw new SigningIdentityUnavailableError(actorUserId);

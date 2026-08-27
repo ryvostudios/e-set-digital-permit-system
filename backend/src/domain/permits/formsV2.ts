@@ -95,7 +95,16 @@ function responseEnum(section: ChecklistSection) {
  * answer rather than an omission.
  */
 function checklistBandSchema(section: ChecklistSection) {
-  const response = responseEnum(section);
+  // NULL MEANS UNANSWERED, AND IT IS NOT 'NA'.
+  //
+  // 'NA' is a deliberate answer a person gives: "I considered this and it
+  // does not apply". A blank draft must never pre-supply it, or the
+  // issued permit would record a safety judgement nobody made. So the
+  // stored shape carries an explicit null until someone answers, every
+  // printed item is still a REQUIRED KEY (the question cannot vanish),
+  // and `findUnansweredPermitAnswers` below refuses the submission while
+  // any null remains.
+  const response = responseEnum(section).nullable();
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const item of section.items) {
     shape[item.id] = z.object({ response, remarks: optionalText(500) }).strict();
@@ -301,7 +310,9 @@ const jsaPage1Schema = z
     // "JSA completed by (name and position)" is NOT here: it is the
     // authenticated applicant, frozen server-side into the snapshot.
     /** The printed Yes/No above the permit tick list. */
-    anyPermitsRequired: z.enum(['YES', 'NO']),
+    // Unanswered until the applicant answers - same reasoning as the
+    // checklist bands above.
+    anyPermitsRequired: z.enum(['YES', 'NO']).nullable(),
     requiredPermits: selectionBandSchema(JSA_REQUIRED_PERMITS),
     hseChecklist: hseChecklistSchema,
   })
@@ -362,7 +373,7 @@ const jsaPage2Schema = z
     emergencyQuestions: z
       .object(
         Object.fromEntries(
-          JSA_EMERGENCY_QUESTIONS.map((question) => [question.id, z.enum(['YES', 'NO'])]),
+          JSA_EMERGENCY_QUESTIONS.map((question) => [question.id, z.enum(['YES', 'NO']).nullable()]),
         ) as Record<string, z.ZodTypeAny>,
       )
       .strict(),

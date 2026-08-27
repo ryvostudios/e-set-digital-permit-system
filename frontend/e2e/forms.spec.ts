@@ -193,3 +193,36 @@ test('server-authoritative fields are displayed but never editable', async ({ pa
   await expect(page.locator('input[aria-label="Company"]')).toHaveCount(0);
   await expect(page.locator('input[aria-label="JSA No."]')).toHaveCount(0);
 });
+
+test('a blank permit shows every safety question UNANSWERED - no default N/A', async ({ page }, testInfo) => {
+  // The defect this guards: a pre-selected N/A puts a safety judgement
+  // nobody made onto an issued permit.
+  await openPreview(page, 'WTG_WORK', 'edit');
+
+  for (const section of catalogue.permits.WTG_WORK!.checklistSections) {
+    const band = page.getByTestId(`checklist-${section.id}`);
+    await expect(band.locator('input[type="radio"]:checked'), `${section.id}`).toHaveCount(0);
+  }
+  // The Yes/No-only isolation band too.
+  await expect(page.getByTestId('checklist-isolation_points').locator('input:checked')).toHaveCount(0);
+
+  // And the JSA's printed Yes/No questions.
+  await expect(page.getByTestId('jsa-page-1').locator('input[type="radio"]:checked')).toHaveCount(0);
+  await expect(page.getByTestId('jsa-page-2').locator('input[type="radio"]:checked')).toHaveCount(0);
+
+  await testInfo.attach(`unanswered-${testInfo.project.name}`, {
+    body: await page.getByTestId('checklist-general_work').screenshot(),
+    contentType: 'image/png',
+  });
+});
+
+test('choosing N/A is possible, and only then is it recorded', async ({ page }) => {
+  await openPreview(page, 'WTG_WORK', 'edit');
+  const band = page.getByTestId('checklist-general_work');
+  const na = band.locator('tbody tr').first().locator('input[type="radio"]').nth(2);
+  await expect(na).not.toBeChecked();
+  await na.check();
+  await expect(na).toBeChecked();
+  // Exactly one answer recorded in that band - not a whole column.
+  await expect(band.locator('input[type="radio"]:checked')).toHaveCount(1);
+});

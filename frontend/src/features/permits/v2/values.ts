@@ -15,7 +15,16 @@ import type {
 
 export type ChecklistResponse = 'YES' | 'NO' | 'NA';
 
-export type ChecklistAnswers = Record<string, { response: ChecklistResponse; remarks?: string }>;
+/**
+ * `null` means UNANSWERED, and it is not the same as `'NA'`.
+ *
+ * 'NA' is a judgement someone makes - "I considered this and it does not
+ * apply". A blank draft that arrived pre-set to 'NA' would put a safety
+ * judgement nobody made onto an issued permit, so a new form starts with
+ * every response null and the server refuses the submission until a
+ * person has answered each one.
+ */
+export type ChecklistAnswers = Record<string, { response: ChecklistResponse | null; remarks?: string }>;
 
 /** A tick band: one boolean per printed option, plus the free-text Other line where the form prints one. */
 export type SelectionValues = Record<string, boolean | string | undefined>;
@@ -37,10 +46,13 @@ export interface ParticipantRow {
 export type PermitValuesV2 = Record<string, unknown>;
 export type JsaValuesV2 = { page1: Record<string, unknown>; page2: Record<string, unknown> };
 
-/** A band's default answer. `NA` where the form prints that column, `NO` where it does not. */
+/**
+ * A band's starting state: every printed question present but UNANSWERED.
+ * Never pre-set to 'NA', and never to 'NO' - both are answers, and the
+ * applicant has not given one yet.
+ */
 function blankAnswers(section: ChecklistSectionDef): ChecklistAnswers {
-  const response: ChecklistResponse = section.responses === 'YES_NO_NA' ? 'NA' : 'NO';
-  return Object.fromEntries(section.items.map((item) => [item.id, { response }]));
+  return Object.fromEntries(section.items.map((item) => [item.id, { response: null }]));
 }
 
 function blankTicks(section: SelectionSectionDef): SelectionValues {
@@ -122,7 +134,7 @@ export function emptyJsaValues(catalogue: FormCatalogue): JsaValuesV2 {
       dateTime: '',
       serialNo: '',
       jobOrWork: '',
-      anyPermitsRequired: 'NO',
+      anyPermitsRequired: null,
       requiredPermits: blankTicks(page1.requiredPermits),
       hseChecklist: Object.fromEntries(
         page1.hseChecklistCategories.map((category) => [category.id, blankTicks(category)]),
@@ -130,7 +142,7 @@ export function emptyJsaValues(catalogue: FormCatalogue): JsaValuesV2 {
     },
     page2: {
       emergencyContacts: Object.fromEntries(page2.emergencyContacts.map((c) => [c.id, ''])),
-      emergencyQuestions: Object.fromEntries(page2.emergencyQuestions.map((q) => [q.id, 'NO'])),
+      emergencyQuestions: Object.fromEntries(page2.emergencyQuestions.map((q) => [q.id, null])),
       taskAnalysis: [emptyTaskAnalysisRow()],
       ppe: blankTicks(page2.ppe),
       toolsAndMaterials: '',

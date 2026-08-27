@@ -679,6 +679,22 @@ permitsRouter.post(
       return;
     }
     if (result.outcome === 'invalid') {
+      // Unanswered printed questions come back ITEMISED, in printed
+      // order, each with the payload path of the control that needs an
+      // answer. A long permit plus a two-page JSA is far too much
+      // document to make someone search by hand, and the alternative -
+      // letting the editor guess - would drift from what the server
+      // actually requires. Only the question text and its location
+      // travel; no permit content and no identity.
+      if (result.reason === 'unanswered_questions') {
+        res.status(422).json({
+          error: 'invalid_state',
+          reason: result.reason,
+          message: 'Every safety question must be answered before this permit can be submitted',
+          unanswered: result.unanswered,
+        });
+        return;
+      }
       res
         .status(422)
         .json({ error: 'invalid_state', message: 'Permit is missing required fields for submission', reason: result.reason });

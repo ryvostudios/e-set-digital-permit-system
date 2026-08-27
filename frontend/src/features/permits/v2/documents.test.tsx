@@ -260,3 +260,53 @@ describe('the renderer only ever draws what the catalogue defines', () => {
     expect(screen.getByText('An added printed question')).toBeInTheDocument();
   });
 });
+
+describe('a new form starts UNANSWERED, never pre-set to N/A', () => {
+  it('leaves every Yes/No/N-A radio unselected on a blank permit', () => {
+    renderPermit('WTG_WORK', 'edit');
+    const band = within(screen.getByTestId('checklist-general_work'));
+    const radios = band.getAllByRole('radio');
+    expect(radios.length).toBeGreaterThan(0);
+    // Not one of them is checked - in particular, NOT the N/A column.
+    expect(radios.filter((radio) => (radio as HTMLInputElement).checked)).toHaveLength(0);
+  });
+
+  it('leaves the Yes/No-only isolation band unselected too', () => {
+    renderPermit('WTG_WORK', 'edit');
+    const band = within(screen.getByTestId('checklist-isolation_points'));
+    expect(band.getAllByRole('radio').filter((r) => (r as HTMLInputElement).checked)).toHaveLength(0);
+  });
+
+  it("does not pre-answer the JSA's printed Yes/No questions", () => {
+    renderJsa('edit');
+    const page1 = within(screen.getByTestId('jsa-page-1'));
+    const permitsQuestion = page1.getAllByRole('radio');
+    expect(permitsQuestion.filter((r) => (r as HTMLInputElement).checked)).toHaveLength(0);
+
+    const page2 = within(screen.getByTestId('jsa-page-2'));
+    expect(page2.getAllByRole('radio').filter((r) => (r as HTMLInputElement).checked)).toHaveLength(0);
+  });
+
+  it('records N/A only when a person actually chooses it', async () => {
+    function Harness() {
+      const definition = catalogue.permits.WTG_WORK;
+      const [values, setValues] = useState(() => emptyPermitValues('WTG_WORK', definition));
+      return (
+        <PermitDocumentV2
+          permitType="WTG_WORK"
+          definition={definition}
+          values={values}
+          mode="edit"
+          onChange={setValues}
+        />
+      );
+    }
+    const user = userEvent.setup();
+    render(<Harness />);
+    const band = within(screen.getByTestId('checklist-general_work'));
+    const na = band.getAllByRole('radio')[2]!; // Yes, No, N/A
+    expect(na).not.toBeChecked();
+    await user.click(na);
+    expect(na).toBeChecked();
+  });
+});

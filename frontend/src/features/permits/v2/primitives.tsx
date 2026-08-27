@@ -263,7 +263,8 @@ export function YesNoField({
   onChange,
 }: {
   label: string;
-  value: 'YES' | 'NO';
+  /** null = unanswered. Neither box is ticked until a person answers. */
+  value: 'YES' | 'NO' | null;
   mode: DocumentMode;
   onChange?: (next: 'YES' | 'NO') => void;
 }) {

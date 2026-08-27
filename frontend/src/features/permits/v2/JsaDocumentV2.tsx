@@ -48,7 +48,7 @@ export function JsaDocumentV2({ definition, values, mode, onChange, authoritativ
   const hse = (values.page1.hseChecklist as Record<string, SelectionValues>) ?? {};
   const rows = (values.page2.taskAnalysis as TaskAnalysisRow[]) ?? [];
   const contacts = (values.page2.emergencyContacts as Record<string, string>) ?? {};
-  const questions = (values.page2.emergencyQuestions as Record<string, 'YES' | 'NO'>) ?? {};
+  const questions = (values.page2.emergencyQuestions as Record<string, 'YES' | 'NO' | null>) ?? {};
 
   const setRow = (index: number, next: Partial<TaskAnalysisRow>) =>
     setPage2('taskAnalysis', rows.map((row, i) => (i === index ? { ...row, ...next } : row)));
@@ -103,7 +103,7 @@ export function JsaDocumentV2({ definition, values, mode, onChange, authoritativ
         <DocSection title={page1.requiredPermits.title}>
           <YesNoField
             label={page1.requiredPermits.title}
-            value={(values.page1.anyPermitsRequired as 'YES' | 'NO') ?? 'NO'}
+            value={(values.page1.anyPermitsRequired as 'YES' | 'NO' | null) ?? null}
             mode={mode}
             onChange={(next) => setPage1('anyPermitsRequired', next)}
           />
@@ -166,7 +166,7 @@ export function JsaDocumentV2({ definition, values, mode, onChange, authoritativ
             <YesNoField
               key={question.id}
               label={question.label}
-              value={questions[question.id] ?? 'NO'}
+              value={questions[question.id] ?? null}
               mode={mode}
               onChange={(next) => setPage2('emergencyQuestions', { ...questions, [question.id]: next })}
             />
