@@ -518,12 +518,10 @@ permitsRouter.get('/permits/:id/pdf', requireAuth, async (req: Request, res: Res
     return;
   }
 
-  // Only ISSUED (or an issued permit's later HELD/CANCELLED/CLOSED
-  // state) ever has a document at all - `issued_at` is set if and only
-  // if the permit has ever been issued (permits_issued_at_consistent).
-  // DRAFT/PENDING_* permits are never issued, so this is a 404, not a
-  // "still generating" response - there is nothing to generate yet.
-  if (!permit.issued_at) {
+  // Final package retrieval is deliberately narrow: only an actively
+  // ISSUED permit or its immutable CLOSED record. Draft/review states,
+  // HELD and CANCELLED records never masquerade as a downloadable final.
+  if (!permit.issued_at || (permit.status !== 'ISSUED' && permit.status !== 'CLOSED')) {
     sendNotFound(res);
     return;
   }

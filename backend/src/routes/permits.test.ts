@@ -1350,6 +1350,23 @@ test('GET /permits/:id/pdf returns 404 for a permit that was never issued (nothi
   }
 });
 
+test('GET /permits/:id/pdf permits only ISSUED/CLOSED final packages, never HELD/CANCELLED masquerades', async () => {
+  const { url, close } = await startServer();
+  try {
+    for (const status of ['HELD', 'CANCELLED'] as const) {
+      mockPermitDetailRow = makePermitDetailRow({ status, created_by: AUTHENTICATED_USER_ID, issued_at: '2026-01-01T09:00:00.000Z' });
+      assert.equal((await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN)).status, 404);
+    }
+    for (const status of ['ISSUED', 'CLOSED'] as const) {
+      mockPermitDetailRow = makePermitDetailRow({ status, created_by: AUTHENTICATED_USER_ID, issued_at: '2026-01-01T09:00:00.000Z' });
+      mockDocumentLookupRow = null;
+      assert.equal((await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN)).status, 202);
+    }
+  } finally {
+    await close();
+  }
+});
+
 test('GET /permits/:id/pdf returns an explicit "processing" status (never a fake PDF) when the document has not been generated yet', async () => {
   mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: AUTHENTICATED_USER_ID, issued_at: '2026-01-01T09:00:00.000Z' });
   mockDocumentLookupRow = {

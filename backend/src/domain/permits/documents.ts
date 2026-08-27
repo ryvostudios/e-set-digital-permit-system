@@ -5,6 +5,7 @@ import { env } from '../../config/env.js';
 import { query, type QueryFn } from '../../db/pool.js';
 import { buildIssuedDocumentPages, type DocumentBlock, type DocumentPage } from './documentLayout.js';
 import type { JsaForm, PermitForm, PermitFormVersion, PermitType } from './forms.js';
+import type { JsaFormV2, JsaFormVersionV2, PermitFormV2, PermitFormVersionV2 } from './formsV2.js';
 import { toDisplayNumber } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
 import type { SnapshotSignatureSet } from './signatures.js';
@@ -60,12 +61,12 @@ export interface IssuedPermitSnapshot {
   snapshotTakenAt: string;
   /** The permit template and the exact schema version that validated the payload below. */
   permitType: PermitType;
-  permitFormVersion: PermitFormVersion;
+  permitFormVersion: PermitFormVersion | PermitFormVersionV2;
   /** The full, already-validated permit form content, frozen verbatim. */
-  permitForm: PermitForm;
-  jsaFormVersion: 'JSA_V1';
-  /** The full, already-validated JSA_V1 content, frozen verbatim - the same JSA a renewal reuses, never copied or edited. */
-  jsaForm: JsaForm;
+  permitForm: PermitForm | PermitFormV2;
+  jsaFormVersion: 'JSA_V1' | JsaFormVersionV2;
+  /** The full, already-validated versioned JSA content, frozen verbatim - the same JSA a renewal reuses, never copied or edited. */
+  jsaForm: JsaForm | JsaFormV2;
   /**
    * The authoritative digital signatures, frozen as text at the instant
    * each authenticated action was performed. A later change to a
@@ -421,6 +422,11 @@ function renderPage(doc: PDFKit.PDFDocument, page: DocumentPage, contentWidth: n
   doc.font('Helvetica-Bold').fontSize(16).fillColor('black').text(page.title, { align: 'center' });
   doc.moveDown();
   for (const section of page.sections) {
+    // Keep a heading with a meaningful amount of its first block. PDFKit
+    // will paginate long content naturally, but without this guard a
+    // heading can otherwise be stranded at the foot of a physical page.
+    const minimumSectionRoom = section.blocks.some((block) => block.kind === 'signatures') ? 190 : 90;
+    if (doc.y > doc.page.height - PAGE_MARGIN - minimumSectionRoom) doc.addPage();
     doc.font('Helvetica-Bold').fontSize(12).fillColor('black').text(section.title);
     doc.moveDown(0.3);
     for (const block of section.blocks) {
@@ -461,8 +467,22 @@ export async function generateIssuedPermitPdf(snapshot: IssuedPermitSnapshot): P
 
     const contentWidth = doc.page.width - PAGE_MARGIN * 2;
     const pages = buildIssuedDocumentPages(snapshot);
+    let currentLogicalTitle = pages[0]?.title ?? 'Issued Permit';
+    let startingLogicalPage = false;
+    doc.on('pageAdded', () => {
+      if (startingLogicalPage) {
+        startingLogicalPage = false;
+        return;
+      }
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('gray').text(`${currentLogicalTitle} — CONTINUED`, { align: 'center' });
+      doc.moveDown(0.5).fillColor('black');
+    });
     pages.forEach((page, index) => {
-      if (index > 0) doc.addPage();
+      currentLogicalTitle = page.title;
+      if (index > 0) {
+        startingLogicalPage = true;
+        doc.addPage();
+      }
       renderPage(doc, page, contentWidth);
     });
 

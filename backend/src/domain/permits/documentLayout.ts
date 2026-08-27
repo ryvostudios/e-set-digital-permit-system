@@ -8,6 +8,7 @@ import type {
   WtgWorkForm,
 } from './forms.js';
 import type { SnapshotSignature, SnapshotSignatureSet } from './signatures.js';
+import { buildIssuedDocumentPagesV2, isV2Snapshot, usesAnyV2FormVersion } from './documentLayoutV2.js';
 
 /**
  * The ordered, purely-derived page/section model of an issued document.
@@ -290,7 +291,7 @@ function confinedSpaceSections(form: ConfinedSpaceEntryForm, jsaNumber: string):
 }
 
 function permitFormSections(snapshot: IssuedPermitSnapshot): DocumentSection[] {
-  const form: PermitForm = snapshot.permitForm;
+  const form = snapshot.permitForm as PermitForm;
   switch (snapshot.permitType) {
     case 'WTG_WORK':
       return wtgWorkSections(form as WtgWorkForm);
@@ -337,7 +338,7 @@ export function buildSignatureBlock(signatures: SnapshotSignatureSet): DocumentB
 }
 
 function jsaPage1(snapshot: IssuedPermitSnapshot): DocumentPage {
-  const jsa: JsaForm = snapshot.jsaForm;
+  const jsa = snapshot.jsaForm as JsaForm;
   const applicant = snapshot.signatures.applicant;
   return {
     title: 'Job Safety Analysis - Page 1',
@@ -386,7 +387,7 @@ function jsaPage1(snapshot: IssuedPermitSnapshot): DocumentPage {
 }
 
 function jsaPage2(snapshot: IssuedPermitSnapshot): DocumentPage {
-  const jsa: JsaForm = snapshot.jsaForm;
+  const jsa = snapshot.jsaForm as JsaForm;
   const closeOut = jsa.page2.closeOut;
   return {
     title: 'Job Safety Analysis - Page 2',
@@ -475,6 +476,13 @@ function jsaPage2(snapshot: IssuedPermitSnapshot): DocumentPage {
 
 /** The complete issued document: Permit page(s), then JSA page 1, then JSA page 2 - always in that order. */
 export function buildIssuedDocumentPages(snapshot: IssuedPermitSnapshot): DocumentPage[] {
+  // The immutable, server-stored form versions are the sole renderer
+  // selector. There is no request/browser parameter capable of choosing
+  // this path. Historical V1 snapshots continue through the layout below.
+  if (isV2Snapshot(snapshot)) return buildIssuedDocumentPagesV2(snapshot);
+  if (usesAnyV2FormVersion(snapshot)) {
+    throw new Error('Issued snapshot has incompatible V2 Permit/JSA form versions');
+  }
   const applicantLine = snapshot.applicantIdentity
     ? snapshot.applicantIdentity.kind === 'NORMAL'
       ? `Mr. ${snapshot.applicantIdentity.displayName} of Company ${snapshot.applicantIdentity.companyName}`
