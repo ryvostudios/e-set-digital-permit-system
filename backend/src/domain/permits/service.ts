@@ -4,18 +4,23 @@ import { MAX_PAGE_SIZE, MAX_PAGINATION_OFFSET } from './validation.js';
 import { isPermitValid } from './validity.js';
 import type { IssuanceEventMetadata } from './documents.js';
 import {
-  derivePermitFormProjection,
-  deriveJsaFormProjection,
-  JSA_FORM_VERSION,
-  parseJsaForm,
-  parsePermitForm,
-  PERMIT_FORM_VERSIONS,
   type JsaForm,
   type JsaFormVersion,
   type PermitForm,
   type PermitFormVersion,
   type PermitType,
 } from './forms.js';
+import {
+  ACTIVE_FORM_GENERATION,
+  type AnyPermitForm,
+  derivePermitProjectionForVersion,
+  deriveJsaProjectionForVersion,
+  generationOfPermitFormVersion,
+  jsaFormVersionFor,
+  parseJsaFormForVersion,
+  parsePermitFormForVersion,
+  permitFormVersionFor,
+} from './formGeneration.js';
 import { recordPermitSignature, SigningIdentityUnavailableError } from './signatures.js';
 import { resolvePermitApplicantAuthority } from './applicantIdentity.js';
 import {
@@ -297,7 +302,10 @@ export async function createDraftPermit(
       `INSERT INTO permits (jsa_id, created_by, site_timezone, status, permit_type, form_version)
        VALUES ($1, $2, $3, 'DRAFT', $4, $5)
        RETURNING *`,
-      [jsa.id, actorUserId, siteTimezone, permitType, PERMIT_FORM_VERSIONS[permitType]],
+      // The generation NEW drafts are written with. Still derived here,
+      // never from the request; the database additionally refuses any
+      // type/version pair that disagrees.
+      [jsa.id, actorUserId, siteTimezone, permitType, permitFormVersionFor(permitType, ACTIVE_FORM_GENERATION)],
     );
     const permit = requireRow(permitResult.rows);
 
@@ -626,7 +634,8 @@ export async function updateDraftPermit(
     // stored template. A payload shaped for a different template fails
     // here (cross-template rejection), and unknown properties are
     // rejected outright rather than stored - see domain/permits/forms.ts.
-    let nextForm: PermitForm | null = null;
+    // Either generation's validated payload - the stored row decides which.
+    let nextForm: AnyPermitForm | null = null;
     let nextProjection = {
       windFarm: existing.wind_farm,
       wtgNumber: existing.wtg_number,
@@ -635,14 +644,18 @@ export async function updateDraftPermit(
     };
     if (input.form !== undefined) {
       if (!existing.permit_type) return { outcome: 'invalid', reason: 'missing_permit_type' };
-      const parsed = parsePermitForm(existing.permit_type, input.form);
+      // Parsed by the contract the STORED ROW names - never one the
+      // request chose, so a client cannot ask for the laxer generation.
+      const generation = generationOfPermitFormVersion(existing.form_version);
+      if (generation === null) return { outcome: 'invalid', reason: 'missing_permit_type' };
+      const parsed = parsePermitFormForVersion(existing.permit_type, existing.form_version, input.form);
       if (!parsed.ok) {
         return parsed.reason === 'too_large'
           ? { outcome: 'invalid', reason: 'form_too_large' }
           : { outcome: 'invalid', reason: 'invalid_form_payload', issues: parsed.issues };
       }
       nextForm = parsed.data;
-      nextProjection = derivePermitFormProjection(existing.permit_type, parsed.data);
+      nextProjection = derivePermitProjectionForVersion(existing.permit_type, generation, parsed.data);
     }
 
     const updateResult = input.form === undefined
@@ -718,20 +731,23 @@ export async function updateLinkedJsa(
     if (!EDITABLE_STATUSES.includes(existing.status)) return { outcome: 'conflict', reason: 'not_editable' };
     if (existing.version !== input.expectedVersion) return { outcome: 'conflict', reason: 'stale_version' };
 
-    const parsed = parseJsaForm(input.form);
+    // The JSA and its permit are ONE document, so the JSA is validated
+    // and stored in the permit's own generation.
+    const jsaGeneration = generationOfPermitFormVersion(existing.form_version) ?? ACTIVE_FORM_GENERATION;
+    const parsed = parseJsaFormForVersion(jsaGeneration, input.form);
     if (!parsed.ok) {
       return parsed.reason === 'too_large'
         ? { outcome: 'invalid', reason: 'form_too_large' }
         : { outcome: 'invalid', reason: 'invalid_form_payload', issues: parsed.issues };
     }
-    const projection = deriveJsaFormProjection(parsed.data);
+    const projection = deriveJsaProjectionForVersion(jsaGeneration, parsed.data);
 
     const jsaResult = await client.query<JsaRow>(
       `UPDATE jsas
           SET form_version = $1, form_payload = $2::jsonb, site_or_wtg = $3, job_description = $4
         WHERE id = $5
         RETURNING *`,
-      [JSA_FORM_VERSION, JSON.stringify(parsed.data), projection.siteOrWtg, projection.jobDescription, existing.jsa_id],
+      [jsaFormVersionFor(jsaGeneration), JSON.stringify(parsed.data), projection.siteOrWtg, projection.jobDescription, existing.jsa_id],
     );
     const jsa = requireRow(jsaResult.rows);
 
