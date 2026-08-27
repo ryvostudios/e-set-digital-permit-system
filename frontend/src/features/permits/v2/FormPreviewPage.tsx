@@ -3,8 +3,10 @@ import { useSearchParams } from 'react-router-dom';
 import { getFormCatalogue, type FormCatalogue, type PermitTypeKey } from '../../../api/catalogue';
 import { useApiResource } from '../../../lib/useApiResource';
 import { ErrorState, LoadingState } from '../../../ui/Feedback';
+import { saveV2JsaDraft, saveV2PermitDraft, submitPermit } from '../../../api/endpoints';
 import { JsaDocumentV2 } from './JsaDocumentV2';
 import { PermitDocumentV2 } from './PermitDocumentV2';
+import { PermitDraftEditor } from './PermitDraftEditor';
 import type { DocumentMode } from './primitives';
 import { emptyJsaValues, emptyPermitValues, type JsaValuesV2, type PermitValuesV2 } from './values';
 
@@ -33,6 +35,9 @@ export function FormPreviewPage() {
   const [params] = useSearchParams();
   const permitType: PermitTypeKey = isPermitType(params.get('type')) ? (params.get('type') as PermitTypeKey) : 'WTG_WORK';
   const mode: DocumentMode = params.get('mode') === 'read' ? 'read' : 'edit';
+  // The full applicant workflow, rather than the bare documents.
+  const asEditor = params.get('editor') === '1';
+  const permitId = params.get('permitId') ?? '00000000-0000-4000-8000-000000000001';
 
   const catalogue = useApiResource<FormCatalogue>((signal) => getFormCatalogue(signal), []);
 
@@ -40,17 +45,29 @@ export function FormPreviewPage() {
   if (catalogue.error) return <ErrorState error={catalogue.error} onRetry={catalogue.reload} />;
   if (!catalogue.data) return <ErrorState error={{ code: 'not_found' }} />;
 
-  return <PreviewBody catalogue={catalogue.data} permitType={permitType} mode={mode} />;
+  return (
+    <PreviewBody
+      catalogue={catalogue.data}
+      permitType={permitType}
+      mode={mode}
+      asEditor={asEditor}
+      permitId={permitId}
+    />
+  );
 }
 
 function PreviewBody({
   catalogue,
   permitType,
   mode,
+  asEditor,
+  permitId,
 }: {
   catalogue: FormCatalogue;
   permitType: PermitTypeKey;
   mode: DocumentMode;
+  asEditor: boolean;
+  permitId: string;
 }) {
   const definition = catalogue.permits[permitType];
   const [permitValues, setPermitValues] = useState<PermitValuesV2>(() =>
@@ -70,6 +87,32 @@ function PreviewBody({
     }),
     [],
   );
+
+  if (asEditor) {
+    return (
+      <div data-testid="form-preview">
+        <PermitDraftEditor
+          permitType={permitType}
+          catalogue={catalogue}
+          initialPermit={permitValues}
+          initialJsa={jsaValues}
+          initialVersion={1}
+          authoritative={authoritative}
+          onSaveDraft={async ({ version, permit, jsa }) => {
+            // The permit and its JSA are one document, so both are saved
+            // under the SAME optimistic-concurrency token; the second call
+            // uses the version the first returned.
+            const afterPermit = await saveV2PermitDraft(permitId, version, permit);
+            const afterJsa = await saveV2JsaDraft(permitId, afterPermit.permit.version, jsa);
+            return afterJsa.permit.version;
+          }}
+          onSubmit={async ({ version }) => {
+            await submitPermit(permitId, version);
+          }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="stack" data-testid="form-preview">

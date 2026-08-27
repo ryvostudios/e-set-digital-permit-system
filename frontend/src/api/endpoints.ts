@@ -125,6 +125,28 @@ export function updateJsaForm(
   return apiRequest(`/permits/${encodeURIComponent(id)}/jsa`, { method: 'PATCH', body: { version, form } });
 }
 
+/**
+ * The V2 equivalents. Same endpoints and the same optimistic-concurrency
+ * token - only the payload shape differs, and the SERVER decides which
+ * contract applies from the permit's stored `form_version`. The client
+ * never selects a generation.
+ */
+export function saveV2PermitDraft(
+  id: string,
+  version: number,
+  form: unknown,
+): Promise<{ permit: Permit }> {
+  return apiRequest(`/permits/${encodeURIComponent(id)}`, { method: 'PATCH', body: { version, form } });
+}
+
+export function saveV2JsaDraft(
+  id: string,
+  version: number,
+  form: unknown,
+): Promise<{ permit: Permit; jsa: Jsa }> {
+  return apiRequest(`/permits/${encodeURIComponent(id)}/jsa`, { method: 'PATCH', body: { version, form } });
+}
+
 type PermitMutation = Promise<{ permit: Permit }>;
 
 /** POST /api/v1/permits/:id/submit - DRAFT -> PENDING_CRO. */

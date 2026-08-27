@@ -250,3 +250,58 @@
   flex-wrap: wrap;
   row-gap: 0.25rem;
 }
+
+/*
+ * STICKY-HEADER OFFSET.
+ *
+ * The app shell's header is `position: sticky`, so anything scrolled to
+ * with `scrollIntoView({ block: 'start' })` lands UNDERNEATH it. On a
+ * long permit that means validation sends someone to a question they
+ * cannot see. `scroll-margin-top` reserves the header's height plus a
+ * little breathing room on every scroll target.
+ */
+:root {
+  --doc-sticky-offset: calc(var(--topbar-height, 4rem) + 1rem);
+}
+
+.doc__table tbody tr,
+.doc__field,
+.doc__section {
+  scroll-margin-top: var(--doc-sticky-offset);
+}
+
+/* A question the SERVER reported unanswered. */
+.doc__row--unanswered {
+  background: var(--danger-bg, #fdecec);
+  outline: 2px solid var(--danger, #c0392b);
+  outline-offset: -2px;
+}
+
+.doc__row--unanswered .doc__table-question {
+  font-weight: 700;
+}
+
+/* The action bar at the foot of the whole document. */
+.doc__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3, 0.75rem);
+  flex-wrap: wrap;
+  padding: var(--space-4, 1rem);
+  border: 1px solid var(--border, #c8ccd4);
+  background: var(--surface-header, #eef1f5);
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+}
+
+.doc__save-state {
+  margin-right: auto;
+  font-size: 0.85rem;
+  color: var(--text-muted, #6b7280);
+}
+
+.doc__save-state[data-dirty='true'] {
+  color: var(--danger, #c0392b);
+  font-weight: 700;
+}

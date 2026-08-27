@@ -39,12 +39,36 @@ export interface ApiIssue {
   message: string;
 }
 
+/**
+ * One printed safety question the SERVER says is still unanswered.
+ *
+ * The completeness rule lives on the server and only there; this is the
+ * server's answer travelling to the editor so it can point at the right
+ * control. The frontend never decides what "complete" means.
+ */
+export interface UnansweredAnswer {
+  sectionId: string;
+  sectionTitle: string;
+  itemId: string;
+  /** The printed question, verbatim. */
+  itemLabel: string;
+  /** Location in the payload, which the editor turns into an element id. */
+  path: string[];
+}
+
+export interface UnansweredQuestions {
+  permit: UnansweredAnswer[];
+  jsa: UnansweredAnswer[];
+}
+
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
   readonly status: number;
   /** The backend's machine-readable `reason`, where one was returned (e.g. `version_mismatch`). */
   readonly reason: string | null;
   readonly issues: ApiIssue[];
+  /** Present only on a 422 `unanswered_questions` refusal. */
+  readonly unanswered: UnansweredQuestions | null;
   readonly requestId: string | null;
 
   constructor(init: {
@@ -53,6 +77,7 @@ export class ApiError extends Error {
     message: string;
     reason?: string | null;
     issues?: ApiIssue[];
+    unanswered?: UnansweredQuestions | null;
     requestId?: string | null;
   }) {
     super(init.message);
@@ -61,6 +86,7 @@ export class ApiError extends Error {
     this.status = init.status;
     this.reason = init.reason ?? null;
     this.issues = init.issues ?? [];
+    this.unanswered = init.unanswered ?? null;
     this.requestId = init.requestId ?? null;
   }
 
@@ -150,6 +176,39 @@ function readIssues(body: unknown): ApiIssue[] {
   });
 }
 
+/**
+ * Reads the itemised unanswered-question list, when the backend sent one.
+ * Shape-checked rather than trusted: a malformed entry is dropped instead
+ * of reaching the editor and producing a broken focus target.
+ */
+function readUnanswered(body: unknown): UnansweredQuestions | null {
+  if (typeof body !== 'object' || body === null || !('unanswered' in body)) return null;
+  const raw = (body as { unanswered: unknown }).unanswered;
+  if (typeof raw !== 'object' || raw === null) return null;
+
+  const list = (value: unknown): UnansweredAnswer[] => {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) return [];
+      const e = entry as Record<string, unknown>;
+      if (typeof e.itemLabel !== 'string' || !Array.isArray(e.path)) return [];
+      if (!e.path.every((segment) => typeof segment === 'string')) return [];
+      return [{
+        sectionId: typeof e.sectionId === 'string' ? e.sectionId : '',
+        sectionTitle: typeof e.sectionTitle === 'string' ? e.sectionTitle : '',
+        itemId: typeof e.itemId === 'string' ? e.itemId : '',
+        itemLabel: e.itemLabel,
+        path: e.path as string[],
+      }];
+    });
+  };
+
+  const value = raw as { permit?: unknown; jsa?: unknown };
+  const permit = list(value.permit);
+  const jsa = list(value.jsa);
+  return permit.length === 0 && jsa.length === 0 ? null : { permit, jsa };
+}
+
 /** Builds an `ApiError` from a non-OK response body. */
 export function toApiError(status: number, body: unknown, requestId: string | null): ApiError {
   const backendError =
@@ -172,7 +231,15 @@ export function toApiError(status: number, body: unknown, requestId: string | nu
   const preferBackendMessage = code === 'conflict' || code === 'invalid_state';
   const message = preferBackendMessage && backendMessage ? backendMessage : MESSAGES[code];
 
-  return new ApiError({ code, status, message, reason, issues: readIssues(body), requestId });
+  return new ApiError({
+    code,
+    status,
+    message,
+    reason,
+    issues: readIssues(body),
+    unanswered: readUnanswered(body),
+    requestId,
+  });
 }
 
 /** A transport-level failure - the request never produced an HTTP response. */

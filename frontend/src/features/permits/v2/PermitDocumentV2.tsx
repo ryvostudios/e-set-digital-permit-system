@@ -36,6 +36,8 @@ interface Props {
   values: PermitValuesV2;
   mode: DocumentMode;
   onChange?: (next: PermitValuesV2) => void;
+  /** Payload paths the SERVER reported unanswered, as element ids. */
+  invalid?: ReadonlySet<string>;
   /** Server-derived, displayed but never editable. */
   authoritative?: {
     permitNumber?: string;
@@ -47,7 +49,7 @@ interface Props {
 
 const ISSUER = 'E-SET · Strategic Engineering Technologies (Pvt.) Limited';
 
-export function PermitDocumentV2({ permitType, definition, values, mode, onChange, authoritative }: Props) {
+export function PermitDocumentV2({ permitType, definition, values, mode, onChange, invalid, authoritative }: Props) {
   const set = (key: string, value: unknown) => onChange?.({ ...values, [key]: value });
   const nested = (key: string): Record<string, unknown> => (values[key] as Record<string, unknown>) ?? {};
   const setNested = (key: string, field: string, value: unknown) =>
@@ -200,6 +202,8 @@ export function PermitDocumentV2({ permitType, definition, values, mode, onChang
             answers={sections[section.id] ?? {}}
             mode={mode}
             onChange={(answers) => setSection(section.id, answers)}
+            path={['sections', section.id]}
+            invalid={invalid}
           />
         </DocSection>
       ))}
@@ -212,6 +216,8 @@ export function PermitDocumentV2({ permitType, definition, values, mode, onChang
             answers={(values.isolationPoints as ChecklistAnswers) ?? {}}
             mode={mode}
             onChange={(answers) => set('isolationPoints', answers)}
+            path={['isolationPoints']}
+            invalid={invalid}
           />
         </DocSection>
       ) : null}

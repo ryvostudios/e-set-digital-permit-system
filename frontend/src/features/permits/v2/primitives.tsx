@@ -22,6 +22,23 @@ import type { ChecklistAnswers, ChecklistResponse, SelectionValues } from './val
 
 export type DocumentMode = 'edit' | 'read';
 
+/**
+ * A stable DOM id for one payload location.
+ *
+ * The server reports an unanswered question as a PAYLOAD PATH
+ * (`["sections","general_work","a","response"]`). Deriving the element id
+ * from that same path is what lets the editor take someone straight to
+ * the control without the frontend keeping its own map of questions - and
+ * therefore without a second copy of the completeness rules that could
+ * drift from the server's.
+ */
+export function pathId(path: readonly string[]): string {
+  return `fld-${path.join('-')}`;
+}
+
+/** Paths the server said are unanswered, as ids, for highlighting. */
+export type InvalidPaths = ReadonlySet<string>;
+
 const RESPONSES_BY_DOMAIN: Record<string, ChecklistResponse[]> = {
   YES_NO_NA: ['YES', 'NO', 'NA'],
   YES_NO: ['YES', 'NO'],
@@ -68,11 +85,16 @@ export function ChecklistBand({
   answers,
   mode,
   onChange,
+  path = [],
+  invalid,
 }: {
   section: ChecklistSectionDef;
   answers: ChecklistAnswers;
   mode: DocumentMode;
   onChange?: (next: ChecklistAnswers) => void;
+  /** Where this band lives in the payload, e.g. `['sections','general_work']`. */
+  path?: readonly string[];
+  invalid?: InvalidPaths;
 }) {
   const columns = responseColumns(section);
 
@@ -94,8 +116,16 @@ export function ChecklistBand({
         <tbody>
           {section.items.map((item) => {
             const current = answers[item.id]?.response ?? null;
+            const itemPath = [...path, item.id, 'response'];
+            const id = pathId(itemPath);
+            const isInvalid = invalid?.has(id) ?? false;
             return (
-              <tr key={item.id}>
+              <tr
+                key={item.id}
+                id={id}
+                data-unanswered={isInvalid ? 'true' : undefined}
+                className={isInvalid ? 'doc__row--unanswered' : undefined}
+              >
                 <th scope="row" className="doc__table-question">
                   {item.label}
                 </th>
@@ -105,6 +135,10 @@ export function ChecklistBand({
                       <input
                         type="radio"
                         name={`${section.id}.${item.id}`}
+                        // The first column is the focus target the editor
+                        // sends the applicant to.
+                        {...(column === columns[0] ? { 'data-focus-target': id } : {})}
+                        aria-invalid={isInvalid || undefined}
                         aria-label={`${item.label} — ${RESPONSE_LABEL[column]}`}
                         checked={current === column}
                         onChange={() =>
@@ -261,15 +295,25 @@ export function YesNoField({
   value,
   mode,
   onChange,
+  path = [],
+  invalid,
 }: {
   label: string;
   /** null = unanswered. Neither box is ticked until a person answers. */
   value: 'YES' | 'NO' | null;
   mode: DocumentMode;
   onChange?: (next: 'YES' | 'NO') => void;
+  path?: readonly string[];
+  invalid?: InvalidPaths;
 }) {
+  const id = pathId(path);
+  const isInvalid = invalid?.has(id) ?? false;
   return (
-    <div className="doc__field doc__field--full">
+    <div
+      className={isInvalid ? 'doc__field doc__field--full doc__row--unanswered' : 'doc__field doc__field--full'}
+      id={path.length ? id : undefined}
+      data-unanswered={isInvalid ? 'true' : undefined}
+    >
       <span className="doc__field-label">{label}</span>
       <span className="doc__response-group">
         {(['YES', 'NO'] as const).map((option) =>
@@ -278,6 +322,8 @@ export function YesNoField({
               <input
                 type="radio"
                 name={label}
+                {...(option === 'YES' && path.length ? { 'data-focus-target': id } : {})}
+                aria-invalid={isInvalid || undefined}
                 aria-label={`${label} — ${RESPONSE_LABEL[option]}`}
                 checked={value === option}
                 onChange={() => onChange?.(option)}

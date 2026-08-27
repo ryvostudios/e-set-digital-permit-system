@@ -29,12 +29,14 @@ interface Props {
   values: JsaValuesV2;
   mode: DocumentMode;
   onChange?: (next: JsaValuesV2) => void;
+  /** Payload paths the SERVER reported unanswered, as element ids. */
+  invalid?: ReadonlySet<string>;
   authoritative?: { jsaNumber?: string; completedBy?: string };
 }
 
 const ISSUER = 'E-SET · Strategic Engineering Technologies (Pvt.) Limited';
 
-export function JsaDocumentV2({ definition, values, mode, onChange, authoritative }: Props) {
+export function JsaDocumentV2({ definition, values, mode, onChange, invalid, authoritative }: Props) {
   const { page1, page2 } = definition;
 
   const setPage1 = (key: string, value: unknown) =>
@@ -106,6 +108,8 @@ export function JsaDocumentV2({ definition, values, mode, onChange, authoritativ
             value={(values.page1.anyPermitsRequired as 'YES' | 'NO' | null) ?? null}
             mode={mode}
             onChange={(next) => setPage1('anyPermitsRequired', next)}
+            path={['page1', 'anyPermitsRequired']}
+            invalid={invalid}
           />
           <SelectionBand
             section={page1.requiredPermits}
@@ -169,6 +173,8 @@ export function JsaDocumentV2({ definition, values, mode, onChange, authoritativ
               value={questions[question.id] ?? null}
               mode={mode}
               onChange={(next) => setPage2('emergencyQuestions', { ...questions, [question.id]: next })}
+              path={['page2', 'emergencyQuestions', question.id]}
+              invalid={invalid}
             />
           ))}
         </DocSection>
