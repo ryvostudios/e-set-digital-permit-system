@@ -33,7 +33,7 @@ async function fillForm(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText(/^email/i), 'ayesha@example.com');
   await user.type(screen.getByLabelText(/temporary password/i), TEMP_PASSWORD);
   await user.selectOptions(screen.getByLabelText(/^company/i), 'ZPL');
-  await user.selectOptions(screen.getByLabelText(/team and position/i), 'tp-zpl-engineer');
+  await user.selectOptions(screen.getByLabelText(/^position/i), 'tp-zpl-engineer');
 }
 
 describe('authorization', () => {
@@ -81,12 +81,16 @@ describe('the organization choices', () => {
     renderAs(<CreateEmployeePage />, siteManager());
 
     await user.selectOptions(await screen.findByLabelText(/^company/i), 'ZPL');
-    const assignments = screen.getByLabelText(/team and position/i);
+    // ZPL has a single team, so it is resolved internally and only
+    // positions are offered - named as positions, not as flattened
+    // "ZPL — Engineer" combinations.
+    expect(screen.queryByLabelText(/^team/i)).not.toBeInTheDocument();
+    const assignments = screen.getByLabelText(/^position/i);
     const labels = Array.from(assignments.querySelectorAll('option')).map((option) => option.textContent);
-    expect(labels).toContain('ZPL — Engineer');
-    expect(labels).toContain('ZPL — Site Manager');
-    // E-SET's combinations are not offered under ZPL.
-    expect(labels).not.toContain('E-BOP — CRO');
+    expect(labels).toContain('Engineer');
+    expect(labels).toContain('Site Manager');
+    // E-SET's positions are not offered under ZPL.
+    expect(labels).not.toContain('CRO');
   });
 
   it('clear the assignment when the company changes, because an assignment belongs to its company', async () => {
@@ -95,17 +99,17 @@ describe('the organization choices', () => {
     renderAs(<CreateEmployeePage />, siteManager());
 
     await user.selectOptions(await screen.findByLabelText(/^company/i), 'ZPL');
-    await user.selectOptions(screen.getByLabelText(/team and position/i), 'tp-zpl-engineer');
-    expect(screen.getByLabelText(/team and position/i)).toHaveValue('tp-zpl-engineer');
+    await user.selectOptions(screen.getByLabelText(/^position/i), 'tp-zpl-engineer');
+    expect(screen.getByLabelText(/^position/i)).toHaveValue('tp-zpl-engineer');
 
     await user.selectOptions(screen.getByLabelText(/^company/i), 'E_SET');
-    expect(screen.getByLabelText(/team and position/i)).toHaveValue('');
+    expect(screen.getByLabelText(/^position/i)).toHaveValue('');
   });
 
   it('cannot be typed freely - the assignment is a closed list', async () => {
     stubCreate();
     renderAs(<CreateEmployeePage />, siteManager());
-    const assignments = await screen.findByLabelText(/team and position/i);
+    const assignments = await screen.findByLabelText(/^position/i);
     expect(assignments.tagName).toBe('SELECT');
   });
 });
@@ -167,7 +171,7 @@ describe('the temporary password', () => {
     await user.type(screen.getByLabelText(/^email/i), 'ayesha@example.com');
     await user.type(screen.getByLabelText(/temporary password/i), 'short');
     await user.selectOptions(screen.getByLabelText(/^company/i), 'ZPL');
-    await user.selectOptions(screen.getByLabelText(/team and position/i), 'tp-zpl-engineer');
+    await user.selectOptions(screen.getByLabelText(/^position/i), 'tp-zpl-engineer');
     await user.click(screen.getByRole('button', { name: /create employee account/i }));
 
     expect(await screen.findByText(/use at least 12 characters/i)).toBeInTheDocument();

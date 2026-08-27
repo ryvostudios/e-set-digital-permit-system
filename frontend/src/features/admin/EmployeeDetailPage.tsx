@@ -20,11 +20,12 @@ import { invalidateAll } from '../../lib/cache';
 import { useApiResource } from '../../lib/useApiResource';
 import { Button } from '../../ui/Button';
 import { Modal } from '../../ui/Dialog';
-import { FormError, Input, PasswordInput, Select } from '../../ui/Field';
+import { FormError, Input, PasswordInput } from '../../ui/Field';
 import { Alert, ErrorState, LoadingState, SkeletonRows } from '../../ui/Feedback';
 import { Badge, Card, PageHeader } from '../../ui/Layout';
 import { useToast } from '../../ui/Toast';
 import { EmployeeHistory } from './EmployeeHistory';
+import { OrganizationAssignmentFields } from './OrganizationAssignmentFields';
 import { useOrganization } from './useOrganization';
 
 /**
@@ -116,20 +117,26 @@ export function EmployeeDetailPage() {
   // previous action typed can be carried into the next one.
   const [displayName, setDisplayName] = useState('');
   const [companyCode, setCompanyCode] = useState('');
+  const [teamName, setTeamName] = useState('');
   const [teamPositionId, setTeamPositionId] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [temporaryPassword, setTemporaryPassword] = useState('');
 
   const employee = resource.data?.employee;
   const viewAllGranted = employee?.individualPermissions.includes(VIEW_ALL_PERMITS_CAPABILITY) ?? false;
-  const assignments = companyCode ? (organization.optionsByCompany.get(companyCode) ?? []) : [];
 
   function openDialog(next: Exclude<DialogId, null>): void {
     setError(null);
     setIssues({});
     setDisplayName(employee?.displayName ?? '');
-    setCompanyCode(employee?.company.code ?? '');
-    setTeamPositionId(employee?.teamPositionId ?? '');
+    const currentCompany = employee?.company.code ?? '';
+    const currentAssignment = employee?.teamPositionId ?? '';
+    setCompanyCode(currentCompany);
+    setTeamPositionId(currentAssignment);
+    // The employee's team is not stored on the account - it is the team
+    // that owns their assignment, so it is resolved from the
+    // organization rather than reconstructed from a label.
+    setTeamName(organization.teamOfAssignment(currentCompany, currentAssignment));
     setNewEmail('');
     setTemporaryPassword('');
     setDialog(next);
@@ -401,39 +408,18 @@ export function EmployeeDetailPage() {
       >
         {error ? <FormError message={error.message} requestId={error.requestId} /> : null}
         {organization.error ? <ErrorState error={organization.error} onRetry={organization.reload} /> : null}
-        <Select
-          label="Company"
-          required
-          value={companyCode}
-          error={issues.companyCode}
+        <OrganizationAssignmentFields
+          organization={organization}
+          companies={COMPANIES}
           disabled={busy}
-          onChange={(event) => {
-            setCompanyCode(event.target.value);
-            setTeamPositionId('');
+          issues={issues}
+          value={{ companyCode, teamName, teamPositionId }}
+          onChange={(next) => {
+            setCompanyCode(next.companyCode);
+            setTeamName(next.teamName);
+            setTeamPositionId(next.teamPositionId);
           }}
-        >
-          <option value="">Choose a company</option>
-          {COMPANIES.map((company) => (
-            <option key={company.code} value={company.code}>
-              {company.name}
-            </option>
-          ))}
-        </Select>
-        <Select
-          label="Team and Position"
-          required
-          value={teamPositionId}
-          error={issues.teamPositionId}
-          disabled={busy || !companyCode}
-          onChange={(event) => setTeamPositionId(event.target.value)}
-        >
-          <option value="">Choose an assignment</option>
-          {assignments.map((assignment) => (
-            <option key={assignment.teamPositionId} value={assignment.teamPositionId}>
-              {assignment.label}
-            </option>
-          ))}
-        </Select>
+        />
         <Alert tone="info">
           Transferring changes what this employee may do from now on. It does not rewrite permits, signatures, or
           history already recorded under their previous assignment.

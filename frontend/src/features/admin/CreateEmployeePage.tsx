@@ -5,10 +5,11 @@ import { asApiError, fieldErrors } from '../../api/errors';
 import { ROUTES } from '../../app/routes';
 import { useCurrentUser } from '../../auth/useAuth';
 import { Button } from '../../ui/Button';
-import { FormError, Input, PasswordInput, Select } from '../../ui/Field';
+import { FormError, Input, PasswordInput } from '../../ui/Field';
 import { Alert, ErrorState, LoadingState } from '../../ui/Feedback';
 import { Card, PageHeader } from '../../ui/Layout';
 import { useToast } from '../../ui/Toast';
+import { OrganizationAssignmentFields } from './OrganizationAssignmentFields';
 import { useOrganization } from './useOrganization';
 
 /**
@@ -50,13 +51,13 @@ export function CreateEmployeePage() {
   const [email, setEmail] = useState('');
   const [temporaryPassword, setTemporaryPassword] = useState('');
   const [companyCode, setCompanyCode] = useState('');
+  const [teamName, setTeamName] = useState('');
   const [teamPositionId, setTeamPositionId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<{ message: string; requestId: string | null } | null>(null);
   const [issues, setIssues] = useState<Record<string, string>>({});
   const [created, setCreated] = useState<{ name: string; userId: string } | null>(null);
 
-  const assignments = companyCode ? (organization.optionsByCompany.get(companyCode) ?? []) : [];
 
   if (!capabilities.canManageEmployees) {
     return (
@@ -179,43 +180,18 @@ export function CreateEmployeePage() {
               />
 
               <div className="grid-2">
-                <Select
-                  label="Company"
-                  required
-                  value={companyCode}
-                  error={issues.companyCode}
+                <OrganizationAssignmentFields
+                  organization={organization}
+                  companies={COMPANIES}
                   disabled={submitting}
-                  onChange={(event) => {
-                    setCompanyCode(event.target.value);
-                    // The assignment belongs to the company that owns its
-                    // team, so changing company always clears it.
-                    setTeamPositionId('');
+                  issues={issues}
+                  value={{ companyCode, teamName, teamPositionId }}
+                  onChange={(next) => {
+                    setCompanyCode(next.companyCode);
+                    setTeamName(next.teamName);
+                    setTeamPositionId(next.teamPositionId);
                   }}
-                >
-                  <option value="">Choose a company</option>
-                  {COMPANIES.map((company) => (
-                    <option key={company.code} value={company.code}>
-                      {company.name}
-                    </option>
-                  ))}
-                </Select>
-
-                <Select
-                  label="Team and Position"
-                  required
-                  value={teamPositionId}
-                  error={issues.teamPositionId}
-                  disabled={submitting || !companyCode}
-                  hint={companyCode ? undefined : 'Choose a company first.'}
-                  onChange={(event) => setTeamPositionId(event.target.value)}
-                >
-                  <option value="">Choose an assignment</option>
-                  {assignments.map((assignment) => (
-                    <option key={assignment.teamPositionId} value={assignment.teamPositionId}>
-                      {assignment.label}
-                    </option>
-                  ))}
-                </Select>
+                />
               </div>
 
               <Alert tone="info">

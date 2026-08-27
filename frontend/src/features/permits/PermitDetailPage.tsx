@@ -19,6 +19,7 @@ import { emptyJsaForm, emptyPermitForm, pruneEmptyStrings } from './forms/defaul
 import { JsaFormFields } from './forms/JsaFormFields';
 import { PermitFormFields } from './forms/PermitFormFields';
 import { permitTypeLabel } from './labels';
+import { applicantIdentityOf } from '../../auth/applicantIdentity';
 import { V2DraftScreen } from './v2/V2DraftScreen';
 import './paper.css';
 
@@ -137,8 +138,7 @@ export function PermitDetailPage() {
       <V2DraftScreen
         permit={permit}
         jsa={jsa}
-        applicantName={capabilities.displayName}
-        applicantCompany={capabilities.profile?.company.name ?? ''}
+        applicant={applicantIdentityOf(capabilities)}
       />
     );
   }

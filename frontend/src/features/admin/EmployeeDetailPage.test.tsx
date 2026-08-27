@@ -123,7 +123,9 @@ describe('transfer', () => {
     await user.click(await screen.findByRole('button', { name: /^transfer$/i }));
     const dialog = await screen.findByRole('dialog');
     await user.selectOptions(within(dialog).getByLabelText(/^company/i), 'E_SET');
-    await user.selectOptions(within(dialog).getByLabelText(/team and position/i), 'tp-ebop-cro');
+    // E-SET has real teams, so Team is a genuine question before Position.
+    await user.selectOptions(within(dialog).getByLabelText(/^team/i), 'E-BOP');
+    await user.selectOptions(within(dialog).getByLabelText(/^position/i), 'tp-ebop-cro');
     await user.click(within(dialog).getByRole('button', { name: /^transfer$/i }));
 
     await waitFor(() => expect(calls.some((call) => call.method === 'PATCH')).toBe(true));

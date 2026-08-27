@@ -1,11 +1,30 @@
 import type { QueryFn } from '../../db/pool.js';
 import type { PrivilegedRole } from '../../authz/privilegedAccess.js';
 
+/** The privileged roles that may apply for a permit, as they are described to a person. */
+export const PRIVILEGED_APPLICANT_ROLE_LABELS = {
+  CEO: 'CEO',
+  SITE_MANAGER: 'System Site Manager',
+} as const;
+
+export type PrivilegedApplicantRole = (typeof PRIVILEGED_APPLICANT_ROLE_LABELS)[keyof typeof PRIVILEGED_APPLICANT_ROLE_LABELS];
+
 export interface PermitApplicantIdentity {
   kind: 'NORMAL' | 'PRIVILEGED';
   displayName: string;
   companyCode: 'E_SET' | 'ZPL' | 'SGRE';
   companyName: 'E-SET' | 'ZPL' | 'SGRE';
+  /**
+   * PRIVILEGED applicants only: the role that stands in for a job title,
+   * because a privileged account holds no team or position and must
+   * never be given a fabricated one. Null for a normal employee, whose
+   * team and position are their real workforce assignment.
+   *
+   * Derived here from the append-only privileged grant log - never from
+   * the request - so it cannot be supplied, chosen or spoofed by a
+   * client.
+   */
+  privilegedRole: PrivilegedApplicantRole | null;
 }
 
 export interface PermitApplicantAuthority {
@@ -32,9 +51,20 @@ export async function resolvePermitApplicantAuthority(
   const privilegedName = privileged.rows[0]?.display_name?.trim();
   if (privileged.rows.length > 0) {
     if (!privilegedName) return { allowed: false };
+    // CEO outranks, so an account holding both grants is described by the
+    // higher one rather than by whichever row came back first.
+    const role = privileged.rows.some((row) => row.role === 'CEO')
+      ? PRIVILEGED_APPLICANT_ROLE_LABELS.CEO
+      : PRIVILEGED_APPLICANT_ROLE_LABELS.SITE_MANAGER;
     return {
       allowed: true,
-      identity: { kind: 'PRIVILEGED', displayName: privilegedName, companyCode: 'E_SET', companyName: 'E-SET' },
+      identity: {
+        kind: 'PRIVILEGED',
+        displayName: privilegedName,
+        companyCode: 'E_SET',
+        companyName: 'E-SET',
+        privilegedRole: role,
+      },
     };
   }
 
@@ -63,6 +93,9 @@ export async function resolvePermitApplicantAuthority(
     allowed: true,
     identity: {
       kind: 'NORMAL', displayName, companyCode: row.company_code, companyName: row.company_name,
+      // A normal employee's job title is their real workforce assignment,
+      // never a privileged role.
+      privilegedRole: null,
     },
   };
 }

@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { getFormCatalogue, type FormCatalogue, type PermitTypeKey } from '../../../api/catalogue';
 import { saveV2JsaDraft, saveV2PermitDraft, submitPermit } from '../../../api/endpoints';
+import type { ApplicantIdentity } from '../../../auth/applicantIdentity';
 import type { Jsa, Permit } from '../../../api/types';
 import { ROUTES } from '../../../app/routes';
 import { useApiResource } from '../../../lib/useApiResource';
@@ -27,11 +28,15 @@ import { emptyJsaValues, emptyPermitValues, type JsaValuesV2, type PermitValuesV
 interface Props {
   permit: Permit;
   jsa: Jsa;
-  applicantName: string;
-  applicantCompany: string;
+  /**
+   * The server-derived applicant identity for the signed-in person. A
+   * privileged account carries a role instead of a team and position,
+   * because it genuinely has neither - see auth/applicantIdentity.ts.
+   */
+  applicant: ApplicantIdentity;
 }
 
-export function V2DraftScreen({ permit, jsa, applicantName, applicantCompany }: Props) {
+export function V2DraftScreen({ permit, jsa, applicant }: Props) {
   const catalogue = useApiResource<FormCatalogue>((signal) => getFormCatalogue(signal), []);
   const navigate = useNavigate();
   const toast = useToast();
@@ -57,6 +62,21 @@ export function V2DraftScreen({ permit, jsa, applicantName, applicantCompany }: 
           <span className="row">
             <StatusBadge status={permit.status} />
             <span>JSA {jsa.jsaDisplayNumber}</span>
+            {/*
+              Who this permit will be recorded as coming from. Shown here,
+              in the page chrome, rather than on the document: the
+              authoritative form has an Applicant line and a Company line
+              and no role field, and it is not this screen's place to add
+              one. A privileged applicant shows their role because they
+              hold no team or position to show instead.
+            */}
+            <span data-testid="applicant-identity">
+              {applicant.displayName} · {applicant.companyName}
+              {applicant.role ? ` · ${applicant.role}` : ''}
+              {applicant.kind === 'NORMAL' && applicant.teamName && applicant.positionName
+                ? ` · ${applicant.teamName} · ${applicant.positionName}`
+                : ''}
+            </span>
           </span>
         }
       />
@@ -69,10 +89,10 @@ export function V2DraftScreen({ permit, jsa, applicantName, applicantCompany }: 
         initialVersion={permit.version}
         authoritative={{
           permitNumber: permit.permitDisplayNumber,
-          applicantName,
-          applicantCompany,
+          applicantName: applicant.displayName,
+          applicantCompany: applicant.companyName,
           jsaNumber: jsa.jsaDisplayNumber,
-          completedBy: applicantName,
+          completedBy: applicant.displayName,
         }}
         onSaveDraft={async ({ version, permit: permitValues, jsa: jsaValues }) => {
           // One document, one concurrency token: the JSA save uses the

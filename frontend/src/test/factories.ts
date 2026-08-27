@@ -228,8 +228,21 @@ export const ORGANIZATION = {
       code: 'E_SET',
       name: 'E-SET',
       teams: [
-        { teamName: 'E-BOP', positions: [{ teamPositionId: 'tp-ebop-cro', positionName: 'CRO' }] },
+        {
+          teamName: 'E-BOP',
+          positions: [
+            { teamPositionId: 'tp-ebop-cro', positionName: 'CRO' },
+            { teamPositionId: 'tp-ebop-lead', positionName: 'Team Lead' },
+          ],
+        },
         { teamName: 'HSE', positions: [{ teamPositionId: 'tp-hse-lead', positionName: 'Team Lead' }] },
+        {
+          teamName: 'WTG',
+          positions: [
+            { teamPositionId: 'tp-wtg-technician', positionName: 'Technician' },
+            { teamPositionId: 'tp-wtg-engineer', positionName: 'Engineer' },
+          ],
+        },
       ],
     },
     {
@@ -243,6 +256,13 @@ export const ORGANIZATION = {
             { teamPositionId: 'tp-zpl-site-manager', positionName: 'Site Manager' },
           ],
         },
+      ],
+    },
+    {
+      code: 'SGRE',
+      name: 'SGRE',
+      teams: [
+        { teamName: 'SGRE', positions: [{ teamPositionId: 'tp-sgre-lead', positionName: 'Team Lead' }] },
       ],
     },
   ],
