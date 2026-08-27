@@ -11,7 +11,7 @@ import { Alert, ErrorState, SkeletonRows } from '../../ui/Feedback';
 import { Badge, FilterPanel, PageHeader, Pagination } from '../../ui/Layout';
 
 /**
- * The employee directory, for CEO and E-SET Site Managers.
+ * The employee directory, for CEO and System Site Managers.
  *
  * PRIVILEGED ACCOUNTS ARE NOT LISTED HERE. The backend excludes every
  * account holding an active privileged grant, so a CEO or Site Manager
@@ -82,7 +82,7 @@ export function EmployeeListPage() {
       <div className="stack">
         {!capabilities.canManageEmployees ? (
           <Alert tone="warning" title="Not available to you">
-            Employee administration is reserved to the CEO and E-SET Site Managers.
+            Employee administration is reserved to the CEO and System Site Managers.
           </Alert>
         ) : null}
 

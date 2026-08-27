@@ -34,7 +34,7 @@ describe('who may open this screen', () => {
     const { calls } = stubFetch({});
     renderAs(<SiteManagersPage />, siteManager());
 
-    expect(screen.getByText(/cannot appoint or remove another site manager/i)).toBeInTheDocument();
+    expect(screen.getByText(/cannot appoint or remove another system site manager/i)).toBeInTheDocument();
     // The listing is not even requested.
     expect(calls).toHaveLength(0);
   });

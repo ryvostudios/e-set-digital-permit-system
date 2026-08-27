@@ -355,6 +355,46 @@ they depend on the actual deployment topology:
   variables and `SUPABASE_DOCUMENT_BUCKET`; do not use the Auth Admin
   service-role key. Worker/download preflight verifies the exact bucket
   metadata and fails closed without upload when privacy cannot be proved.
+
+  This is a one-time operator task in the Supabase Dashboard, and the
+  backend deliberately cannot do it: creating the bucket and minting S3
+  credentials both require Dashboard authority the runtime does not have,
+  and a backend that could create its own bucket could also create a
+  public one. Exact steps:
+
+  1. **Storage → Buckets → New bucket.** Name it exactly
+     `issued-permit-documents` (or set `SUPABASE_DOCUMENT_BUCKET` to
+     whatever you name it). Leave **Public bucket OFF** - this is the
+     single most important switch on the page.
+  2. In the same dialog, set **Restrict file upload size** to a non-null
+     value (50 MB is ample; preflight requires at least 100 KB) and set
+     **Allowed MIME types** to `application/pdf`. Preflight checks all
+     three of these and refuses to upload if any is missing, so a bucket
+     created with the defaults will fail closed rather than store
+     anything.
+  3. **Project Settings → Storage → S3 Access Keys → New access key.**
+     Copy the access key id and secret **once** - the secret is not shown
+     again. These are Storage-scoped keys; do NOT substitute the Auth
+     Admin service-role key, which is a different credential with far
+     broader authority.
+  4. **Project Settings → Storage → S3 Connection** gives the endpoint
+     and region. The endpoint has the form
+     `https://<project-ref>.storage.supabase.co/storage/v1/s3`.
+  5. Put the four values in `backend/.env` (never in any `VITE_*`
+     variable, and never in a committed file):
+     `SUPABASE_STORAGE_ENDPOINT`, `SUPABASE_STORAGE_REGION`,
+     `SUPABASE_STORAGE_ACCESS_KEY_ID`,
+     `SUPABASE_STORAGE_SECRET_ACCESS_KEY`, plus
+     `SUPABASE_DOCUMENT_BUCKET` if the name differs from the default.
+     All four are required together - configure one and the environment
+     schema rejects the partial configuration rather than starting
+     half-enabled.
+  6. Restart the backend and re-run the storage preflight.
+
+  Until this is done the system is not broken, it is fail-closed: the
+  unconfigured adapter returns `STORAGE_NOT_CONFIGURED`, document jobs
+  stay `PENDING` for retry, and a download request answers 202/503 rather
+  than ever serving a placeholder file.
 - **Provisioning the first CEO.** Run `npm run bootstrap:ceo` from
   `backend/`, with `SUPABASE_SERVICE_ROLE_KEY` configured and
   `BOOTSTRAP_CEO_EMAIL` / `BOOTSTRAP_CEO_PASSWORD` (and optionally

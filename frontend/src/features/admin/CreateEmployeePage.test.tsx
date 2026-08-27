@@ -40,7 +40,7 @@ describe('authorization', () => {
   it('refuses an ordinary employee who reaches the URL directly', () => {
     stubFetch({});
     renderAs(<CreateEmployeePage />, normalEmployee());
-    expect(screen.getByText(/reserved to the ceo and e-set site managers/i)).toBeInTheDocument();
+    expect(screen.getByText(/reserved to the ceo and system site managers/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/display name/i)).not.toBeInTheDocument();
   });
 

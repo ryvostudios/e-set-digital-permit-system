@@ -148,3 +148,28 @@ describe('navigation groups', () => {
     for (const group of groups) expect(group.items.length).toBeGreaterThan(0);
   });
 });
+
+describe('Audit Logs in the navigation', () => {
+  it('is offered to both privileged system roles', () => {
+    for (const user of [ceo(), siteManager()]) {
+      expect(linksFor(user)).toContain(ROUTES.auditLogs);
+    }
+  });
+
+  it('is offered to nobody else - a ZPL Site Manager job title is not the system role', () => {
+    for (const user of [
+      normalEmployee(),
+      zplSiteManagerEmployee(),
+      normalEmployee({ capabilities: ['permit.view_all'] }),
+    ]) {
+      expect(linksFor(user)).not.toContain(ROUTES.auditLogs);
+    }
+  });
+
+  it('names the privileged screen "System Site Managers", not the ZPL job title', () => {
+    const administration = buildNavigation(deriveCapabilities(ceo()))
+      .find((group) => group.label === 'Administration');
+    const item = administration?.items.find((entry) => entry.to === ROUTES.siteManagers);
+    expect(item?.label).toBe('System Site Managers');
+  });
+});

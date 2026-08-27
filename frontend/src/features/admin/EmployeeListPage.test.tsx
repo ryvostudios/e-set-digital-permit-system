@@ -119,7 +119,7 @@ describe('authorization', () => {
     stubFetch({ 'GET /api/v1/admin/employees': { status: 403, body: { error: 'forbidden' } } });
     renderAs(<EmployeeListPage />, normalEmployee());
 
-    expect(screen.getByText(/reserved to the ceo and e-set site managers/i)).toBeInTheDocument();
+    expect(screen.getByText(/reserved to the ceo and system site managers/i)).toBeInTheDocument();
     expect(await screen.findByText(/do not have permission/i)).toBeInTheDocument();
   });
 });

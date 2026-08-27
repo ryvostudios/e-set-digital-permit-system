@@ -799,6 +799,82 @@ test('NOBODY else reaches the administrative audit - no capability, no broad per
   }
 });
 
+test('the GLOBAL Audit Logs screen is reachable by BOTH privileged system roles', async () => {
+  const { url, close } = await startServer();
+  try {
+    for (const [label, authorize] of [
+      ['CEO', authorizeCeo],
+      ['E-SET SITE_MANAGER', authorizeSiteManager],
+    ] as const) {
+      authenticatedUserId = nextActorId();
+      authorize();
+      const response = await get(url, '/admin/audit-logs', VALID_TOKEN);
+      assert.equal(response.status, 200, `${label} must reach Audit Logs`);
+      const body = await response.json() as { items: unknown[]; page: number; pageSize: number };
+      assert.ok(Array.isArray(body.items), `${label} must receive a paged list`);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('NOBODY else reaches the global Audit Logs - same gate as the per-employee audit', async () => {
+  const { url, close } = await startServer();
+  try {
+    // The whole point of a separate global screen is that it must not
+    // become a wider door than the per-employee history. `permit.view_all`
+    // and the employee.* capability NAMES are listed deliberately: broad
+    // permit visibility and a ZPL organizational "Site Manager" job title
+    // are both distinct from the privileged E-SET SITE_MANAGER role.
+    for (const capabilities of [
+      [],
+      ['permit.view_all'],
+      ['permit.create', 'permit.submit'],
+      ['permit.cro_review'],
+      ['permit.hse_review'],
+      ['employee.create', 'employee.reset_password'],
+    ]) {
+      authenticatedUserId = nextActorId();
+      grantedCapabilities = capabilities;
+      privilegedGrants = {};
+      assert.equal(
+        (await get(url, '/admin/audit-logs', VALID_TOKEN)).status,
+        403,
+        `capabilities ${JSON.stringify(capabilities)} must not reach Audit Logs`,
+      );
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('Audit Logs is read-only and narrowly paged - no mutation verb, no filter parameter', async () => {
+  const { url, close } = await startServer();
+  try {
+    authenticatedUserId = nextActorId();
+    authorizeCeo();
+    // There is no mutation counterpart at this path, for either role.
+    for (const method of ['POST', 'PATCH', 'DELETE', 'PUT'] as const) {
+      const response = await fetch(new URL('/api/v1/admin/audit-logs', url), {
+        method,
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      assert.ok(response.status === 404 || response.status === 405, `${method} must not be a route`);
+    }
+    // Paging is the only accepted input; anything else is refused rather
+    // than silently ignored, so no parameter can redirect the read.
+    authenticatedUserId = nextActorId();
+    authorizeCeo();
+    assert.equal((await get(url, '/admin/audit-logs?page=1&pageSize=10', VALID_TOKEN)).status, 200);
+    authenticatedUserId = nextActorId();
+    authorizeCeo();
+    assert.equal((await get(url, '/admin/audit-logs?targetUserId=' + EMPLOYEE_ID, VALID_TOKEN)).status, 400);
+  } finally {
+    await close();
+  }
+});
+
 test('permit workflow history is NOT the administrative audit and is not swept up by this rule', async () => {
   // A permit's own lifecycle is business information for the people
   // working it. It lives on the permit routes under permit

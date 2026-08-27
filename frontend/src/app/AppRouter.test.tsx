@@ -115,7 +115,7 @@ describe('reaching a privileged screen directly', () => {
   it('does not unlock employee administration for an ordinary employee either', async () => {
     stubQuietFetch();
     renderRouter(stateFor({ user: normalEmployee() }), '/admin/employees');
-    expect(await screen.findByText(/reserved to the ceo and e-set site managers/i)).toBeInTheDocument();
+    expect(await screen.findByText(/reserved to the ceo and system site managers/i)).toBeInTheDocument();
   });
 
   it('allows it for the CEO', async () => {

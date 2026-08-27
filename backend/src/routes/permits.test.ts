@@ -1455,6 +1455,34 @@ test('GET /permits/:id/pdf downloads and serves an authorized immutable PDF only
   } finally { await close(); }
 });
 
+test('permit.view_all can DOWNLOAD an issued PDF it does not own, but gains no approval authority', async () => {
+  // The two halves of this are deliberately asserted together, because
+  // the risk is that broad VISIBILITY quietly becomes workflow AUTHORITY.
+  // Reading an issued record and approving one are different powers.
+  const bytes = Buffer.from('%PDF-1.7 view_all download');
+  setGeneratedDocument(computeFileHash(bytes));
+  setDocumentStorageAdapterForTests({
+    async upload() { return { ok: true }; },
+    async download() { return { ok: true, data: bytes }; },
+  });
+  const { url, close } = await startServer();
+  try {
+    grantedCapabilities = ['permit.view_all'];
+    const download = await getRequest(url, `/permits/${SOME_PERMIT_ID}/pdf`, VALID_TOKEN);
+    assert.equal(download.status, 200, 'broad visibility may read the issued document');
+
+    // ...and nothing more. Approval routes need their own capability.
+    for (const path of [`/permits/${SOME_PERMIT_ID}/forward-hse`, `/permits/${SOME_PERMIT_ID}/hse-approve`, `/permits/${SOME_PERMIT_ID}/send-back`]) {
+      const response = await fetch(new URL(`/api/v1${path}`, url), {
+        method: 'POST',
+        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ expectedVersion: 1 }),
+      });
+      assert.equal(response.status, 403, `${path} must refuse a permit.view_all holder`);
+    }
+  } finally { await close(); }
+});
+
 test('GET /permits/:id/pdf refuses altered Storage bytes without leaking the private path', async () => {
   setGeneratedDocument(computeFileHash(Buffer.from('expected bytes')));
   let downloads = 0;

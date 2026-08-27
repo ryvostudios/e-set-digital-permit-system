@@ -247,6 +247,90 @@ export async function loadEmployeeAuditHistory(
   };
 }
 
+/** One row of the organization-wide administrative audit. */
+export interface GlobalAuditEntry extends AccountAuditEntry {
+  targetUserId: string;
+  targetDisplayName: string | null;
+  actorDisplayName: string | null;
+}
+
+/**
+ * The ORGANIZATION-WIDE administrative/security audit, newest first.
+ *
+ * The same append-only rows the per-employee history serves, without the
+ * `target_user_id` filter - so it answers "what has been done to accounts
+ * here", not "what has been done to this one". Ordered by `ordinal`, the
+ * append-only insertion order, so two events written in the same
+ * transaction keep their true sequence rather than tying on a timestamp.
+ *
+ * AUTHORIZATION IS NOT HERE. This is a read model; the route decides who
+ * may call it, using exactly the same privileged check as the
+ * per-employee history. There is deliberately no filter parameter that
+ * could widen or redirect what it returns beyond paging.
+ *
+ * Display names are resolved for the people involved so the screen does
+ * not have to show raw user ids. A name is LEFT JOINed from both
+ * identity tables because an actor may be privileged (CEO / system Site
+ * Manager, who have no workforce profile) or an ordinary employee, and
+ * either may appear; a missing name stays null rather than inventing one.
+ */
+export async function loadGlobalAuditHistory(
+  queryFn: QueryFn,
+  limit: number,
+  offset: number,
+): Promise<{ items: GlobalAuditEntry[]; totalCount: number }> {
+  const rows = await queryFn<{
+    event_type: string;
+    actor_user_id: string;
+    target_user_id: string;
+    created_at: string;
+    previous_company_code: string | null;
+    new_company_code: string | null;
+    previous_team_position_id: string | null;
+    new_team_position_id: string | null;
+    capability_name: string | null;
+    target_display_name: string | null;
+    actor_display_name: string | null;
+  }>(
+    `SELECT e.event_type, e.actor_user_id, e.target_user_id, e.created_at,
+            pc.code AS previous_company_code, nc.code AS new_company_code,
+            e.previous_team_position_id, e.new_team_position_id,
+            cap.name AS capability_name,
+            COALESCE(tw.display_name, tp.display_name) AS target_display_name,
+            COALESCE(aw.display_name, ap.display_name) AS actor_display_name
+       FROM account_audit_events e
+       LEFT JOIN companies pc ON pc.id = e.previous_company_id
+       LEFT JOIN companies nc ON nc.id = e.new_company_id
+       LEFT JOIN capabilities cap ON cap.id = e.capability_id
+       LEFT JOIN workforce_profiles tw ON tw.user_id = e.target_user_id
+       LEFT JOIN privileged_identities tp ON tp.user_id = e.target_user_id
+       LEFT JOIN workforce_profiles aw ON aw.user_id = e.actor_user_id
+       LEFT JOIN privileged_identities ap ON ap.user_id = e.actor_user_id
+      ORDER BY e.ordinal DESC
+      LIMIT $1 OFFSET $2`,
+    [limit, offset],
+  );
+  const total = await queryFn<{ count: string }>(
+    'SELECT count(*)::text AS count FROM account_audit_events',
+  );
+  return {
+    items: rows.rows.map((row) => ({
+      eventType: row.event_type,
+      actorUserId: row.actor_user_id,
+      targetUserId: row.target_user_id,
+      occurredAt: new Date(row.created_at).toISOString(),
+      previousCompanyCode: row.previous_company_code,
+      newCompanyCode: row.new_company_code,
+      previousTeamPositionId: row.previous_team_position_id,
+      newTeamPositionId: row.new_team_position_id,
+      capabilityName: row.capability_name,
+      targetDisplayName: row.target_display_name,
+      actorDisplayName: row.actor_display_name,
+    })),
+    totalCount: Number(total.rows[0]?.count ?? '0'),
+  };
+}
+
 // ---------------------------------------------------------------------
 // Rename
 // ---------------------------------------------------------------------

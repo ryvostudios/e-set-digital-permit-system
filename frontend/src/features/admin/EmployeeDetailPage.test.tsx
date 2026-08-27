@@ -58,7 +58,7 @@ describe('authorization', () => {
       normalEmployee(),
       { route: '/admin/employees/employee-1' },
     );
-    expect(screen.getByText(/reserved to the ceo and e-set site managers/i)).toBeInTheDocument();
+    expect(screen.getByText(/reserved to the ceo and system site managers/i)).toBeInTheDocument();
   });
 });
 

@@ -44,7 +44,7 @@ function usePageContext(): { section: string; title: string } {
   if (pathname.startsWith(ROUTES.notifications)) return { section: 'Overview', title: 'Notifications' };
   if (pathname.startsWith(ROUTES.employeeNew)) return { section: 'Administration', title: 'Add employee' };
   if (pathname.startsWith(ROUTES.employees)) return { section: 'Administration', title: 'Employees' };
-  if (pathname.startsWith(ROUTES.siteManagers)) return { section: 'Administration', title: 'Site Managers' };
+  if (pathname.startsWith(ROUTES.siteManagers)) return { section: 'Administration', title: 'System Site Managers' };
   return { section: 'E-SET', title: 'Permit to Work' };
 }
 

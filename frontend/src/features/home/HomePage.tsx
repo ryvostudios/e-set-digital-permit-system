@@ -187,7 +187,7 @@ export function HomePage() {
                 </Link>
                 {capabilities.canManageSiteManagers ? (
                   <Link className="btn btn--secondary btn--sm" to={ROUTES.siteManagers}>
-                    Site Managers
+                    System Site Managers
                   </Link>
                 ) : null}
               </div>

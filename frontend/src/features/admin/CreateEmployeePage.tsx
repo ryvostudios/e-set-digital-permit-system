@@ -63,7 +63,7 @@ export function CreateEmployeePage() {
       <>
         <PageHeader eyebrow="Administration" title="Add employee" />
         <Alert tone="warning" title="Not available to you">
-          Creating employee accounts is reserved to the CEO and E-SET Site Managers.
+          Creating employee accounts is reserved to the CEO and System Site Managers.
         </Alert>
       </>
     );

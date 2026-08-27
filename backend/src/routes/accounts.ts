@@ -9,6 +9,7 @@ import {
   changeEmployeeEmail,
   deleteEmployeeAccount,
   loadEmployeeAuditHistory,
+  loadGlobalAuditHistory,
   loadEmployeeDetail,
   setEmployeeAccountState,
   transferEmployee,
@@ -932,6 +933,49 @@ accountsRouter.get(
     }
     const { page, pageSize } = pagination.data;
     const history = await loadEmployeeAuditHistory(query, params.data.id, pageSize, (page - 1) * pageSize);
+    res.status(200).json({
+      items: history.items,
+      page,
+      pageSize,
+      totalCount: history.totalCount,
+      totalPages: history.totalCount === 0 ? 0 : Math.ceil(history.totalCount / pageSize),
+    });
+  },
+);
+
+/**
+ * The ORGANIZATION-WIDE administrative/security audit - Administration →
+ * Audit Logs.
+ *
+ * Same authorization as the per-employee history and nothing looser: an
+ * active CEO, or an active E-SET system SITE_MANAGER, both resolved from
+ * the append-only privileged grant log on every request. A ZPL
+ * organizational "Site Manager" job title is not this role, and
+ * `permit.view_all` - however broadly it widens permit visibility -
+ * grants nothing here. Everyone else gets 403.
+ *
+ * READ-ONLY, and structurally so: this is the only global audit route,
+ * there is no mutation counterpart anywhere, and the underlying table is
+ * append-only in the database for every role including the CEO
+ * (`forbid_mutation()`, db/auditImmutability.test.ts).
+ *
+ * Paged narrowly - the query schema accepts page/pageSize and nothing
+ * else, so there is no parameter capable of redirecting the read.
+ */
+accountsRouter.get(
+  '/admin/audit-logs',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const pagination = employeeHistoryQuerySchema.safeParse(req.query);
+    if (!pagination.success) {
+      sendValidationError(res, pagination.error.issues);
+      return;
+    }
+    const { page, pageSize } = pagination.data;
+    const history = await loadGlobalAuditHistory(query, pageSize, (page - 1) * pageSize);
     res.status(200).json({
       items: history.items,
       page,

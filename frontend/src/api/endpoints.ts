@@ -1,5 +1,6 @@
 import { apiDownload, apiRequest } from './client';
 import type {
+  AuditLogsResponse,
   AppNotification,
   CurrentUser,
   EmployeeDetail,
@@ -279,6 +280,20 @@ export function getOrganization(signal?: AbortSignal): Promise<{ companies: Orga
 /** GET /api/v1/admin/employees/:id */
 export function getEmployee(id: string, signal?: AbortSignal): Promise<{ employee: EmployeeDetail }> {
   return apiRequest(`/admin/employees/${encodeURIComponent(id)}`, { ...(signal ? { signal } : {}) });
+}
+
+/**
+ * GET /api/v1/admin/audit-logs - the organization-wide administrative
+ * audit. Paging is the only input; the server refuses anything else.
+ */
+export function listAuditLogs(
+  params: { page?: number; pageSize?: number } = {},
+  signal?: AbortSignal,
+): Promise<AuditLogsResponse> {
+  return apiRequest('/admin/audit-logs', {
+    query: { ...params },
+    ...(signal ? { signal } : {}),
+  });
 }
 
 /** GET /api/v1/admin/employees/:id/history */

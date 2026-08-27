@@ -411,6 +411,21 @@ export interface AccountAuditEntry {
   capabilityName: string | null;
 }
 
+/** One row of the organization-wide administrative audit. */
+export interface GlobalAuditEntry extends AccountAuditEntry {
+  targetUserId: string;
+  targetDisplayName: string | null;
+  actorDisplayName: string | null;
+}
+
+export interface AuditLogsResponse {
+  items: GlobalAuditEntry[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  totalPages: number;
+}
+
 export interface EmployeeHistoryResponse {
   items: AccountAuditEntry[];
   page: number;

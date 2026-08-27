@@ -181,7 +181,7 @@ export function EmployeeDetailPage() {
       <>
         <PageHeader eyebrow="Administration" title="Employee" />
         <Alert tone="warning" title="Not available to you">
-          Employee administration is reserved to the CEO and E-SET Site Managers.
+          Employee administration is reserved to the CEO and System Site Managers.
         </Alert>
       </>
     );

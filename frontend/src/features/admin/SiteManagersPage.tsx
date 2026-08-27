@@ -62,10 +62,10 @@ export function SiteManagersPage() {
   if (!capabilities.canManageSiteManagers) {
     return (
       <>
-        <PageHeader eyebrow="Administration" title="Site Managers" />
+        <PageHeader eyebrow="Administration" title="System Site Managers" />
         <Alert tone="warning" title="Not available to you">
-          Site Manager administration is reserved to the CEO. A Site Manager cannot appoint or remove another Site
-          Manager.
+          System Site Manager administration is reserved to the CEO. A System Site Manager cannot appoint or remove
+          another System Site Manager.
         </Alert>
       </>
     );
@@ -138,8 +138,8 @@ export function SiteManagersPage() {
     <>
       <PageHeader
         eyebrow="Administration"
-        title="Site Managers"
-        description="E-SET Site Managers are privileged system accounts. They hold a personal name and a login — no Company, Team, or Position."
+        title="System Site Managers"
+        description="System Site Managers are privileged E-SET system accounts, distinct from the ZPL Site Manager job title. They hold a personal name and a login — no Company, Team, or Position."
         actions={
           <Button
             variant="primary"
@@ -173,7 +173,7 @@ export function SiteManagersPage() {
             <ErrorState error={resource.error} onRetry={resource.reload} />
           ) : siteManagers.length === 0 ? (
             <div className="state">
-              <p className="state__title">No Site Managers</p>
+              <p className="state__title">No System Site Managers</p>
               <p className="state__body">
                 {channelUnavailable
                   ? 'The list cannot be read until the privileged channel is configured.'
