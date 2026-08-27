@@ -215,36 +215,49 @@ they depend on the actual deployment topology:
   normally. Connection strings and passwords never reach a log line;
   database errors are sanitized through `toSafeDbErrorMessage`.
 
-  **OUTSTANDING OPERATOR DECISION - `service_role` DML.** Live
-  verification found that Supabase's default privileges on schema `public`
-  give the built-in `service_role` full `INSERT/UPDATE/DELETE/TRUNCATE` on
-  every application table, including `privileged_access_events` and
-  `privileged_identities`. `service_role` cannot log in directly
-  (`rolcanlogin = false`) but is reachable through PostgREST with the
-  Supabase service key, so a holder of that key can append a privileged
-  event directly and thereby grant SITE_MANAGER or CEO - bypassing both
-  the HTTP gate and the dedicated `privileged_runtime` channel.
+  **`service_role` privilege hardening (migration 0022 - APPLIED and
+  live-verified).** Live verification of 0019/0020 found
+  that Supabase's default privileges on schema `public` gave the built-in
+  `service_role` full `INSERT/UPDATE/DELETE/TRUNCATE` on
+  `privileged_access_events`, `privileged_identities` and
+  `initial_ceo_bootstrap`, plus `rwU` on the grant log's sequence.
+  `service_role` cannot log in directly (`rolcanlogin = false`) but is
+  reachable through PostgREST with the Supabase service key, so a holder
+  of that key could insert a CEO grant directly and bypass every other
+  gate. Migration 0022 revokes exactly those write privileges (SELECT is
+  retained) and re-asserts the function lockdown from 0021, then verifies
+  its own result with `has_table_privilege` / `has_sequence_privilege` /
+  `has_function_privilege` and fails the migration if anything remains.
 
-  This is pre-existing and schema-wide (it applies equally to migrations
-  0001-0018), NOT introduced by Layer 1, and it was deliberately not
-  changed unilaterally: narrowing `service_role` affects Supabase Studio
-  and other managed tooling across the whole project. Migration 0021 did
-  remove the equivalent `EXECUTE` grant on the privileged grant function.
-  What still holds regardless: migration 0004's `forbid_mutation` triggers
-  refuse UPDATE/DELETE/TRUNCATE on the grant log for EVERY role including
-  `service_role`, so existing history cannot be altered or erased by any
-  credential - only appended to.
+  It is deliberately narrow: only those four objects. The `auth` and
+  `storage` schemas, Supabase-managed functions, and every permit/JSA
+  table are untouched, and `service_role` keeps all its other privileges.
+  0022 requires no `app_runtime` privilege change and creates no object.
 
-  If you accept the trade-off, the minimal narrowing is:
-  ```sql
-  REVOKE INSERT, UPDATE, DELETE, TRUNCATE
-    ON TABLE public.privileged_access_events FROM service_role;
-  REVOKE INSERT, UPDATE, DELETE, TRUNCATE
-    ON TABLE public.privileged_identities FROM service_role;
-  ```
-  `SELECT` is retained so dashboard/read tooling keeps working. Verify
-  nothing in your Supabase workflow writes those two tables first. Treat
-  `SUPABASE_SERVICE_ROLE_KEY` as a break-glass credential either way.
+  Operational consequence: writing those four tables from the Supabase
+  Studio table editor (which acts as `service_role`) will stop working;
+  reading them still works. Confirm nothing in your Supabase workflow
+  writes them before applying.
+
+  Live-verified after applying: every one of INSERT, UPDATE, DELETE,
+  TRUNCATE, TRIGGER and REFERENCES is now false for `service_role` on all
+  three tables; USAGE/SELECT/UPDATE on the grant-log sequence are false;
+  EXECUTE on the grant function is false and its ACL is
+  `{postgres=X/postgres}`. SELECT is retained on all three tables. Proven
+  by attempt as well as by catalog: under `SET LOCAL ROLE service_role`
+  every write, `nextval`, and function call is rejected with
+  `permission denied`, while SELECT still succeeds.
+
+  Standing rule: Supabase's default privileges apply to every NEW table
+  and sequence in `public`, so any future table holding authorization
+  state must revoke them in its own migration.
+
+  STILL OPEN - broader sweep. `service_role` retains DML on the remaining
+  application tables, including `team_position_capabilities` and
+  `user_team_positions`, so the service key can still grant itself
+  OPERATIONAL capabilities (for example CRO). That is not CEO/SITE_MANAGER
+  authority and was deliberately left out of 0022; a full application-table
+  hardening sweep is scheduled after Layers 2 and 3, before go-live.
 
   **Pre-existing gap this exposes:** `npm run bootstrap:ceo` connects with
   `DATABASE_URL` (`app_runtime`) and writes a CEO grant directly, so it

@@ -5,7 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 
 /**
- * The REAL 0001 -> 0021 migration chain, executed end to end against a
+ * The REAL 0001 -> 0022 migration chain, executed end to end against a
  * genuine PostgreSQL engine. Nothing here hand-builds a schema subset:
  * every assertion is made against whatever the actual migration files
  * produce, so a change to any of them that breaks these invariants fails
@@ -29,6 +29,13 @@ async function createSupabaseSubstrate(): Promise<PGlite> {
   await db.exec(`
     CREATE EXTENSION pgcrypto;
     CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;
+    -- Mirror Supabase's project defaults: every object the migration
+    -- owner creates in public is granted to service_role. Without this
+    -- the harness would never reproduce the escalation 0021/0022 close,
+    -- and those lockdowns would pass vacuously.
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO service_role;
     CREATE SCHEMA auth;
     CREATE TABLE auth.users (id uuid PRIMARY KEY);
     INSERT INTO auth.users VALUES ('${EMPLOYEE}'), ('${OTHER_EMPLOYEE}'), ('${PRIVILEGED}');
@@ -93,11 +100,11 @@ async function capabilitiesOf(db: PGlite, teamPosition: string): Promise<string[
   return result.rows.map((row) => row.name);
 }
 
-describe('0019 + 0020 + 0021 on the actual repository migration chain', { concurrency: false }, () => {
+describe('0019 - 0022 on the actual repository migration chain', { concurrency: false }, () => {
   let db: PGlite;
   before(async () => {
     db = await createSupabaseSubstrate();
-    await applyRealMigrations(db, 21);
+    await applyRealMigrations(db, 22);
   });
   after(async () => { await db.close(); });
 
@@ -579,6 +586,125 @@ describe('0019 + 0020 + 0021 on the actual repository migration chain', { concur
       db.exec(`SELECT public.record_site_manager_grant('${CEO}', '${EMPLOYEE}', 'GRANTED')`),
       /normal workforce employee/,
     );
+  });
+
+  // -------------------------------------------------------------------
+  // 0022: service_role cannot manufacture privileged authority
+  // -------------------------------------------------------------------
+
+  test('the harness reproduces the Supabase default grants 0021/0022 exist to remove', async () => {
+    // Guards against these lockdown tests passing vacuously: service_role
+    // must genuinely receive Supabase-style defaults on objects created
+    // AFTER 0022, or the checks below prove nothing.
+    await db.exec('CREATE TABLE public.probe_default_privs (x int)');
+    const granted = await db.query<{ c: number }>(
+      `SELECT count(*)::int AS c FROM information_schema.role_table_grants
+        WHERE table_name = 'probe_default_privs' AND grantee = 'service_role'
+          AND privilege_type = 'INSERT'`,
+    );
+    assert.equal(granted.rows[0]?.c, 1, 'the harness must model Supabase default privileges');
+    await db.exec('DROP TABLE public.probe_default_privs');
+  });
+
+  test('service_role cannot write the grant log, by attempt as that role', async () => {
+    // The Supabase service key reaches the database AS `service_role`
+    // through PostgREST. Until 0022 it held full DML here through
+    // Supabase's default privileges on `public`, which meant the key
+    // alone could insert a CEO grant and bypass every other gate.
+    await db.exec('SET ROLE service_role');
+    try {
+      await assert.rejects(
+        db.exec(`INSERT INTO public.privileged_access_events (user_id, role, action)
+                 VALUES ('${IMPOSTOR}', 'CEO', 'GRANTED')`),
+        /permission denied/,
+      );
+      await assert.rejects(
+        db.exec(`UPDATE public.privileged_access_events SET action = 'REVOKED' WHERE user_id = '${SM_TARGET}'`),
+        /permission denied/,
+      );
+      await assert.rejects(
+        db.exec(`DELETE FROM public.privileged_access_events WHERE user_id = '${SM_TARGET}'`),
+        /permission denied/,
+      );
+      await assert.rejects(
+        db.exec('TRUNCATE public.privileged_access_events'),
+        /permission denied/,
+      );
+      await assert.rejects(
+        db.exec(`SELECT public.record_site_manager_grant('${CEO}', '${IMPOSTOR}', 'GRANTED')`),
+        /permission denied/,
+      );
+      // The append path needs the sequence; that is gone too.
+      await assert.rejects(
+        db.exec(`SELECT nextval('public.privileged_access_events_ordinal_seq')`),
+        /permission denied/,
+      );
+      // Reading is deliberately retained for support tooling.
+      const readable = await db.query('SELECT count(*)::int AS c FROM public.privileged_access_events');
+      assert.ok(readable.rows.length === 1, 'SELECT is intentionally kept');
+    } finally {
+      await db.exec('RESET ROLE');
+    }
+  });
+
+  test('service_role cannot rewrite privileged identities or hijack the CEO bootstrap', async () => {
+    await db.exec('SET ROLE service_role');
+    try {
+      await assert.rejects(
+        db.exec(`UPDATE public.privileged_identities SET display_name = 'Impostor' WHERE user_id = '${CEO}'`),
+        /permission denied/,
+      );
+      await assert.rejects(
+        db.exec(`INSERT INTO public.privileged_identities (user_id, display_name)
+                 VALUES ('${NAMELESS}', 'Planted')`),
+        /permission denied/,
+      );
+      await assert.rejects(
+        db.exec(`UPDATE public.initial_ceo_bootstrap SET status = 'RESERVED'`),
+        /permission denied/,
+      );
+      await assert.rejects(
+        db.exec(`INSERT INTO public.initial_ceo_bootstrap (singleton, email, status)
+                 VALUES (TRUE, 'attacker@example.com', 'RESERVED')`),
+        /permission denied/,
+      );
+      const stillReadable = await db.query('SELECT count(*)::int AS c FROM public.privileged_identities');
+      assert.ok(stillReadable.rows.length === 1);
+    } finally {
+      await db.exec('RESET ROLE');
+    }
+  });
+
+  test('0022 leaves every intended channel exactly as it was', async () => {
+    // app_runtime: still unable to write privileged authority (0019).
+    // Its SELECT is an operator-side grant documented in DEPLOYMENT.md
+    // rather than something any migration issues, so it is deliberately
+    // not asserted here - only the denials, which the migrations own.
+    const appRuntime = await db.query<{ ins: boolean; exec: boolean; seq: boolean }>(
+      `SELECT has_table_privilege('app_runtime','public.privileged_access_events','INSERT') AS ins,
+              has_function_privilege('app_runtime','public.record_site_manager_grant(uuid, uuid, text)','EXECUTE') AS exec,
+              has_sequence_privilege('app_runtime','public.privileged_access_events_ordinal_seq','USAGE') AS seq`,
+    );
+    assert.deepEqual(appRuntime.rows[0], { ins: false, exec: false, seq: false });
+
+    // The operator/owner bootstrap path is untouched.
+    const owner = await db.query<{ grant_log: boolean; bootstrap: boolean }>(
+      `SELECT has_table_privilege('postgres','public.privileged_access_events','INSERT') AS grant_log,
+              has_table_privilege('postgres','public.initial_ceo_bootstrap','INSERT') AS bootstrap`,
+    );
+    assert.deepEqual(owner.rows[0], { grant_log: true, bootstrap: true });
+
+    // privileged_runtime, once the operator creates it, is the ONLY role
+    // besides the owner that may execute the grant function.
+    await db.exec('CREATE ROLE privileged_runtime');
+    await db.exec('GRANT EXECUTE ON FUNCTION public.record_site_manager_grant(UUID, UUID, TEXT) TO privileged_runtime');
+    const pr = await db.query<{ exec: boolean; ins: boolean; sel: boolean }>(
+      `SELECT has_function_privilege('privileged_runtime','public.record_site_manager_grant(uuid, uuid, text)','EXECUTE') AS exec,
+              has_table_privilege('privileged_runtime','public.privileged_access_events','INSERT') AS ins,
+              has_table_privilege('privileged_runtime','public.privileged_access_events','SELECT') AS sel`,
+    );
+    assert.deepEqual(pr.rows[0], { exec: true, ins: false, sel: false },
+      'EXECUTE only - no table privilege of any kind');
   });
 
   test('multiple concurrent SITE_MANAGER identities are allowed', async () => {

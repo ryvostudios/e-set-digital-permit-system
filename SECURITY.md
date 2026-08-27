@@ -86,17 +86,42 @@ active CEO, and the function independently re-derives the supplied
 actor's CEO status. The role it writes is a hardcoded literal, so no
 argument can produce a CEO grant.
 
-KNOWN, UNRESOLVED: Supabase's default privileges give the built-in
-`service_role` full DML on every table in `public`, so a holder of the
-Supabase service key can append a privileged event directly through
-PostgREST, bypassing both gates. This is pre-existing and schema-wide
-rather than a property of the privileged tier, and narrowing it is a
-project-wide operator decision (exact SQL in DEPLOYMENT.md). Migration
-0021 removed the equivalent EXECUTE grant on the privileged function.
-Migration 0004's `forbid_mutation` triggers continue to make the log
-append-only for every role, `service_role` included, so recorded history
-cannot be rewritten by any credential. Treat
-`SUPABASE_SERVICE_ROLE_KEY` as a break-glass credential.
+The four authority channels are separated by DATABASE ROLE, not only by
+application code:
+
+- `app_runtime` (every ordinary request) - cannot create or revoke
+  privileged authority. No INSERT on `privileged_access_events`, no
+  sequence privilege, no EXECUTE on the grant function.
+- `privileged_runtime` (CEO Site Manager administration only) - CONNECT,
+  schema USAGE, and EXECUTE on the one hardened SITE_MANAGER grant
+  function. No table privilege of any kind, and it cannot create a CEO
+  because the role written by that function is a hardcoded literal.
+- `service_role` (Supabase Auth Admin only) - used exclusively over HTTP
+  to create users, set passwords and delete users. Migrations 0021 and
+  0022 explicitly deny it EXECUTE on the grant function and all
+  INSERT/UPDATE/DELETE/TRUNCATE on `privileged_access_events`,
+  `privileged_identities` and `initial_ceo_bootstrap`, plus every
+  privilege on the grant log's sequence. SELECT is retained so support
+  tooling can still read governance history.
+- operator / owner (`postgres`) - migrations and the one-time CEO
+  bootstrap. This is the only channel that can create a CEO.
+
+Supabase's default privileges grant `service_role` full DML on every new
+table in `public`, so a NEW table holding authorization state is exposed
+the moment it is created. Any future migration that adds one must revoke
+those privileges in the same migration; creating the table is not enough.
+
+`SUPABASE_SERVICE_ROLE_KEY` remains a highly sensitive break-glass
+credential - it can still administer Auth (create users, set passwords)
+and read application data. What it can no longer do is manufacture CEO or
+SITE_MANAGER authority. It also still holds DML on the remaining
+application tables, including `team_position_capabilities` and
+`user_team_positions`, so it can still grant OPERATIONAL capabilities;
+narrowing that is a final pre-go-live sweep scheduled after Layers 2
+and 3. Independently of privileges, migration 0004's
+`forbid_mutation` triggers make the grant log append-only for EVERY role
+including the table owner, so recorded governance history cannot be
+rewritten or erased by any credential at all.
 
 Privileged management authority (CEO, Site Manager) is separate from
 operational Team + Position capabilities, and carries its own security

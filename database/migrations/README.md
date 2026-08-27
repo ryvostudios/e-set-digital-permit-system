@@ -157,6 +157,19 @@ Versioned, plain SQL migration files, applied in filename order by
   broader, pre-existing fact that `service_role` holds full DML on every
   application table - see DEPLOYMENT.md for that outstanding decision.
 
+- `0022_service_role_privilege_hardening.sql`: **APPLIED / LIVE-VERIFIED**. Revokes from the Supabase `service_role` every
+  write privilege on `privileged_access_events`, `privileged_identities`
+  and `initial_ceo_bootstrap`, all privileges on
+  `privileged_access_events_ordinal_seq`, and EXECUTE on
+  `record_site_manager_grant` - closing the last path by which a holder
+  of the Supabase service key could manufacture CEO or SITE_MANAGER
+  authority directly through PostgREST. SELECT is retained on all of
+  them. It issues REVOKEs only: no table, function, trigger, policy or
+  column is created or altered, no other schema or role is touched, and
+  no `app_runtime` privilege changes. A self-verification block proves
+  each denial with `has_*_privilege` and fails the migration otherwise,
+  while confirming the operator/owner bootstrap path still works.
+
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
 later, scoped implementation sections — not here.

@@ -619,17 +619,21 @@ confirmed.
   privileged identity. It is the only SECURITY DEFINER function in the
   schema; justification, hardening and residual risk are documented in
   the migration and DEPLOYMENT.md.
-- OUTSTANDING, NOT CLOSED BY LAYER 1: Supabase's project-wide default
-  privileges give `service_role` full DML on every table in `public`,
-  including `privileged_access_events`. A holder of the Supabase service
-  key can therefore still append a privileged event directly, through
-  PostgREST. This is pre-existing and schema-wide, not introduced here;
-  migration 0021 removed the equivalent EXECUTE grant on the privileged
-  grant function, but narrowing `service_role` across the schema is a
-  project-wide operator decision recorded in DEPLOYMENT.md and SECURITY.md.
-  Migration 0004's `forbid_mutation` triggers still make the log
-  append-only for that role too, so tampering with existing history
-  remains impossible for every credential.
+- AUTHORITY IS SEPARATED BY DATABASE ROLE, not only by application code.
+  `app_runtime` cannot write privileged authority; `privileged_runtime`
+  can only EXECUTE the hardened SITE_MANAGER function and cannot create a
+  CEO; `service_role` is Auth Admin only and, after migration 0022,
+  cannot write `privileged_access_events`, `privileged_identities` or
+  `initial_ceo_bootstrap` at all; the operator/owner credential is the
+  only channel that can create a CEO. Supabase's default privileges had
+  silently given `service_role` full DML on all of those, which migration
+  0022 revokes (SELECT retained) with a fail-loud self-verification
+  block. Any future table holding authorization state must do the same in
+  its own migration - creating it is not enough.
+- Independently of every privilege above, migration 0004's
+  `forbid_mutation` triggers make the grant log append-only for EVERY
+  role including the table owner, so recorded governance history cannot
+  be rewritten or erased by any credential.
 - When the privileged channel is unconfigured, CEO administration returns
   a sanitized 503 and every other endpoint is unaffected. A failed grant
   during Site Manager creation leaves a named account holding NO
