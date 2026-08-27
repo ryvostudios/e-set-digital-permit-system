@@ -3,6 +3,7 @@ import http from 'node:http';
 import { after, before, beforeEach, test } from 'node:test';
 import { Pool, type PoolClient } from 'pg';
 import { createApp } from '../app.js';
+import { env } from '../config/env.js';
 import { supabase } from '../lib/supabase.js';
 
 /**
@@ -1255,19 +1256,23 @@ test('a validation failure never echoes the submitted password back in its issue
   }
 });
 
-test('manager account operations have a three-request burst below the DB pool, independent of self-change', async () => {
+test('manager account operations have a finite budget, independent of self-service password change', async () => {
+  // The budget is sized for real onboarding (see
+  // routes/accountRateLimits.test.ts), but it is still a budget - and
+  // spending it must never lock a manager out of recovering their OWN
+  // password, which is governed by the separate `accountLimiter`.
   authorizeSiteManager();
   const { url, close } = await startServer();
   try {
     const resetPath = `/admin/employees/${EMPLOYEE_ID}/reset-password`;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 1; attempt <= env.RATE_LIMIT_MANAGER_ACCOUNT_MAX; attempt += 1) {
       const response = await post(url, resetPath, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD });
-      assert.notEqual(response.status, 429, `manager attempt ${attempt + 1} remains within its budget`);
+      assert.notEqual(response.status, 429, `manager attempt ${attempt} remains within its budget`);
     }
     assert.equal(
       (await post(url, resetPath, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD })).status,
       429,
-      'a fourth manager operation cannot join the same bounded burst',
+      'one operation past the configured budget cannot join the same window',
     );
 
     assert.notEqual(

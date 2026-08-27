@@ -211,7 +211,7 @@ test('envSchema: rate-limit tuning vars have sensible defaults and coerce numeri
   assert.equal(defaultResult.success, true);
   if (defaultResult.success) {
     assert.equal(defaultResult.data.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000);
-    assert.equal(defaultResult.data.RATE_LIMIT_GLOBAL_MAX, 300);
+    assert.equal(defaultResult.data.RATE_LIMIT_GLOBAL_MAX, 1_200);
     assert.equal(defaultResult.data.RATE_LIMIT_MUTATION_MAX, 30);
   }
 
@@ -276,16 +276,28 @@ test('envSchema RATE_LIMIT_MUTATION_MAX: rejects above the maximum, fractional, 
   assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MUTATION_MAX: String(Number.MAX_SAFE_INTEGER) })).success, false);
 });
 
-test('envSchema gives manager Auth operations a small independently bounded burst', () => {
+test('envSchema sizes manager budgets for real onboarding, with reads budgeted apart from writes', () => {
   const defaulted = envSchema.safeParse(baseEnv());
   assert.equal(defaulted.success, true);
   if (defaulted.success) {
     assert.equal(defaulted.data.RATE_LIMIT_ACCOUNT_MAX, 10);
-    assert.equal(defaulted.data.RATE_LIMIT_MANAGER_ACCOUNT_MAX, 3);
+    // There is no business quota on employee creation, so the manager
+    // WRITE budget must clear a 60-employee session with real headroom.
+    assert.equal(defaulted.data.RATE_LIMIT_MANAGER_ACCOUNT_MAX, 120);
+    assert.ok(defaulted.data.RATE_LIMIT_MANAGER_ACCOUNT_MAX >= 100);
+    // Reads are budgeted separately so browsing cannot consume it.
+    assert.equal(defaulted.data.RATE_LIMIT_MANAGER_READ_MAX, 300);
+    assert.ok(defaulted.data.RATE_LIMIT_MANAGER_READ_MAX > defaulted.data.RATE_LIMIT_MANAGER_ACCOUNT_MAX);
+    // The coarse per-IP backstop must still be able to carry that session.
+    assert.ok(defaulted.data.RATE_LIMIT_GLOBAL_MAX >= 1_000);
   }
+  // Still bounded on both sides: never unlimited, never zero.
   assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_ACCOUNT_MAX: '0' })).success, false);
-  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_ACCOUNT_MAX: '21' })).success, false);
-  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_ACCOUNT_MAX: '5' })).success, true);
+  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_ACCOUNT_MAX: '1001' })).success, false);
+  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_ACCOUNT_MAX: '150' })).success, true);
+  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_READ_MAX: '0' })).success, false);
+  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_READ_MAX: '5001' })).success, false);
+  assert.equal(envSchema.safeParse(baseEnv({ RATE_LIMIT_MANAGER_READ_MAX: '400' })).success, true);
 });
 
 // --- Auth-admin and Storage credentials ---

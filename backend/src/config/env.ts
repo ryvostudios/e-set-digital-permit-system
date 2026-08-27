@@ -211,7 +211,15 @@ export const envSchema = z
     // needed one (see validation.ts), because nothing here multiplies
     // two client-influenced values together.
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(15 * 60 * 1000),
-    RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().min(1).max(10_000).default(300),
+    // Coarse per-IP DoS backstop, NOT the control on any specific action.
+    // Keyed by IP and therefore shared by everyone behind one office NAT,
+    // so it has to accommodate several people using the app at once: a
+    // single admin session that provisions 60 employees is already 60
+    // requests before any list refresh, detail view or notification poll.
+    // 1200 per 15 minutes is ~1.3 requests/second sustained from one
+    // address - still a hard ceiling on flooding, no longer a ceiling on
+    // ordinary shared-office use.
+    RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().min(1).max(10_000).default(1_200),
     RATE_LIMIT_MUTATION_MAX: z.coerce.number().int().min(1).max(1_000).default(30),
     // Account management (employee provisioning, manager password reset,
     // self-service password change) is deliberately far stricter than an
@@ -220,10 +228,28 @@ export const envSchema = z
     // damage, and their legitimate human use is a handful of calls per
     // window, not dozens.
     RATE_LIMIT_ACCOUNT_MAX: z.coerce.number().int().min(1).max(200).default(10),
-    // Manager operations can invoke privileged Auth Admin work. Keep their
-    // burst below the default DB pool size; self password change retains the
-    // separate account limit above.
-    RATE_LIMIT_MANAGER_ACCOUNT_MAX: z.coerce.number().int().min(1).max(20).default(3),
+    // Manager WRITES (employee provisioning, password reset, permission
+    // and lifecycle changes). There is no business quota on employee
+    // creation, so this has to clear a realistic onboarding batch with
+    // room to spare: 120 is double the 60-employee session the business
+    // requires, while still stopping a scripted enumeration dead well
+    // inside one window.
+    //
+    // The previous default of 3 came from keeping the burst under the DB
+    // pool size (10) while an Auth outage held each request open for its
+    // full timeout. That reasoning conflated RATE with CONCURRENCY: a
+    // 15-minute window cap does not permit 120 simultaneous requests -
+    // in-flight work is bounded by the client and by the pool itself,
+    // both of which are unchanged here. Sequential provisioning never
+    // held more than one connection at a time even under the old limit.
+    RATE_LIMIT_MANAGER_ACCOUNT_MAX: z.coerce.number().int().min(1).max(1_000).default(120),
+    // Manager READS (employee list, employee detail, System Site Manager
+    // list, audit logs). Separate from the write budget on purpose:
+    // reads are idempotent and cheap, they invoke no Auth Admin work, and
+    // charging them to the provisioning budget is what made ordinary
+    // browsing exhaust it - open the directory, view a few people, and
+    // the next legitimate creation was refused.
+    RATE_LIMIT_MANAGER_READ_MAX: z.coerce.number().int().min(1).max(5_000).default(300),
   })
   .superRefine((value, ctx) => {
     const invalidProxyTokens = findInvalidTrustProxyTokens(parseTrustProxyCidrs(value.TRUST_PROXY_CIDRS));

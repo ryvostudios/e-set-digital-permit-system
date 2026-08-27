@@ -48,7 +48,7 @@ import { resolvePrivilegedAccess } from '../authz/privilegedAccess.js';
 import { query } from '../db/pool.js';
 import { createPrivilegedAccessAdmin, type PrivilegedAccessAdmin } from '../db/privilegedPool.js';
 import { requireAuth, requireAuthDuringPasswordChange } from '../middleware/auth.js';
-import { accountLimiter, managerAccountLimiter } from '../middleware/rateLimit.js';
+import { accountLimiter, managerAccountLimiter, managerReadLimiter } from '../middleware/rateLimit.js';
 
 export const accountsRouter = Router();
 
@@ -602,7 +602,7 @@ function sendLifecycleFailure(
 accountsRouter.get(
   '/admin/employees',
   requireAuth,
-  managerAccountLimiter,
+  managerReadLimiter,
   async (req: Request, res: Response) => {
     const actorUserId = await authorize(req, res);
     if (!actorUserId) return;
@@ -637,7 +637,7 @@ accountsRouter.get(
 accountsRouter.get(
   '/admin/organization',
   requireAuth,
-  managerAccountLimiter,
+  managerReadLimiter,
   async (req: Request, res: Response) => {
     const actorUserId = await authorize(req, res);
     if (!actorUserId) return;
@@ -655,7 +655,7 @@ accountsRouter.get(
 accountsRouter.get(
   '/admin/site-managers',
   requireAuth,
-  managerAccountLimiter,
+  managerReadLimiter,
   async (req: Request, res: Response) => {
     const actorUserId = await authorizeCeo(req, res);
     if (!actorUserId) return;
@@ -667,7 +667,7 @@ accountsRouter.get(
 accountsRouter.get(
   '/admin/employees/:id',
   requireAuth,
-  managerAccountLimiter,
+  managerReadLimiter,
   async (req: Request, res: Response) => {
     const actorUserId = await authorize(req, res);
     if (!actorUserId) return;
@@ -910,7 +910,7 @@ accountsRouter.delete(
 accountsRouter.get(
   '/admin/employees/:id/history',
   requireAuth,
-  managerAccountLimiter,
+  managerReadLimiter,
   async (req: Request, res: Response) => {
     const actorUserId = await authorize(req, res);
     if (!actorUserId) return;
@@ -965,7 +965,7 @@ accountsRouter.get(
 accountsRouter.get(
   '/admin/audit-logs',
   requireAuth,
-  managerAccountLimiter,
+  managerReadLimiter,
   async (req: Request, res: Response) => {
     const actorUserId = await authorize(req, res);
     if (!actorUserId) return;

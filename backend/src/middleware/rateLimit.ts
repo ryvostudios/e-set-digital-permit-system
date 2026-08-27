@@ -136,13 +136,49 @@ export const accountLimiter = buildRateLimiter({
 });
 
 /**
- * Privileged employee creation/reset has a smaller independent budget than
- * self-service password change. In particular, the default burst (3) stays
- * well below the default DB pool size (10), even while an Auth outage makes
- * each reset consume its full bounded timeout.
+ * Privileged account-management WRITES: employee provisioning, manager
+ * password reset, permission and lifecycle changes.
+ *
+ * SIZED FOR REAL ONBOARDING. There is no business quota on employee
+ * creation, and a CEO or System Site Manager provisioning a site is a
+ * legitimate burst of dozens of writes in one sitting. The budget clears
+ * a 60-employee session with room to spare rather than turning routine
+ * administration into a refusal.
+ *
+ * STILL A REAL LIMIT. It is finite and per-actor, so scripted
+ * enumeration or reset abuse still stops well inside one window, and it
+ * sits underneath the coarse per-IP `globalApiLimiter`. What it is NOT
+ * is a concurrency control: a 15-minute window cap says nothing about
+ * how many requests are in flight at once, which is bounded by the
+ * client and by the database pool - see the note on
+ * RATE_LIMIT_MANAGER_ACCOUNT_MAX in config/env.ts.
+ *
+ * KEYED BY AUTHENTICATED ACTOR (`keyByAuthOrIp`), so two managers
+ * working at the same time hold independent budgets and neither can
+ * exhaust the other's - and neither can reset their own by changing
+ * network.
  */
 export const managerAccountLimiter = buildRateLimiter({
   windowMs: env.RATE_LIMIT_WINDOW_MS,
   limit: env.RATE_LIMIT_MANAGER_ACCOUNT_MAX,
+  keyed: true,
+});
+
+/**
+ * Privileged account-management READS: the employee directory, one
+ * employee's detail and history, the System Site Manager list, and the
+ * audit log.
+ *
+ * A SEPARATE BUDGET, because charging reads to the write budget is what
+ * made ordinary administration fail: opening the directory and viewing a
+ * few people used up the allowance, and the next legitimate employee
+ * creation was refused for no reason a user could understand. Reads are
+ * idempotent, cheap, and invoke no Auth Admin work, so they warrant a
+ * more generous budget than the writes they precede - while still being
+ * bounded, and still keyed per authenticated actor.
+ */
+export const managerReadLimiter = buildRateLimiter({
+  windowMs: env.RATE_LIMIT_WINDOW_MS,
+  limit: env.RATE_LIMIT_MANAGER_READ_MAX,
   keyed: true,
 });

@@ -96,10 +96,29 @@ they depend on the actual deployment topology:
   and no `schema_migrations` access is added. Supabase Auth Admin actions
   use the server-only Auth Admin credential, never the database runtime
   role.
-  Manager employee-create/reset endpoints use the independent per-actor
-  `RATE_LIMIT_MANAGER_ACCOUNT_MAX` budget (default 3 per configured window),
-  below the default ten-connection pool. Self password change retains
-  `RATE_LIMIT_ACCOUNT_MAX` so the manager bound does not impair recovery.
+  Manager account-management WRITES (employee create, password reset,
+  permission and lifecycle changes) use the independent per-actor
+  `RATE_LIMIT_MANAGER_ACCOUNT_MAX` budget, default **120** per configured
+  window. There is no business quota on employee creation, so this has to
+  clear a real onboarding session - 60 sequential creations - with
+  headroom; it is per authenticated actor, so two managers working at
+  once never consume each other's allowance.
+
+  Manager READS (employee directory, employee detail and history, System
+  Site Manager list, audit logs) have their own `RATE_LIMIT_MANAGER_READ_MAX`
+  budget, default 300. Reads are idempotent, cheap, and invoke no Auth
+  Admin work; charging them to the write budget is what previously made
+  ordinary browsing exhaust the provisioning allowance.
+
+  The earlier default of 3 was chosen to keep the burst under the
+  ten-connection pool during an Auth outage. That reasoning conflated
+  RATE with CONCURRENCY: a 15-minute window cap does not permit 120
+  simultaneous requests, and in-flight work is still bounded by the
+  client and by `DB_POOL_MAX`, both unchanged. Sequential provisioning
+  never held more than one connection at a time.
+
+  Self password change retains `RATE_LIMIT_ACCOUNT_MAX` so the manager
+  bound does not impair recovery.
 
 - **Employee company membership (migration 0018 applied and live-verified).**
   Every NORMAL employee's workforce profile must reference exactly one
@@ -461,12 +480,22 @@ they depend on the actual deployment topology:
   wildcard. Production accepts only canonical credential-free HTTPS root
   origins: no path, query, fragment, or userinfo.
 - **Rate limit tuning** (`RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_GLOBAL_MAX`,
-  `RATE_LIMIT_MUTATION_MAX`) - the shipped defaults are reasonable
+  `RATE_LIMIT_MUTATION_MAX`, `RATE_LIMIT_MANAGER_ACCOUNT_MAX`,
+  `RATE_LIMIT_MANAGER_READ_MAX`) - the shipped defaults are reasonable
   starting points, not measured for this deployment's actual traffic.
   Revisit them once real usage is observed, within the bounds `env.ts`
   enforces (1,000-3,600,000ms window; 1-10,000 global request max;
-  1-1,000 mutation request max - values outside these fail startup, they
-  are never silently clamped).
+  1-1,000 mutation request max; 1-1,000 manager write max; 1-5,000
+  manager read max - values outside these fail startup, they are never
+  silently clamped).
+
+  `RATE_LIMIT_GLOBAL_MAX` defaults to 1,200. It is keyed by IP, so an
+  entire office behind one NAT shares a single bucket: it has to carry
+  several people working simultaneously, and one admin provisioning 60
+  employees is already 60 requests before any list refresh or
+  notification poll. 1,200 per 15 minutes is roughly 1.3 requests/second
+  sustained from one address - still a hard ceiling on flooding, no
+  longer a ceiling on ordinary shared-office use.
 - **Database pool/timeout tuning** (`DB_POOL_MAX`, `DB_IDLE_TIMEOUT_MS`,
   `DB_CONNECTION_TIMEOUT_MS`) - shipped defaults are reasonable; `env.ts`
   bounds each (1-100 connections; 0-3,600,000ms idle timeout;
