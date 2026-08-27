@@ -16,6 +16,7 @@ import {
   hseApprove,
   hseSendBackToCro,
   listOwnPermits,
+  listOwnDrafts,
   listPermitsByStatus,
   PERMIT_CLOSED_EVENT_TYPE,
   renewPermit,
@@ -842,17 +843,31 @@ class FakeDb {
         ],
       };
     }
-    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE created_by = $1 ORDER BY')) {
+    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE created_by = $1 AND status <>')) {
       const [createdBy, limit, offset] = params as [string, number, number];
       const rows = [...this.permits.values()]
-        .filter((p) => p.created_by === createdBy)
+        .filter((p) => p.created_by === createdBy && p.status !== 'DRAFT')
         .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
         .slice(offset, offset + limit);
       return { rows };
     }
+    // My Drafts: the caller's own DRAFT permits only.
+    if (!sql.startsWith('SELECT COUNT') && sql.includes("WHERE created_by = $1 AND status = 'DRAFT'")) {
+      const [createdBy, limit, offset] = params as [string, number, number];
+      const rows = [...this.permits.values()]
+        .filter((p) => p.created_by === createdBy && p.status === 'DRAFT')
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id))
+        .slice(offset, offset + limit);
+      return { rows };
+    }
+    if (sql.startsWith('SELECT COUNT') && sql.includes("WHERE created_by = $1 AND status = 'DRAFT'")) {
+      const [createdBy] = params as [string];
+      const count = [...this.permits.values()].filter((p) => p.created_by === createdBy && p.status === 'DRAFT').length;
+      return { rows: [{ count: String(count) }] };
+    }
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE created_by = $1')) {
       const [createdBy] = params as [string];
-      const count = [...this.permits.values()].filter((p) => p.created_by === createdBy).length;
+      const count = [...this.permits.values()].filter((p) => p.created_by === createdBy && p.status !== 'DRAFT').length;
       return { rows: [{ count: String(count) }] };
     }
     if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE status = $1 ORDER BY')) {
@@ -3056,11 +3071,13 @@ test('getJsaById throws for an id with no matching row (FK-guaranteed invariant,
 
 const DEFAULT_PAGE = { page: 1, pageSize: 20 };
 
-test('listOwnPermits returns only the given user\'s permits, most recent first', async () => {
+test('listOwnPermits returns only the given user\'s non-DRAFT records, most recent first', async () => {
   const db = new FakeDb();
   const first = await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
   const second = await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
   await createDraftPermit('owner-b', 'UTC', 'WTG_WORK', db.deps());
+  db.permits.get(first.permit.id)!.status = 'PENDING_CRO';
+  db.permits.get(second.permit.id)!.status = 'ISSUED';
 
   const page = await listOwnPermits('owner-a', DEFAULT_PAGE, db.deps());
 
@@ -3077,7 +3094,8 @@ test('listOwnPermits returns only the given user\'s permits, most recent first',
 test('listOwnPermits: pagination metadata is accurate, and a page never includes another user\'s permits (no cross-user leakage under pagination)', async () => {
   const db = new FakeDb();
   for (let i = 0; i < 5; i += 1) {
-    await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
+    const created = await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
+    db.permits.get(created.permit.id)!.status = 'PENDING_CRO';
   }
   await createDraftPermit('owner-b', 'UTC', 'WTG_WORK', db.deps());
 
@@ -3115,6 +3133,17 @@ test('listOwnPermits: an empty result set reports zero totalPages/totalCount, no
   assert.equal(page.totalPages, 0);
   assert.equal(page.hasNextPage, false);
   assert.equal(page.hasPreviousPage, false);
+});
+
+test('listOwnPermits excludes an owner\'s DRAFT while listOwnDrafts includes exactly that own draft', async () => {
+  const db = new FakeDb();
+  const ownDraft = await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
+  await createDraftPermit('owner-b', 'UTC', 'WTG_WORK', db.deps());
+
+  const records = await listOwnPermits('owner-a', DEFAULT_PAGE, db.deps());
+  const drafts = await listOwnDrafts('owner-a', DEFAULT_PAGE, db.deps());
+  assert.deepEqual(records.items, []);
+  assert.deepEqual(drafts.items.map((permit) => permit.id), [ownDraft.permit.id]);
 });
 
 // --- Service-layer pagination defense: independently re-derives every
@@ -3168,7 +3197,9 @@ test('listPermitsByStatus: the exact maximum allowed offset (100_000) succeeds',
 
 test('listOwnPermits: ordinary valid pagination still succeeds unaffected by the defensive checks', async () => {
   const db = new FakeDb();
-  await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
+  const created = await createDraftPermit('owner-a', 'UTC', 'WTG_WORK', db.deps());
+  // A formal record, not a draft - listOwnPermits is the record list now.
+  db.permits.get(created.permit.id)!.status = 'PENDING_CRO';
   const page = await listOwnPermits('owner-a', { page: 1, pageSize: 20 }, db.deps());
   assert.equal(page.items.length, 1);
 });
@@ -3964,10 +3995,12 @@ test('a renewing CRO with no signing identity cannot renew - and the old permit 
 test('list endpoints return summaries without form payloads; detail keeps the full form', async () => {
   const db = new FakeDb();
   const { permit } = await createDraftPermit('owner', 'UTC', 'WTG_WORK', db.deps());
+  // The record list excludes drafts, so this one has to be a record.
+  db.permits.get(permit.id)!.status = 'PENDING_CRO';
 
   const listed = await listOwnPermits('owner', { page: 1, pageSize: 20 }, db.deps());
   const listQuery = db.queries.find(
-    (q) => !q.sql.startsWith('SELECT COUNT') && q.sql.includes('FROM permits WHERE created_by = $1 ORDER BY'),
+    (q) => !q.sql.startsWith('SELECT COUNT') && q.sql.includes('FROM permits WHERE created_by = $1 AND status <>'),
   );
   assert.ok(listQuery);
   assert.ok(!listQuery.sql.includes('form_payload'), 'the list query must never select form_payload');

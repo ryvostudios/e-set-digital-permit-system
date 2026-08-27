@@ -27,6 +27,7 @@ const AUTHENTICATED_USER_ID = 'route-test-user-id';
 const SOME_PERMIT_ID = '00000000-0000-0000-0000-000000000000';
 
 let grantedCapabilities: string[] = [];
+let privilegedRoles: Array<'CEO' | 'SITE_MANAGER'> = [];
 let appAccessState: 'ACTIVE' | 'DISABLED' | null = 'ACTIVE';
 // Controllable canned results for the new read queries, keyed by which
 // query issues them (see the `Pool.prototype.query` stub below) - reset
@@ -98,11 +99,20 @@ before(() => {
     if (sql.startsWith('SELECT DISTINCT c.name')) {
       return { rows: grantedCapabilities.map((name) => ({ name })) };
     }
-    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE created_by = $1 ORDER BY')) {
-      return { rows: mockOwnPermitRows };
+    if (sql.includes('FROM privileged_access_events')) {
+      return { rows: privilegedRoles.map((role) => ({ role, action: 'GRANTED' })) };
+    }
+    if (!sql.startsWith('SELECT COUNT') && sql.includes("WHERE created_by = $1 AND status = 'DRAFT'")) {
+      return { rows: mockOwnPermitRows.filter((permit) => permit.status === 'DRAFT') };
+    }
+    if (sql.startsWith('SELECT COUNT') && sql.includes("WHERE created_by = $1 AND status = 'DRAFT'")) {
+      return { rows: [{ count: String(mockOwnPermitRows.filter((permit) => permit.status === 'DRAFT').length) }] };
+    }
+    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE created_by = $1 AND status <>')) {
+      return { rows: mockOwnPermitRows.filter((permit) => permit.status !== 'DRAFT') };
     }
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE created_by')) {
-      return { rows: [{ count: String(mockOwnPermitRows.length) }] };
+      return { rows: [{ count: String(mockOwnPermitRows.filter((permit) => permit.status !== 'DRAFT').length) }] };
     }
     if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE status')) {
       return { rows: mockQueuePermitRows };
@@ -150,10 +160,10 @@ before(() => {
       return { rows: mockHistoryEventRows };
     }
     if (sql.includes('FROM permits p JOIN jsas j') && !sql.startsWith('SELECT COUNT')) {
-      return { rows: mockSearchPermitRows };
+      return { rows: mockSearchPermitRows.filter((permit) => permit.status !== 'DRAFT') };
     }
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits p JOIN jsas j')) {
-      return { rows: [{ count: String(mockSearchPermitRows.length) }] };
+      return { rows: [{ count: String(mockSearchPermitRows.filter((permit) => permit.status !== 'DRAFT').length) }] };
     }
     if (sql.startsWith('SELECT s.*, i.hash_version')) {
       return { rows: mockDocumentLookupRow ? [mockDocumentLookupRow] : [] };
@@ -182,6 +192,7 @@ after(() => {
 beforeEach(() => {
   appAccessState = 'ACTIVE';
   grantedCapabilities = [];
+  privilegedRoles = [];
   mockOwnPermitRows = [];
   mockQueuePermitRows = [];
   mockPermitDetailRow = null;
@@ -1276,6 +1287,76 @@ test('GET /permits/search returns only permits within the caller\'s own access s
     const searchQuery = capturedQueries.find((q) => q.sql.includes('FROM permits p JOIN jsas j') && !q.sql.startsWith('SELECT COUNT'));
     assert.ok(searchQuery);
     assert.equal(searchQuery?.params[0], AUTHENTICATED_USER_ID);
+  } finally {
+    await close();
+  }
+});
+
+test('Permit Records returns [] when the database contains only DRAFT rows - owner, permit.view_all, CEO, SITE_MANAGER, CRO and HSE alike', async () => {
+  mockSearchPermitRows = [makePermitDetailRow({ status: 'DRAFT', created_by: AUTHENTICATED_USER_ID })];
+  const { url, close } = await startServer();
+  try {
+    const contexts: Array<() => void> = [
+      // The owner of the draft.
+      () => undefined,
+      () => { grantedCapabilities = ['permit.view_all']; },
+      () => { privilegedRoles = ['CEO']; },
+      () => { privilegedRoles = ['SITE_MANAGER']; },
+      // Reviewers: a workflow capability is a reason to see a permit in
+      // THAT status, and DRAFT is never one of them.
+      () => { grantedCapabilities = ['permit.cro_review']; },
+      () => { grantedCapabilities = ['permit.hse_review']; },
+      () => { grantedCapabilities = ['permit.cro_review', 'permit.hse_review', 'permit.view_all']; },
+    ];
+    for (const establish of contexts) {
+      grantedCapabilities = [];
+      privilegedRoles = [];
+      establish();
+      const response = await getRequest(url, '/permits/search', VALID_TOKEN);
+      const body = (await response.json()) as { permits: unknown[]; pagination: { totalCount: number } };
+      assert.equal(response.status, 200);
+      assert.deepEqual(body.permits, []);
+      assert.equal(body.pagination.totalCount, 0);
+      const rowQuery = [...capturedQueries].reverse().find((entry) => entry.sql.includes('FROM permits p JOIN jsas j') && !entry.sql.startsWith('SELECT COUNT'));
+      assert.match(rowQuery?.sql ?? '', /p\.status <> 'DRAFT'/);
+    }
+  } finally {
+    await close();
+  }
+});
+
+test('legacy /permits/mine cannot leak own or broad-visible drafts; /permits/my-drafts remains own-DRAFT-only', async () => {
+  mockOwnPermitRows = [makePermitDetailRow({ id: 'own-draft', status: 'DRAFT', created_by: AUTHENTICATED_USER_ID })];
+  mockSearchPermitRows = [
+    makePermitDetailRow({ id: 'own-draft', status: 'DRAFT', created_by: AUTHENTICATED_USER_ID }),
+    makePermitDetailRow({ id: 'other-draft', status: 'DRAFT', created_by: 'other' }),
+  ];
+  const { url, close } = await startServer();
+  try {
+    let response = await getRequest(url, '/permits/mine', VALID_TOKEN);
+    assert.deepEqual(((await response.json()) as { permits: unknown[] }).permits, []);
+    response = await getRequest(url, '/permits/my-drafts', VALID_TOKEN);
+    const drafts = (await response.json()) as { permits: Array<{ id: string; created_by: string; status: string }> };
+    assert.deepEqual(drafts.permits.map((permit) => permit.id), ['own-draft']);
+    assert.ok(drafts.permits.every((permit) => permit.created_by === AUTHENTICATED_USER_ID && permit.status === 'DRAFT'));
+
+    grantedCapabilities = ['permit.view_all'];
+    response = await getRequest(url, '/permits/mine', VALID_TOKEN);
+    assert.deepEqual(((await response.json()) as { permits: unknown[] }).permits, []);
+  } finally {
+    await close();
+  }
+});
+
+test('Permit Records still returns an authorized non-DRAFT permit', async () => {
+  mockSearchPermitRows = [makePermitDetailRow({ id: 'issued-record', status: 'ISSUED', created_by: 'other' })];
+  grantedCapabilities = ['permit.view_all'];
+  const { url, close } = await startServer();
+  try {
+    const response = await getRequest(url, '/permits/search', VALID_TOKEN);
+    const body = (await response.json()) as { permits: Array<{ id: string; status: string }> };
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.permits.map((permit) => permit.id), ['issued-record']);
   } finally {
     await close();
   }

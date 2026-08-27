@@ -84,11 +84,13 @@ before(() => {
     capturedQueries.push({ sql, params });
     if (sql.includes('FROM app_user_access')) return { rows: [{ state: 'ACTIVE', must_change_password: false }] };
     if (sql.startsWith('SELECT DISTINCT c.name')) return { rows: grantedCapabilities.map((name) => ({ name })) };
-    if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits WHERE created_by = $1 ORDER BY')) {
-      return { rows: mockOwnPermitRows };
+    // Mirrors the real query, which now excludes drafts: /permits/mine is
+    // the formal record list and My Drafts is the only home for a draft.
+    if (!sql.startsWith('SELECT COUNT') && sql.includes("FROM permits WHERE created_by = $1 AND status <>")) {
+      return { rows: mockOwnPermitRows.filter((permit) => permit.status !== 'DRAFT') };
     }
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits WHERE created_by')) {
-      return { rows: [{ count: String(mockOwnPermitRows.length) }] };
+      return { rows: [{ count: String(mockOwnPermitRows.filter((permit) => permit.status !== 'DRAFT').length) }] };
     }
     if (sql.startsWith('SELECT * FROM permits WHERE id = $1')) {
       return { rows: mockPermitDetailRow && mockPermitDetailRow.id === params[0] ? [mockPermitDetailRow] : [] };
@@ -114,11 +116,13 @@ before(() => {
       return { rows: mockHistoryEventRows };
     }
     if (sql.includes('FROM permit_signatures s')) return { rows: mockSignatureRows };
+    // Permit Records excludes drafts unconditionally in the real query, so
+    // the stub must not hand back rows the database would never return.
     if (!sql.startsWith('SELECT COUNT') && sql.includes('FROM permits p JOIN jsas j')) {
-      return { rows: mockSearchPermitRows };
+      return { rows: mockSearchPermitRows.filter((permit) => permit.status !== 'DRAFT') };
     }
     if (sql.startsWith('SELECT COUNT(*)::text AS count FROM permits p JOIN jsas j')) {
-      return { rows: [{ count: String(mockSearchPermitRows.length) }] };
+      return { rows: [{ count: String(mockSearchPermitRows.filter((permit) => permit.status !== 'DRAFT').length) }] };
     }
     return { rows: [] };
   }) as unknown as typeof Pool.prototype.query;
@@ -340,7 +344,7 @@ test('list responses stay concise: no form payload is ever returned by /permits/
     {
       id: SOME_PERMIT_ID,
       permit_sequence: '1',
-      status: 'DRAFT',
+      status: 'PENDING_CRO',
       created_by: AUTHENTICATED_USER_ID,
       permit_type: 'WTG_WORK',
       form_version: 'WTG_WORK_V1',

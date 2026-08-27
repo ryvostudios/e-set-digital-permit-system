@@ -27,8 +27,9 @@ interface FakePermitJoinRow extends PermitSummaryRow {
 function buildPermitsQuery(rows: FakePermitJoinRow[]): QueryFn {
   return (async (text: string, params: unknown[] = []) => {
     const sql = text.trim();
-    const viewerId = params[0] as string;
-    const allowedStatuses = params[1] as PermitStatus[];
+    const scoped = sql.includes('(p.created_by = $1 OR p.status = ANY($2))');
+    const viewerId = scoped ? params[0] as string : undefined;
+    const allowedStatuses = scoped ? params[1] as PermitStatus[] : [];
     const permitNumber = paramAt(sql, /p\.permit_sequence = \$(\d+)/, params);
     const jsaNumber = paramAt(sql, /j\.jsa_sequence = \$(\d+)/, params);
     const status = paramAt(sql, / AND p\.status = \$(\d+)/, params);
@@ -39,7 +40,8 @@ function buildPermitsQuery(rows: FakePermitJoinRow[]): QueryFn {
     const createdTo = paramAt(sql, /p\.created_at <= \$(\d+)/, params);
 
     const matches = rows.filter((row) => {
-      if (!(row.created_by === viewerId || allowedStatuses.includes(row.status))) return false;
+      if (sql.includes("p.status <> 'DRAFT'") && row.status === 'DRAFT') return false;
+      if (scoped && !(row.created_by === viewerId || allowedStatuses.includes(row.status))) return false;
       if (permitNumber !== undefined && row.permit_sequence !== permitNumber) return false;
       if (jsaNumber !== undefined && row.jsa_sequence !== jsaNumber) return false;
       if (status !== undefined && row.status !== status) return false;
@@ -115,6 +117,31 @@ test('searchPermits: a caller with no capabilities only finds their own permits'
   );
   assert.equal(page.items.length, 1);
   assert.equal(page.items[0]?.id, 'p1');
+});
+
+test('searchPermits: the formal-record invariant excludes every DRAFT for owner, workflow, and broad visibility branches', async () => {
+  const rows = [
+    makePermit({ id: 'own-draft', created_by: 'me', status: 'DRAFT' }),
+    makePermit({ id: 'other-draft', created_by: 'other', status: 'DRAFT' }),
+  ];
+  for (const access of [
+    { viewerId: 'me', allowedStatuses: [] },
+    { viewerId: 'me', allowedStatuses: ['DRAFT'] as PermitStatus[] },
+    { viewerId: 'me', allowedStatuses: [], viewAll: true },
+  ]) {
+    const page = await searchPermits(access, {}, { page: 1, pageSize: 20 }, { query: buildPermitsQuery(rows) });
+    assert.deepEqual(page.items, []);
+    assert.equal(page.totalCount, 0);
+  }
+});
+
+test('searchPermits: broad visibility still returns legitimate non-DRAFT records', async () => {
+  const rows = [makePermit({ id: 'formal-record', created_by: 'other', status: 'CLOSED' })];
+  const page = await searchPermits(
+    { viewerId: 'me', allowedStatuses: [], viewAll: true }, {}, { page: 1, pageSize: 20 },
+    { query: buildPermitsQuery(rows) },
+  );
+  assert.deepEqual(page.items.map((permit) => permit.id), ['formal-record']);
 });
 
 test('searchPermits: a status capability grants visibility into OTHER users\' permits in that status only', async () => {

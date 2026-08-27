@@ -20,6 +20,14 @@ function searchResponse(permits: unknown[], pagination = {}) {
   return { body: { permits, pagination: emptyPagination({ totalCount: permits.length, totalPages: 1, ...pagination }) } };
 }
 
+/**
+ * Permit Records never shows a DRAFT, so its fixtures are formal records.
+ * The shared `permitSummary` factory still defaults to DRAFT, which is
+ * right for My Drafts and wrong here.
+ */
+const record = (overrides: Parameters<typeof permitSummary>[0] = {}) =>
+  permitSummary({ status: 'ISSUED', ...overrides });
+
 describe('the list', () => {
   it('is worded "My permits" for an ordinary employee', async () => {
     stubFetch({ 'GET /api/v1/permits/search': searchResponse([]) });
@@ -34,12 +42,31 @@ describe('the list', () => {
   });
 
   it('shows the fields the API actually returns', async () => {
-    stubFetch({ 'GET /api/v1/permits/search': searchResponse([permitSummary()]) });
+    stubFetch({ 'GET /api/v1/permits/search': searchResponse([record()]) });
     renderAs(<RecordsPage />, normalEmployee());
 
     await screen.findAllByText('000001');
     expect(screen.getAllByText(/WTG Work Permit/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/North Farm · WTG-14/).length).toBeGreaterThan(0);
+  });
+
+  it('never renders a DRAFT row even if a stale backend fixture contains one', async () => {
+    stubFetch({
+      'GET /api/v1/permits/search': searchResponse([
+        permitSummary({ id: 'draft', status: 'DRAFT', permitDisplayNumber: '000013' }),
+        permitSummary({ id: 'record', status: 'ISSUED', permitDisplayNumber: '000014' }),
+      ]),
+    });
+    renderAs(<RecordsPage />, normalEmployee());
+    expect(await screen.findAllByText('000014')).not.toHaveLength(0);
+    expect(screen.queryByText('000013')).not.toBeInTheDocument();
+  });
+
+  it('does not offer DRAFT as a Permit Records status filter', async () => {
+    stubFetch({ 'GET /api/v1/permits/search': searchResponse([]) });
+    renderAs(<RecordsPage />, normalEmployee());
+    const status = await screen.findByLabelText(/^status/i);
+    expect(status).not.toHaveTextContent('Draft');
   });
 
   it('shows an empty state rather than a blank panel', async () => {
@@ -59,7 +86,7 @@ describe('the list', () => {
 describe('filtering', () => {
   it('sends the filters to the server rather than filtering in the browser', async () => {
     const user = userEvent.setup();
-    const { calls } = stubFetch({ 'GET /api/v1/permits/search': searchResponse([permitSummary()]) });
+    const { calls } = stubFetch({ 'GET /api/v1/permits/search': searchResponse([record()]) });
     renderAs(<RecordsPage />, normalEmployee());
     await screen.findAllByText('000001');
 
@@ -81,7 +108,7 @@ describe('filtering', () => {
   it('resets to page 1 when filters change', async () => {
     const user = userEvent.setup();
     const { calls } = stubFetch({
-      'GET /api/v1/permits/search': searchResponse([permitSummary()], { totalCount: 60, totalPages: 3, hasNextPage: true }),
+      'GET /api/v1/permits/search': searchResponse([record()], { totalCount: 60, totalPages: 3, hasNextPage: true }),
     });
     renderAs(<RecordsPage />, normalEmployee());
     await screen.findAllByText('000001');
@@ -102,7 +129,7 @@ describe('filtering', () => {
 
 describe('visibility after a permission change', () => {
   it('re-asks the server when authorization-sensitive state is invalidated', async () => {
-    let responses = [permitSummary({ id: 'p-1' }), permitSummary({ id: 'p-2', permitDisplayNumber: '000002' })];
+    let responses = [record({ id: 'p-1' }), record({ id: 'p-2', permitDisplayNumber: '000002' })];
     const { calls } = stubFetch({
       'GET /api/v1/permits/search': () => searchResponse(responses),
     });
@@ -112,7 +139,7 @@ describe('visibility after a permission change', () => {
     const before = calls.length;
 
     // A revocation happened elsewhere; the backend now returns less.
-    responses = [permitSummary({ id: 'p-1' })];
+    responses = [record({ id: 'p-1' })];
     invalidateAll();
 
     await waitFor(() => expect(calls.length).toBeGreaterThan(before));
@@ -124,7 +151,7 @@ describe('visibility after a permission change', () => {
     let forbidden = false;
     stubFetch({
       'GET /api/v1/permits/search': () =>
-        forbidden ? { status: 403, body: { error: 'forbidden' } } : searchResponse([permitSummary()]),
+        forbidden ? { status: 403, body: { error: 'forbidden' } } : searchResponse([record()]),
     });
     renderAs(<RecordsPage />, normalEmployee());
     await screen.findAllByText('000001');

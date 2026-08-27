@@ -85,11 +85,19 @@ function queryFnFor(db: PGlite): QueryFn {
 }
 
 /** One permit owned by `owner`, created through the real schema. */
-async function seedPermit(db: PGlite, owner: string, status = 'DRAFT'): Promise<void> {
-  // ISSUED carries the timestamps its CHECK constraints require.
-  const issued = status === 'DRAFT'
-    ? 'NULL, NULL, NULL'
-    : "now(), now(), now() + INTERVAL '5 minutes'";
+/**
+ * Defaults to ISSUED, not DRAFT, because Permit Records now excludes
+ * drafts unconditionally - a visibility test seeded with drafts would
+ * pass vacuously (everything is empty) and prove nothing about the
+ * access predicate it exists to check. Tests about the draft rule itself
+ * pass their status explicitly.
+ */
+async function seedPermit(db: PGlite, owner: string, status = 'ISSUED'): Promise<void> {
+  // Only ISSUED carries the timestamps its CHECK constraints require;
+  // DRAFT and the PENDING_* states must leave them null.
+  const issued = status === 'ISSUED'
+    ? "now(), now(), now() + INTERVAL '5 minutes'"
+    : 'NULL, NULL, NULL';
   await db.exec(`
     WITH new_jsa AS (
       INSERT INTO jsas (created_by, form_version, form_payload)
@@ -165,25 +173,27 @@ test('broad visibility still works once a FILTER is applied - the parameters sta
     await seedPermit(db, EMPLOYEE);
     const q = queryFnFor(db);
 
-    const drafts = await searchPermits(
-      { viewerId: CEO, allowedStatuses: [], viewAll: true },
-      { status: 'DRAFT' },
-      PAGE,
-      { query: q },
-    );
-    assert.equal(drafts.totalCount, 2, 'broad visibility spans other people\'s permits');
-
     const issued = await searchPermits(
       { viewerId: CEO, allowedStatuses: [], viewAll: true },
       { status: 'ISSUED' },
       PAGE,
       { query: q },
     );
-    assert.equal(issued.totalCount, 0);
+    assert.equal(issued.totalCount, 2, 'broad visibility spans records belonging to other people');
+
+    // A status these records genuinely are not - DRAFT is no longer a
+    // reachable Permit Records status at all, so a real one is used here.
+    const closed = await searchPermits(
+      { viewerId: CEO, allowedStatuses: [], viewAll: true },
+      { status: 'CLOSED' },
+      PAGE,
+      { query: q },
+    );
+    assert.equal(closed.totalCount, 0);
 
     const byOwner = await searchPermits(
       { viewerId: CEO, allowedStatuses: [], viewAll: true },
-      { createdBy: EMPLOYEE, status: 'DRAFT' },
+      { createdBy: EMPLOYEE, status: 'ISSUED' },
       PAGE,
       { query: q },
     );
@@ -255,22 +265,13 @@ test('Permit Records EXCLUDES drafts, even for a broad-visibility caller', async
 
     const records = await searchPermits(
       { viewerId: CEO, allowedStatuses: [], viewAll: true },
-      { excludeDraft: true },
+      {},
       PAGE,
       { query: q },
     );
     assert.equal(records.totalCount, 1, 'only the formal record');
     assert.equal(records.items[0]!.status, 'ISSUED');
 
-    // Without the flag the same caller would see all three - so the
-    // exclusion is doing the work, not the access predicate.
-    const unfiltered = await searchPermits(
-      { viewerId: CEO, allowedStatuses: [], viewAll: true },
-      {},
-      PAGE,
-      { query: q },
-    );
-    assert.equal(unfiltered.totalCount, 3);
   } finally {
     await db.close();
   }
@@ -300,9 +301,9 @@ test("My Drafts returns ONLY the caller's own drafts, whatever authority they ho
 test('an allowed-status reviewer still sees that status without broad visibility', async () => {
   const db = await migratedDatabase();
   try {
-    await seedPermit(db, OTHER_EMPLOYEE);
+    await seedPermit(db, OTHER_EMPLOYEE, 'PENDING_CRO');
     const page = await searchPermits(
-      { viewerId: EMPLOYEE, allowedStatuses: ['DRAFT'] },
+      { viewerId: EMPLOYEE, allowedStatuses: ['PENDING_CRO'] },
       {},
       PAGE,
       { query: queryFnFor(db) },

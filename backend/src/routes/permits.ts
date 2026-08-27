@@ -176,7 +176,7 @@ permitsRouter.post('/permits', requireAuth, mutationLimiter, requirePermitApplic
 // (e.g. a request to /permits/mine would match :id="mine").
 
 /**
- * The caller's own permits (any status) - "current user's permit list".
+ * The caller's own formal permit records (never DRAFT).
  * Ownership-based, not capability-gated: access is `created_by = me`,
  * enforced entirely by `listOwnPermits`'s query. Deliberately requires
  * no specific capability beyond being authenticated - a user who once
@@ -289,10 +289,6 @@ permitsRouter.get('/permits/search', requireAuth, async (req: Request, res: Resp
       createdBy: parsed.data.createdBy,
       createdFrom: parsed.data.createdFrom,
       createdTo: parsed.data.createdTo,
-      // Permit Records is the FORMAL record list. Someone else's
-      // unfinished draft is not a record, and broad visibility is not a
-      // reason to surface it - own drafts are served by /permits/my-drafts.
-      excludeDraft: true,
     },
     { page: parsed.data.page, pageSize: parsed.data.pageSize },
   );

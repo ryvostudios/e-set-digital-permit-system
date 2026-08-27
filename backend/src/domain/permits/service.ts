@@ -504,8 +504,9 @@ function pageOffset(pageParams: PageParams): number {
 }
 
 /**
- * Every permit `actorUserId` created, most recent first - the creator's
- * own list/dashboard view. Bounded by `pageParams` (validated/clamped
+ * Every non-DRAFT permit `actorUserId` created, most recent first - the
+ * creator's formal record list. Drafts have one server-side home:
+ * `listOwnDrafts`. Bounded by `pageParams` (validated/clamped
  * before this is ever called - see `domain/permits/validation.ts::paginationQuerySchema`),
  * so this never retrieves an unbounded result set regardless of how many
  * permits the caller has created. `created_at DESC, id DESC` is a
@@ -520,10 +521,10 @@ export async function listOwnPermits(
 ): Promise<Page<PermitSummaryRow>> {
   const [rowsResult, countResult] = await Promise.all([
     deps.query<PermitSummaryRow>(
-      `SELECT ${permitSummaryColumns()} FROM permits WHERE created_by = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`,
+      `SELECT ${permitSummaryColumns()} FROM permits WHERE created_by = $1 AND status <> 'DRAFT' ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`,
       [actorUserId, pageParams.pageSize, pageOffset(pageParams)],
     ),
-    deps.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM permits WHERE created_by = $1', [
+    deps.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM permits WHERE created_by = $1 AND status <> 'DRAFT'", [
       actorUserId,
     ]),
   ]);

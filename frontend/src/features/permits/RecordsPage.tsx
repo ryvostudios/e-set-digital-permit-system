@@ -27,6 +27,7 @@ import { PermitList } from './PermitList';
  */
 
 const PAGE_SIZE = 20;
+const RECORD_STATUSES = PERMIT_STATUSES.filter((status) => status !== 'DRAFT');
 
 interface Filters {
   permitNumber: string;
@@ -83,6 +84,11 @@ export function RecordsPage() {
     setPage(1);
   }
 
+  // Defense in depth for stale/corrupt intermediaries. The backend is
+  // authoritative and excludes drafts before COUNT/pagination; this
+  // guard ensures this screen still never presents one as a record.
+  const recordPermits = (resource.data?.permits ?? []).filter((permit) => permit.status !== 'DRAFT');
+
   return (
     <>
       <PageHeader
@@ -111,7 +117,7 @@ export function RecordsPage() {
                 onChange={(event) => setDraft({ ...draft, status: event.target.value })}
               >
                 <option value="">Any status</option>
-                {PERMIT_STATUSES.map((status) => (
+                {RECORD_STATUSES.map((status) => (
                   <option key={status} value={status}>
                     {permitStatusLabel(status)}
                   </option>
@@ -173,7 +179,7 @@ export function RecordsPage() {
           ) : (
             <>
               <PermitList
-                permits={resource.data?.permits ?? []}
+                permits={recordPermits}
                 emptyMessage="No permits match these filters."
               />
               {resource.data ? (

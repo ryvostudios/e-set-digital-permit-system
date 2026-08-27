@@ -54,8 +54,6 @@ export interface PermitSearchFilters {
   createdBy?: string | undefined;
   createdFrom?: Date | undefined;
   createdTo?: Date | undefined;
-  /** Excludes DRAFT - see the note in `buildSearchWhere`. */
-  excludeDraft?: boolean | undefined;
 }
 
 /**
@@ -78,12 +76,17 @@ function buildSearchWhere(access: PermitSearchAccess, filters: PermitSearchFilte
   // than ignoring. Every filter below numbers itself from
   // `params.length`, so both shapes stay correctly numbered.
   const params: unknown[] = [];
-  let clause: string;
+  // Permit search is the formal Permit Records query primitive. This
+  // invariant is unconditional and precedes every visibility branch, so
+  // owner, privileged and permit.view_all access can only narrow within
+  // non-draft records; none can bypass the record boundary.
+  let clause = "p.status <> 'DRAFT'";
   if (access.viewAll) {
-    clause = 'TRUE';
+    // No additional visibility predicate, but the record boundary above
+    // remains mandatory.
   } else {
     params.push(access.viewerId, access.allowedStatuses);
-    clause = '(p.created_by = $1 OR p.status = ANY($2))';
+    clause += ' AND (p.created_by = $1 OR p.status = ANY($2))';
   }
 
   if (filters.permitNumber !== undefined) {
@@ -118,16 +121,6 @@ function buildSearchWhere(access: PermitSearchAccess, filters: PermitSearchFilte
     params.push(filters.createdTo.toISOString());
     clause += ` AND p.created_at <= $${params.length}`;
   }
-  // Permit Records lists FORMAL workflow records. A draft is private
-  // work in progress and belongs in My Drafts, so it is excluded HERE
-  // rather than filtered out in the browser - otherwise a
-  // broad-visibility caller's record list would carry other people's
-  // unfinished documents.
-  if (filters.excludeDraft) {
-    clause += " AND p.status <> 'DRAFT'";
-  }
-
-
   return { clause, params };
 }
 
