@@ -154,22 +154,57 @@ export type AvailableAction =
  * authority on that; this hint being briefly stale in that one case is
  * the same class of limitation any purely-derived display hint has.
  */
+/**
+ * Whether an identity may act as a permit APPLICANT.
+ *
+ * THE SINGLE DEFINITION, deliberately shared with
+ * `middleware/requirePermitApplicant.ts`. A privileged system account
+ * (CEO / E-SET SITE_MANAGER) may apply for permits without holding
+ * `permit.create`/`permit.submit`, because those capabilities come from a
+ * Team + Position and a privileged account has neither by design.
+ *
+ * This function exists because the two places that decide it had drifted:
+ * the middleware allowed the privileged applicant through, while
+ * `computeAvailableActions` below tested the capability alone. The write
+ * therefore succeeded but the UI never offered it - a CEO's own DRAFT
+ * opened read-only ("no actions are available") even though PATCH would
+ * have been accepted. Keeping one predicate makes that disagreement
+ * unrepresentable rather than merely fixed once.
+ */
+export function isPermitApplicantAuthorized(
+  capabilities: ReadonlySet<string>,
+  privilegedRoles: ReadonlySet<string>,
+  required: 'permit.create' | 'permit.submit',
+): boolean {
+  return capabilities.has(required) || privilegedRoles.has('CEO') || privilegedRoles.has('SITE_MANAGER');
+}
+
 export function computeAvailableActions(
   permit: Pick<PermitRow, 'status' | 'created_by' | 'hse_review_deadline_at' | 'issued_at' | 'site_timezone'>,
   viewerId: string,
   viewerCapabilities: ReadonlySet<string>,
   nowMs: number,
+  /**
+   * The viewer's privileged system roles. Defaults to none, so a caller
+   * that genuinely has no privileged tier to consider is unchanged.
+   */
+  viewerPrivilegedRoles: ReadonlySet<string> = new Set<string>(),
 ): AvailableAction[] {
   const actions: AvailableAction[] = [];
   const isOwner = permit.created_by === viewerId;
 
+  // Applicant actions use the SAME predicate the write path enforces, so
+  // the hint can never claim less (or more) than the route would accept.
+  const mayEdit = isPermitApplicantAuthorized(viewerCapabilities, viewerPrivilegedRoles, 'permit.create');
+  const maySubmit = isPermitApplicantAuthorized(viewerCapabilities, viewerPrivilegedRoles, 'permit.submit');
+
   if ((permit.status === 'DRAFT' || permit.status === 'PENDING_CORRECTION') && isOwner) {
-    if (viewerCapabilities.has('permit.create')) actions.push('update');
+    if (mayEdit) actions.push('update');
   }
-  if (permit.status === 'DRAFT' && isOwner && viewerCapabilities.has('permit.submit')) {
+  if (permit.status === 'DRAFT' && isOwner && maySubmit) {
     actions.push('submit');
   }
-  if (permit.status === 'PENDING_CORRECTION' && isOwner && viewerCapabilities.has('permit.submit')) {
+  if (permit.status === 'PENDING_CORRECTION' && isOwner && maySubmit) {
     actions.push('resubmit');
   }
   if (permit.status === 'PENDING_CRO') {

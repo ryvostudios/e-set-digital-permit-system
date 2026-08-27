@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { canViewPermit, computeAvailableActions, computePermitValidity, computeViewableStatuses, STATUS_VIEW_CAPABILITIES } from './access.js';
+import { canViewPermit, computeAvailableActions, computePermitValidity, computeViewableStatuses, isPermitApplicantAuthorized, STATUS_VIEW_CAPABILITIES } from './access.js';
 import type { PermitRow, PermitStatus } from './service.js';
 
 function basePermit(
@@ -404,4 +404,71 @@ test('computeViewableStatuses: holding every CRO/HSE capability grants every non
 
 test('computeViewableStatuses: an unrelated capability grants no visibility', () => {
   assert.deepEqual(computeViewableStatuses(new Set(['permit.create'])), []);
+});
+
+// ---------------------------------------------------------------------
+// Privileged applicants (CEO / E-SET SITE_MANAGER)
+// ---------------------------------------------------------------------
+//
+// A privileged system account holds NO capabilities: capabilities come
+// from a Team + Position, and a privileged account has neither by design.
+// `requirePermitApplicant` has always let them apply anyway, so the PATCH
+// succeeded - but `computeAvailableActions` tested the capability alone,
+// so the UI never offered the editor and a CEO's own DRAFT opened
+// read-only. Both now share `isPermitApplicantAuthorized`.
+
+test('computeAvailableActions: a CEO with NO capabilities may edit and submit their OWN draft', () => {
+  const permit = basePermit({ status: 'DRAFT', created_by: 'ceo-1' });
+  const actions = computeAvailableActions(permit, 'ceo-1', new Set(), Date.now(), new Set(['CEO']));
+  assert.deepEqual(actions.sort(), ['submit', 'update']);
+});
+
+test('computeAvailableActions: an E-SET SITE_MANAGER with NO capabilities may edit and submit their OWN draft', () => {
+  const permit = basePermit({ status: 'DRAFT', created_by: 'sm-1' });
+  const actions = computeAvailableActions(permit, 'sm-1', new Set(), Date.now(), new Set(['SITE_MANAGER']));
+  assert.deepEqual(actions.sort(), ['submit', 'update']);
+});
+
+test('computeAvailableActions: a privileged applicant may correct their own returned permit', () => {
+  const permit = basePermit({ status: 'PENDING_CORRECTION', created_by: 'ceo-1' });
+  const actions = computeAvailableActions(permit, 'ceo-1', new Set(), Date.now(), new Set(['CEO']));
+  assert.deepEqual(actions.sort(), ['resubmit', 'update']);
+});
+
+test('computeAvailableActions: privilege does NOT let a privileged account edit someone else\'s draft', () => {
+  // Ownership is the rule for applicant actions; being CEO is not a
+  // licence to rewrite another applicant's draft.
+  const permit = basePermit({ status: 'DRAFT', created_by: 'someone-else' });
+  assert.deepEqual(computeAvailableActions(permit, 'ceo-1', new Set(), Date.now(), new Set(['CEO'])), []);
+  assert.deepEqual(computeAvailableActions(permit, 'sm-1', new Set(), Date.now(), new Set(['SITE_MANAGER'])), []);
+});
+
+test('computeAvailableActions: an ordinary owner WITHOUT the capability still gets nothing', () => {
+  // The fix must not have widened anything for non-privileged callers.
+  const permit = basePermit({ status: 'DRAFT', created_by: 'owner' });
+  assert.deepEqual(computeAvailableActions(permit, 'owner', new Set(), Date.now()), []);
+  assert.deepEqual(computeAvailableActions(permit, 'owner', new Set(), Date.now(), new Set()), []);
+});
+
+test('computeAvailableActions: privilege grants NO reviewer or issued-permit authority', () => {
+  // Being CEO must not imply CRO/HSE review or hold/cancel/close.
+  const roles = new Set(['CEO', 'SITE_MANAGER']);
+  for (const status of ['PENDING_CRO', 'PENDING_HSE', 'ISSUED', 'HELD'] as const) {
+    const permit = basePermit({ status, created_by: 'ceo-1' });
+    assert.deepEqual(
+      computeAvailableActions(permit, 'ceo-1', new Set(), Date.now(), roles),
+      [],
+      `${status} must offer a privileged account no workflow authority`,
+    );
+  }
+});
+
+test('isPermitApplicantAuthorized is the single rule the write path and the hint share', () => {
+  const none = new Set<string>();
+  assert.equal(isPermitApplicantAuthorized(new Set(['permit.create']), none, 'permit.create'), true);
+  assert.equal(isPermitApplicantAuthorized(none, new Set(['CEO']), 'permit.create'), true);
+  assert.equal(isPermitApplicantAuthorized(none, new Set(['SITE_MANAGER']), 'permit.submit'), true);
+  assert.equal(isPermitApplicantAuthorized(none, none, 'permit.create'), false);
+  // A capability for a DIFFERENT action does not authorize this one.
+  assert.equal(isPermitApplicantAuthorized(new Set(['permit.submit']), none, 'permit.create'), false);
 });

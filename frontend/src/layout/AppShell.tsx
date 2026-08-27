@@ -157,6 +157,7 @@ function UserMenu() {
  */
 export function AppShell() {
   const { capabilities } = useCurrentUser();
+  const { signOut } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const { section, title } = usePageContext();
@@ -248,6 +249,20 @@ export function AppShell() {
         <div className="sidebar__footer">
           <p>{capabilities.displayName}</p>
           <p>{identityLine(capabilities)}</p>
+          {/*
+            The same `signOut` the user menu uses - not a second copy of the
+            auth logic. It was previously reachable only by opening that
+            menu; signing out is common enough to be visible without a
+            discovery step.
+          */}
+          <Button
+            variant="secondary"
+            block
+            onClick={() => void signOut()}
+            style={{ marginTop: 'var(--space-3)' }}
+          >
+            Logout
+          </Button>
         </div>
       </aside>
 

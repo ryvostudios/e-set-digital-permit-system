@@ -45,35 +45,39 @@ describe('the greeting', () => {
     expect(screen.getByText(/Engineer · ZPL · ZPL/)).toBeInTheDocument();
   });
 
-  it('names a privileged account and states plainly that it holds no organizational membership', async () => {
+  it('greets a privileged account by name and adds NO account explanation', async () => {
+    // A privileged account has no Company/Team/Position, so it simply has
+    // no organizational line - the header is not filled with a
+    // description of what the account is instead.
     quietBackend();
     renderAs(<HomePage />, ceo());
 
     expect(await screen.findByRole('heading', { level: 1, name: /good day, farhan aziz/i })).toBeInTheDocument();
-    expect(screen.getByText(/no company, team, or position is held/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no company, team, or position/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/privileged system account/i)).not.toBeInTheDocument();
   });
 });
 
-describe('the applicant identity preview', () => {
-  it('reads "Mr. NAME of Company COMPANY" for a normal employee', async () => {
-    quietBackend();
-    renderAs(<HomePage />, normalEmployee());
-    expect(await screen.findByText('Mr. Ali Khan of Company ZPL')).toBeInTheDocument();
-  });
+describe('the applicant identity box', () => {
+  // Removed from the home screen. The applicant identity is still frozen
+  // server-side onto the permit when the workflow records it - it is
+  // simply not previewed here, for any role.
+  const actors = [
+    ['a normal employee', normalEmployee],
+    ['the CEO', ceo],
+    ['a Site Manager', siteManager],
+    ['a CRO', croEmployee],
+  ] as const;
 
-  it('reads the personal name alone for a Site Manager', async () => {
-    quietBackend();
-    renderAs(<HomePage />, siteManager());
-    await screen.findByRole('heading', { level: 1, name: /good day, sara ahmed/i });
-    expect(screen.queryByText(/Mr\. Sara Ahmed of Company/)).not.toBeInTheDocument();
-  });
-
-  it('is not shown at all to someone who cannot apply', async () => {
-    quietBackend();
-    renderAs(<HomePage />, croEmployee());
-    await screen.findByRole('heading', { level: 1, name: /good day, hamza tariq/i });
-    expect(screen.queryByText(/your recorded applicant identity/i)).not.toBeInTheDocument();
-  });
+  for (const [label, actor] of actors) {
+    it('is not shown to ' + label, async () => {
+      quietBackend();
+      renderAs(<HomePage />, actor());
+      await screen.findByRole('heading', { level: 1 });
+      expect(screen.queryByText(/your recorded applicant identity/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/of Company/i)).not.toBeInTheDocument();
+    });
+  }
 });
 
 describe('what each role sees', () => {

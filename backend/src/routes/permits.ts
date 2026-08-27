@@ -71,12 +71,24 @@ import { requirePermitApplicant } from '../middleware/requirePermitApplicant.js'
 export const permitsRouter = Router();
 
 async function resolvePermitReadCapabilities(userId: string): Promise<Set<string>> {
+  return (await resolvePermitReadContext(userId)).capabilities;
+}
+
+/**
+ * Capabilities AND privileged roles from one pair of lookups. The detail
+ * route needs both: the roles decide whether a privileged applicant may
+ * edit their own DRAFT, which capabilities alone cannot express - a
+ * privileged account holds none, having no Team + Position.
+ */
+async function resolvePermitReadContext(
+  userId: string,
+): Promise<{ capabilities: Set<string>; privilegedRoles: ReadonlySet<string> }> {
   const [capabilities, roles] = await Promise.all([
     resolveUserCapabilities(userId),
     resolvePrivilegedAccess(userId),
   ]);
   if (roles.has('CEO') || roles.has('SITE_MANAGER')) capabilities.add('permit.view_all');
-  return capabilities;
+  return { capabilities, privilegedRoles: roles };
 }
 
 // The display number format is not yet confirmed (see
@@ -314,7 +326,7 @@ permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Respons
     return;
   }
 
-  const capabilities = await resolvePermitReadCapabilities(userId);
+  const { capabilities, privilegedRoles } = await resolvePermitReadContext(userId);
   if (!canViewPermit(permit, userId, capabilities)) {
     sendNotFound(res);
     return;
@@ -326,7 +338,7 @@ permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Respons
   // shows (Permit, JSA, History), plus the action hints.
   const jsa = await getJsaById(permit.jsa_id);
   const validity = computePermitValidity(permit, new Date());
-  const availableActions = computeAvailableActions(permit, userId, capabilities, Date.now());
+  const availableActions = computeAvailableActions(permit, userId, capabilities, Date.now(), privilegedRoles);
   const history: LifecycleEventRow[] = await getPermitLifecycleEvents(permit.id);
   const signatures = await getPermitSignatures(query, permit.id);
   const document = permit.issued_at ? await getDocumentForPermit(permit.id) : null;

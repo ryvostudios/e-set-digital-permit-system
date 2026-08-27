@@ -2,11 +2,10 @@ import { Link } from 'react-router-dom';
 import { listMyPermits, listNotifications, listPermitQueue } from '../../api/endpoints';
 import type { NotificationListResponse, PermitListResponse } from '../../api/types';
 import { ROUTES } from '../../app/routes';
-import { describeApplicantIdentity } from '../../auth/capabilities';
 import { useCurrentUser } from '../../auth/useAuth';
 import { formatRelative } from '../../lib/format';
 import { useApiResource } from '../../lib/useApiResource';
-import { Alert, ErrorState, SkeletonRows } from '../../ui/Feedback';
+import { ErrorState, SkeletonRows } from '../../ui/Feedback';
 import { Card, PageHeader } from '../../ui/Layout';
 import { PermitList } from '../permits/PermitList';
 
@@ -110,7 +109,7 @@ function MyRecentPermits() {
 }
 
 export function HomePage() {
-  const { user, capabilities } = useCurrentUser();
+  const { capabilities } = useCurrentUser();
 
   return (
     <>
@@ -120,7 +119,7 @@ export function HomePage() {
         description={
           capabilities.profile
             ? `${capabilities.profile.positionName} · ${capabilities.profile.teamName} · ${capabilities.profile.company.name}`
-            : 'Privileged system account. No Company, Team, or Position is held.'
+            : null
         }
         actions={
           capabilities.canApplyForPermits ? (
@@ -132,12 +131,6 @@ export function HomePage() {
       />
 
       <div className="stack">
-        {capabilities.canApplyForPermits ? (
-          <Alert tone="info" title="Your recorded applicant identity">
-            {describeApplicantIdentity(user)}
-          </Alert>
-        ) : null}
-
         {capabilities.canReviewAsCro ? (
           <QueueCard
             title="Awaiting your CRO review"
