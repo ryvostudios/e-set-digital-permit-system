@@ -5,6 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import type { QueryResultRow } from 'pg';
 import { searchPermits } from './search.js';
+import { listOwnDrafts } from './service.js';
 import type { QueryFn } from '../../db/pool.js';
 
 /**
@@ -83,14 +84,20 @@ function queryFnFor(db: PGlite): QueryFn {
   }) as QueryFn;
 }
 
-/** One DRAFT permit owned by `owner`, created through the real schema. */
-async function seedPermit(db: PGlite, owner: string): Promise<void> {
+/** One permit owned by `owner`, created through the real schema. */
+async function seedPermit(db: PGlite, owner: string, status = 'DRAFT'): Promise<void> {
+  // ISSUED carries the timestamps its CHECK constraints require.
+  const issued = status === 'DRAFT'
+    ? 'NULL, NULL, NULL'
+    : "now(), now(), now() + INTERVAL '5 minutes'";
   await db.exec(`
     WITH new_jsa AS (
-      INSERT INTO jsas (created_by) VALUES ('${owner}') RETURNING id
+      INSERT INTO jsas (created_by, form_version, form_payload)
+      VALUES ('${owner}', 'JSA_V1', '{}'::jsonb) RETURNING id
     )
-    INSERT INTO permits (jsa_id, created_by, site_timezone, status, permit_type, form_version)
-    SELECT id, '${owner}', 'Asia/Karachi', 'DRAFT', 'COLD_WORK', 'COLD_WORK_V1' FROM new_jsa;
+    INSERT INTO permits (jsa_id, created_by, site_timezone, status, permit_type, form_version, form_payload,
+                         issued_at, hse_review_started_at, hse_review_deadline_at)
+    SELECT id, '${owner}', 'Asia/Karachi', '${status}', 'COLD_WORK', 'COLD_WORK_V1', '{}'::jsonb, ${issued} FROM new_jsa;
   `);
 }
 
@@ -231,6 +238,60 @@ test('the fix did not widen access: a filter cannot reach another person\'s perm
       { query: q },
     );
     assert.equal(bySequence.totalCount, 0, 'permit-number lookup must not enumerate past the access predicate');
+  } finally {
+    await db.close();
+  }
+});
+
+test('Permit Records EXCLUDES drafts, even for a broad-visibility caller', async () => {
+  // The property that matters: broad record visibility must not surface
+  // someone else's unfinished safety document.
+  const db = await migratedDatabase();
+  try {
+    await seedPermit(db, EMPLOYEE, 'DRAFT');
+    await seedPermit(db, OTHER_EMPLOYEE, 'DRAFT');
+    await seedPermit(db, OTHER_EMPLOYEE, 'ISSUED');
+    const q = queryFnFor(db);
+
+    const records = await searchPermits(
+      { viewerId: CEO, allowedStatuses: [], viewAll: true },
+      { excludeDraft: true },
+      PAGE,
+      { query: q },
+    );
+    assert.equal(records.totalCount, 1, 'only the formal record');
+    assert.equal(records.items[0]!.status, 'ISSUED');
+
+    // Without the flag the same caller would see all three - so the
+    // exclusion is doing the work, not the access predicate.
+    const unfiltered = await searchPermits(
+      { viewerId: CEO, allowedStatuses: [], viewAll: true },
+      {},
+      PAGE,
+      { query: q },
+    );
+    assert.equal(unfiltered.totalCount, 3);
+  } finally {
+    await db.close();
+  }
+});
+
+test("My Drafts returns ONLY the caller's own drafts, whatever authority they hold", async () => {
+  const db = await migratedDatabase();
+  try {
+    await seedPermit(db, EMPLOYEE, 'DRAFT');
+    await seedPermit(db, OTHER_EMPLOYEE, 'DRAFT');
+    await seedPermit(db, OTHER_EMPLOYEE, 'DRAFT');
+    await seedPermit(db, EMPLOYEE, 'ISSUED');
+    const q = queryFnFor(db);
+
+    const mine = await listOwnDrafts(EMPLOYEE, PAGE, { query: q } as never);
+    assert.equal(mine.totalCount, 1, 'own drafts only - and not own ISSUED permit');
+    assert.equal(mine.items[0]!.created_by, EMPLOYEE);
+
+    // A CEO has broad record visibility and still sees none of theirs.
+    const ceo = await listOwnDrafts(CEO, PAGE, { query: q } as never);
+    assert.equal(ceo.totalCount, 0, "broad visibility must not widen someone else's drafts into view");
   } finally {
     await db.close();
   }

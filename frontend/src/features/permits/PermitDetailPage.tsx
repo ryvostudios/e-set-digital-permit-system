@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { getPermit, updateJsaForm, updatePermitForm } from '../../api/endpoints';
 import { asApiError, fieldErrors } from '../../api/errors';
 import type { JsaFormPayload, PermitDetailResponse, PermitFormPayload } from '../../api/types';
+import { useCurrentUser } from '../../auth/useAuth';
 import { useApiResource } from '../../lib/useApiResource';
 import { Button } from '../../ui/Button';
 import { FormError } from '../../ui/Field';
@@ -18,6 +19,7 @@ import { emptyJsaForm, emptyPermitForm, pruneEmptyStrings } from './forms/defaul
 import { JsaFormFields } from './forms/JsaFormFields';
 import { PermitFormFields } from './forms/PermitFormFields';
 import { permitTypeLabel } from './labels';
+import { V2DraftScreen } from './v2/V2DraftScreen';
 import './paper.css';
 
 /**
@@ -45,6 +47,9 @@ const TABS = [
 export function PermitDetailPage() {
   const { id = '' } = useParams<{ id: string }>();
   const toast = useToast();
+  // The applicant's own authoritative identity, for the permit's display
+  // band. Server-resolved via /auth/me - never typed by anyone.
+  const { capabilities } = useCurrentUser();
   const resource = useApiResource<PermitDetailResponse>((signal) => getPermit(id, signal), [id]);
   const [tab, setTab] = useState<TabId>('permit');
 
@@ -118,6 +123,25 @@ export function PermitDetailPage() {
 
   const { permit, jsa, validity, availableActions, history, signatures, document } = detail;
   const canEdit = availableActions.includes('update');
+
+  /**
+   * An authoritative (V2) draft the owner may edit opens as ONE
+   * continuous document rather than the tabbed record view. The
+   * generation is read from the permit's stored `form_version` - the
+   * server's decision - so the client never chooses V1 or V2. Anything
+   * else, including every V1 record and every submitted permit, keeps the
+   * existing record view below.
+   */
+  if (permit.form_version?.endsWith('_V2') && permit.status === 'DRAFT' && canEdit) {
+    return (
+      <V2DraftScreen
+        permit={permit}
+        jsa={jsa}
+        applicantName={capabilities.displayName}
+        applicantCompany={capabilities.profile?.company.name ?? ''}
+      />
+    );
+  }
 
   return (
     <>

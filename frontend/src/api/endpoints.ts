@@ -111,6 +111,17 @@ export function getPermitHistory(id: string, signal?: AbortSignal): Promise<{ ev
   return apiRequest(`/permits/${encodeURIComponent(id)}/history`, { ...(signal ? { signal } : {}) });
 }
 
+/**
+ * GET /api/v1/permits/my-drafts - the caller's OWN unfinished drafts.
+ *
+ * Scoped server-side by `created_by` with no parameter that could widen
+ * it, so broad record visibility never surfaces another person's
+ * half-finished safety document here.
+ */
+export function listMyDrafts(params: { page?: number; pageSize?: number } = {}, signal?: AbortSignal): Promise<PermitListResponse> {
+  return apiRequest('/permits/my-drafts', { query: { ...params }, ...(signal ? { signal } : {}) });
+}
+
 /** PATCH /api/v1/permits/:id - saves draft permit form content under the permit's optimistic-concurrency version. */
 export function updatePermitForm(id: string, version: number, form: PermitFormPayload): Promise<{ permit: Permit }> {
   return apiRequest(`/permits/${encodeURIComponent(id)}`, { method: 'PATCH', body: { version, form } });

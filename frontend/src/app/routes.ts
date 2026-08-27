@@ -9,6 +9,7 @@ export const ROUTES = {
   apply: '/permits/apply',
   permit: (id: string) => `/permits/${id}`,
   permitPattern: '/permits/:id',
+  myDrafts: '/drafts',
   records: '/records',
   croQueue: '/review/cro',
   hseQueue: '/review/hse',

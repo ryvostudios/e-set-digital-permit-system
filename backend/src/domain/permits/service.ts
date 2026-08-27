@@ -531,6 +531,36 @@ export async function listOwnPermits(
 }
 
 /**
+ * The caller's OWN unfinished drafts, newest first.
+ *
+ * Scoped by `created_by` and nothing else. A draft is private work in
+ * progress, so broad record visibility - CEO, SITE_MANAGER or
+ * `permit.view_all` - deliberately does NOT widen this: being able to
+ * read formal records is not a reason to read someone else's
+ * half-finished safety document. There is no parameter here that could
+ * relax that, so no caller can ask for another person's drafts.
+ */
+export async function listOwnDrafts(
+  actorUserId: string,
+  pageParams: PageParams,
+  deps: PermitsServiceDeps = defaultDeps,
+): Promise<Page<PermitSummaryRow>> {
+  const [rowsResult, countResult] = await Promise.all([
+    deps.query<PermitSummaryRow>(
+      `SELECT ${permitSummaryColumns()} FROM permits
+        WHERE created_by = $1 AND status = 'DRAFT'
+        ORDER BY updated_at DESC, id DESC LIMIT $2 OFFSET $3`,
+      [actorUserId, pageParams.pageSize, pageOffset(pageParams)],
+    ),
+    deps.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM permits WHERE created_by = $1 AND status = 'DRAFT'",
+      [actorUserId],
+    ),
+  ]);
+  return toPage(rowsResult.rows, pageParams, Number(countResult.rows[0]?.count ?? '0'));
+}
+
+/**
  * Every permit currently in `status`, oldest first (FIFO work queue) -
  * not scoped by ownership. Callers authorize which `status` a given
  * caller may request (see `domain/permits/access.ts::STATUS_VIEW_CAPABILITIES`)

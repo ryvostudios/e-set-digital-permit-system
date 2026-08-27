@@ -36,6 +36,11 @@ export function buildNavigation(capabilities: Capabilities): NavGroup[] {
   if (capabilities.canApplyForPermits) {
     work.push({ to: ROUTES.apply, label: 'Apply for permit', icon: 'plus' });
   }
+  if (capabilities.canApplyForPermits) {
+    // Unfinished work of one's own, kept apart from the formal record
+    // list: a draft is private until it is submitted.
+    work.push({ to: ROUTES.myDrafts, label: 'My drafts', icon: 'document', matchPrefix: ROUTES.myDrafts });
+  }
   work.push({
     to: ROUTES.records,
     label: capabilities.canViewAllPermits ? 'Permit records' : 'My permits',

@@ -54,6 +54,8 @@ export interface PermitSearchFilters {
   createdBy?: string | undefined;
   createdFrom?: Date | undefined;
   createdTo?: Date | undefined;
+  /** Excludes DRAFT - see the note in `buildSearchWhere`. */
+  excludeDraft?: boolean | undefined;
 }
 
 /**
@@ -116,6 +118,15 @@ function buildSearchWhere(access: PermitSearchAccess, filters: PermitSearchFilte
     params.push(filters.createdTo.toISOString());
     clause += ` AND p.created_at <= $${params.length}`;
   }
+  // Permit Records lists FORMAL workflow records. A draft is private
+  // work in progress and belongs in My Drafts, so it is excluded HERE
+  // rather than filtered out in the browser - otherwise a
+  // broad-visibility caller's record list would carry other people's
+  // unfinished documents.
+  if (filters.excludeDraft) {
+    clause += " AND p.status <> 'DRAFT'";
+  }
+
 
   return { clause, params };
 }

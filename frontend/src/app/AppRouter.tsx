@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-route
 import { useAuth } from '../auth/useAuth';
 import { ChangePasswordPage } from '../features/auth/ChangePasswordPage';
 import { FormPreviewPage } from '../features/permits/v2/FormPreviewPage';
+import { MyDraftsPage } from '../features/permits/MyDraftsPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { HomePage } from '../features/home/HomePage';
 import { NotificationsPage } from '../features/notifications/NotificationsPage';
@@ -125,6 +126,7 @@ export function AppRouter() {
           <Route index element={<HomePage />} />
           <Route path={ROUTES.apply} element={<ApplyPermitPage />} />
           <Route path={ROUTES.permitPattern} element={<PermitDetailPage />} />
+          <Route path={ROUTES.myDrafts} element={<MyDraftsPage />} />
           <Route path={ROUTES.records} element={<RecordsPage />} />
           <Route path={ROUTES.croQueue} element={<CroQueuePage />} />
           <Route path={ROUTES.hseQueue} element={<HseQueuePage />} />

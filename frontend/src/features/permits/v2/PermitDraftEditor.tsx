@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { FormCatalogue, PermitTypeKey } from '../../../api/catalogue';
 import { asApiError, type UnansweredAnswer } from '../../../api/errors';
 import { Button } from '../../../ui/Button';
 import { Alert } from '../../../ui/Feedback';
+import { useUnsavedChangesGuard } from '../../../lib/useUnsavedChangesGuard';
 import { JsaDocumentV2 } from './JsaDocumentV2';
 import { PermitDocumentV2 } from './PermitDocumentV2';
 import { pathId } from './primitives';
@@ -91,18 +92,10 @@ export function PermitDraftEditor({
   /**
    * Leaving with unsaved work loses it - there is no autosave, because a
    * half-answered safety document written back on a timer is worse than
-   * one the person chose to save. The browser prompt only appears while
-   * something is genuinely unsaved.
+   * one the person chose to save. Covers both closing the tab and
+   * navigating inside the application.
    */
-  useEffect(() => {
-    if (!dirty) return;
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [dirty]);
+  useUnsavedChangesGuard(dirty);
 
   /** The unanswered paths, as element ids, for highlighting. */
   const invalid = useMemo(

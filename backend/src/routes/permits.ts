@@ -31,6 +31,7 @@ import {
   resubmitPermit,
   resumePermit,
   submitPermit,
+  listOwnDrafts,
   updateDraftPermit,
   updateLinkedJsa,
   type JsaRow,
@@ -288,10 +289,39 @@ permitsRouter.get('/permits/search', requireAuth, async (req: Request, res: Resp
       createdBy: parsed.data.createdBy,
       createdFrom: parsed.data.createdFrom,
       createdTo: parsed.data.createdTo,
+      // Permit Records is the FORMAL record list. Someone else's
+      // unfinished draft is not a record, and broad visibility is not a
+      // reason to surface it - own drafts are served by /permits/my-drafts.
+      excludeDraft: true,
     },
     { page: parsed.data.page, pageSize: parsed.data.pageSize },
   );
 
+  res.status(200).json({ permits: page.items.map(serializePermitSummary), pagination: serializePagination(page) });
+});
+
+/**
+ * The caller's OWN unfinished drafts.
+ *
+ * Ownership is the entire rule: `listOwnDrafts` scopes by `created_by`
+ * and takes no parameter that could widen it, so a CEO, a Site Manager or
+ * a `permit.view_all` holder sees their own drafts here and nobody
+ * else's. Being able to read formal records is not a reason to read
+ * someone's half-finished safety document.
+ *
+ * Registered before `/permits/:id` so ":id" cannot swallow "my-drafts".
+ */
+permitsRouter.get('/permits/my-drafts', requireAuth, async (req: Request, res: Response) => {
+  const userId = getAuthenticatedUserId(req, res);
+  if (!userId) return;
+
+  const query = paginationQuerySchema.safeParse(req.query);
+  if (!query.success) {
+    sendValidationError(res, query.error.issues);
+    return;
+  }
+
+  const page = await listOwnDrafts(userId, query.data);
   res.status(200).json({ permits: page.items.map(serializePermitSummary), pagination: serializePagination(page) });
 });
 
