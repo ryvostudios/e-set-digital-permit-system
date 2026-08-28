@@ -26,6 +26,26 @@
   --brand-primary-border: #b7d9de;
   --brand-on-primary: #ffffff;
 
+  /*
+   * The selection mark on a printed/read-only document (checklist ticks,
+   * PPE bands, hazard bands) - a deep, professional blue.
+   *
+   * IT IS ITS OWN TOKEN, not an alias. The palette above is a petrol and
+   * slate family with no blue in it, and a ticked box wants to read as
+   * blue ink on a form rather than as brand furniture. It keeps the
+   * brand primary's green channel and depth (#0d4f5c -> #1a4f9c), so it
+   * belongs to the same family while being unmistakably blue.
+   *
+   * 7.95:1 on white - AAA at normal text size - and 8% of white's
+   * luminance, so it prints as near-black in grayscale. THE MARK'S
+   * MEANING IS ITS SHAPE, a checkmark; this colour is reinforcement,
+   * never the signal (WCAG 1.4.1).
+   *
+   * The PDFKIT_V3 renderer draws the same hex, so a ticked box on screen
+   * and the same box on paper are the one mark.
+   */
+  --doc-mark: #1a4f9c;
+
   --brand-secondary: #1f3a4d;
   --brand-secondary-soft: #eaeff3;
 

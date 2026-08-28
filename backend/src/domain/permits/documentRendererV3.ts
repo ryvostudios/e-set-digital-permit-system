@@ -38,6 +38,16 @@ const RULE_STRONG = '#4a5560';
 const HEAD_FILL = '#eceff3';
 const INK = '#111418';
 const MUTED = '#5b6672';
+/*
+ * The selection mark's colour: the document blue, the exact value
+ * `--doc-mark` resolves to in the application's design tokens, so a
+ * ticked box on screen and the same box on paper are the one mark.
+ *
+ * The colour is reinforcement only. The mark's MEANING is its shape, so
+ * the document is exactly as readable printed in grayscale - this blue
+ * carries 8% of white's luminance, which prints as near-black.
+ */
+const MARK = '#1a4f9c';
 
 /** Body/typographic scale. Print-first: small, but never below 7pt. */
 const SIZE = { masthead: 13, issuer: 8, section: 9.5, body: 8.5, small: 7.5, tick: 8 } as const;
@@ -74,13 +84,39 @@ function box(doc: PDFKit.PDFDocument, x: number, y: number, w: number, h: number
   doc.fillColor(INK);
 }
 
-/** The printed tick box, marked or not. Never a colour-only distinction. */
-function tickBox(doc: PDFKit.PDFDocument, x: number, y: number, marked: boolean, size = 7.5): void {
+/** The printed tick box's side, in points. Sized to read at arm's length on paper. */
+const TICK = 9;
+
+/**
+ * The printed tick box, marked or not.
+ *
+ * THE MARK IS A CHECKMARK, AND ONLY EVER A CHECKMARK. It used to be
+ * drawn as two crossing strokes - an X - which on a safety permit reads
+ * as a failure rather than as "this is the answer that was given". A NO
+ * answer is a checkmark in the NO column, exactly as a person ticks a
+ * paper form; nothing on this document means "selected" by drawing a
+ * cross.
+ *
+ * DRAWN, NOT TYPESET. A `✓` character depends on the font embedded in
+ * the PDF actually carrying that glyph; the standard Helvetica the rest
+ * of this document uses does not, and a missing glyph is a blank box or
+ * a substitution the renderer cannot control. Two straight vector
+ * strokes render identically in every viewer and at every zoom.
+ *
+ * The proportions below are of `size`, so the mark scales with its box:
+ * down and right to the vertex at just under half the width, then up and
+ * right past the vertex's height - the short arm and the long arm that
+ * make the shape unmistakable. Round caps and joins keep it from reading
+ * as a wedge at small sizes. NEVER A COLOUR-ONLY DISTINCTION: the shape
+ * alone carries the meaning in grayscale.
+ */
+function tickBox(doc: PDFKit.PDFDocument, x: number, y: number, marked: boolean, size = TICK): void {
   doc.rect(x, y, size, size).lineWidth(0.6).strokeColor(RULE_STRONG).stroke();
   if (marked) {
-    doc.save().lineWidth(1).strokeColor(INK)
-      .moveTo(x + 1.4, y + 1.4).lineTo(x + size - 1.4, y + size - 1.4)
-      .moveTo(x + size - 1.4, y + 1.4).lineTo(x + 1.4, y + size - 1.4)
+    doc.save().lineWidth(1.25).lineCap('round').lineJoin('round').strokeColor(MARK)
+      .moveTo(x + size * 0.22, y + size * 0.52)
+      .lineTo(x + size * 0.42, y + size * 0.74)
+      .lineTo(x + size * 0.8, y + size * 0.24)
       .stroke().restore();
   }
   doc.fillColor(INK);
@@ -185,7 +221,9 @@ function renderChecklist(cursor: Cursor, block: Extract<DocumentBlock, { kind: '
     columns.forEach((column, index) => {
       const x = left + questionWidth + index * tickWidth;
       box(doc, x, top, tickWidth, height);
-      tickBox(doc, x + tickWidth / 2 - 3.75, top + height / 2 - 3.75, item.response === column);
+      // Centred in its own response column, both ways, whatever the row's
+      // height turns out to be.
+      tickBox(doc, x + tickWidth / 2 - TICK / 2, top + height / 2 - TICK / 2, item.response === column);
     });
     if (remarksWidth) {
       const x = left + questionWidth + tickWidth * columns.length;

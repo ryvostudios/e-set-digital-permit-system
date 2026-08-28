@@ -239,18 +239,30 @@
 
 .doc__tick-box {
   flex: none;
-  width: 1rem;
-  height: 1rem;
+  width: 1.1rem;
+  height: 1.1rem;
   border: 1.5px solid var(--border-form);
   border-radius: 2px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.75rem;
-  font-weight: 800;
   line-height: 1;
-  color: var(--brand-primary);
+  color: var(--doc-mark);
   background: var(--surface);
+  /* The drawn mark sits inside the box with a hairline of clearance, so
+     it never touches the border at any zoom. */
+  padding: 0.1rem;
+}
+
+/*
+ * The drawn selection mark. It fills its box rather than being set at a
+ * type size, so it is legible on a phone and in print, and it inherits
+ * the box's colour through `currentColor`.
+ */
+.doc__check {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .doc__tick--off {

@@ -8,6 +8,7 @@ import {
   YesNoField,
   type DocumentMode,
 } from './primitives';
+import { CheckMark } from '../CheckMark';
 import { emptyTaskAnalysisRow, type JsaValuesV2, type SelectionValues, type TaskAnalysisRow } from './values';
 import './paperV2.css';
 
@@ -238,7 +239,7 @@ export function JsaDocumentV2({ definition, values, mode, onChange, invalid, aut
                           ) : (
                             <span key={energy.code} className="doc__response">
                               <span className={on ? 'doc__tick-box doc__tick-box--on' : 'doc__tick-box'}>
-                                {on ? '×' : ''}
+                                {on ? <CheckMark /> : null}
                               </span>
                               <span>{energy.code}</span>
                             </span>

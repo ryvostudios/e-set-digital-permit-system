@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { CatalogueItem, ChecklistSectionDef, SelectionSectionDef } from '../../../api/catalogue';
+import { CheckMark } from '../CheckMark';
 import type { ChecklistAnswers, ChecklistResponse, SelectionValues } from './values';
 
 /**
@@ -150,7 +151,7 @@ export function ChecklistBand({
                         className={current === column ? 'doc__tick-box doc__tick-box--on' : 'doc__tick-box'}
                         aria-label={`${item.label} — ${RESPONSE_LABEL[column]}${current === column ? ' (selected)' : ''}`}
                       >
-                        {current === column ? '×' : ''}
+                        {current === column ? <CheckMark /> : null}
                       </span>
                     )}
                   </td>
@@ -202,7 +203,7 @@ export function SelectionBand({
               ) : (
                 <>
                   <span className="doc__tick-box" aria-hidden="true">
-                    {checked ? '×' : ''}
+                    {checked ? <CheckMark /> : null}
                   </span>
                   <span>{option.label}</span>
                 </>
@@ -333,7 +334,7 @@ export function YesNoField({
           ) : (
             <span key={option} className="doc__response">
               <span className="doc__tick-box" aria-hidden="true">
-                {value === option ? '×' : ''}
+                {value === option ? <CheckMark /> : null}
               </span>
               <span>{RESPONSE_LABEL[option]}</span>
             </span>

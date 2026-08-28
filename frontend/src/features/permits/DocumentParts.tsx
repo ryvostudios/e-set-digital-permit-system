@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { ChecklistItem, DescriptionRow, PermitSignature, SelectionOption } from '../../api/types';
 import { formatDateTime } from '../../lib/format';
+import { CheckMark } from './CheckMark';
 import { SIGNATURE_ROLE_LABELS } from './labels';
 import './paper.css';
 
@@ -122,7 +123,7 @@ export function TickList({ label, options }: { label: string; options: Selection
         {options.map((option, index) => (
           <span key={`${option.label}-${index}`} className={option.selected ? 'doc__tick' : 'doc__tick doc__tick--off'}>
             <span className="doc__tick-box" aria-hidden="true">
-              {option.selected ? '✓' : ''}
+              {option.selected ? <CheckMark /> : null}
             </span>
             <span>
               <span className="sr-only">{option.selected ? 'Selected: ' : 'Not selected: '}</span>
