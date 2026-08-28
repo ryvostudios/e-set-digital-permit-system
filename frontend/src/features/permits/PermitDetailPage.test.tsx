@@ -60,7 +60,7 @@ describe('the record', () => {
 });
 
 describe('the applicant on a submitted permit', () => {
-  it('reads "Mr. NAME of Company COMPANY" for a normal applicant', async () => {
+  it('reads "Mr. NAME" for a normal applicant', async () => {
     renderDetail(
       permitDetail({
         permit: permit({
@@ -72,7 +72,8 @@ describe('the applicant on a submitted permit', () => {
         }),
       }),
     );
-    expect(await screen.findByText('Mr. Ali Khan of Company ZPL')).toBeInTheDocument();
+    expect(await screen.findByText('Mr. Ali Khan')).toBeInTheDocument();
+    expect(screen.queryByText(/of Company/i)).not.toBeInTheDocument();
   });
 
   it('reads a privileged applicant as the personal name alone', async () => {
@@ -89,7 +90,7 @@ describe('the applicant on a submitted permit', () => {
       ceo(),
     );
     expect(await screen.findByText('Farhan Aziz')).toBeInTheDocument();
-    expect(screen.queryByText(/Mr\. Farhan Aziz of Company/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Mr\. Farhan Aziz/)).not.toBeInTheDocument();
   });
 
   it('is never an editable field, at any status', async () => {

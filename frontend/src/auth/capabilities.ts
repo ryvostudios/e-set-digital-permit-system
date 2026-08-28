@@ -143,10 +143,18 @@ export function deriveCapabilities(user: CurrentUser): Capabilities {
 /**
  * How this person's identity is written on a permit's applicant line.
  *
- * A NORMAL employee reads "Mr. Ali Khan of Company ZPL". A PRIVILEGED
- * account reads the personal name ALONE - no role, no "E-SET", no
- * Company, Team or Position, because it genuinely has none and none may
- * be fabricated.
+ * A NORMAL employee reads "Mr. Ali Khan". A PRIVILEGED account reads the
+ * personal name ALONE - no honorific-plus-company, no role, no "E-SET",
+ * no Company, Team or Position, because it genuinely has none and none
+ * may be fabricated.
+ *
+ * THE APPLICANT LINE IS A PERSON, NOT A PERSON AND THEIR EMPLOYER. It
+ * used to read "Mr. Ali Khan of Company ZPL", which put the company into
+ * the middle of every name on every list, register row and document -
+ * and the company is its own field, shown in its own place, on the forms
+ * that print one. Removing it from this line removes a duplicate
+ * rendering, nothing else: the value is untouched in the database, the
+ * API, the stored form payloads, the issued snapshots and the PDF.
  *
  * This is a PREVIEW of what the server will record. The applicant
  * identity actually stored on a permit is derived server-side at
@@ -155,20 +163,26 @@ export function deriveCapabilities(user: CurrentUser): Capabilities {
  */
 export function describeApplicantIdentity(user: CurrentUser): string {
   if (user.profile) {
-    return `Mr. ${user.profile.displayName} of Company ${user.profile.company.name}`;
+    return `Mr. ${user.profile.displayName}`;
   }
   return user.privilegedDisplayName ?? '';
 }
 
-/** The same line, rendered from a permit's own frozen applicant fields. */
+/**
+ * The same line, rendered from a permit's own frozen applicant fields.
+ *
+ * `applicant_company_name` is deliberately not read here. It remains on
+ * the permit and is displayed wherever a Company field belongs; it is
+ * simply not part of the applicant's NAME.
+ */
 export function describePermitApplicant(permit: {
   applicant_identity_kind?: 'NORMAL' | 'PRIVILEGED' | null;
   applicant_display_name?: string | null;
+  /** Still on the permit, still accepted here - and deliberately NOT read. */
   applicant_company_name?: string | null;
 }): string | null {
   const name = permit.applicant_display_name;
   if (!name) return null;
   if (permit.applicant_identity_kind === 'PRIVILEGED') return name;
-  const company = permit.applicant_company_name;
-  return company ? `Mr. ${name} of Company ${company}` : `Mr. ${name}`;
+  return `Mr. ${name}`;
 }

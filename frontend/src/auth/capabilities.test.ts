@@ -32,8 +32,8 @@ describe('normal employee identity', () => {
     expect(capabilities.isPrivileged).toBe(false);
   });
 
-  it('writes the applicant line as "Mr. NAME of Company COMPANY"', () => {
-    expect(describeApplicantIdentity(normalEmployee())).toBe('Mr. Ali Khan of Company ZPL');
+  it('writes the applicant line as "Mr. NAME" - the person, not their employer', () => {
+    expect(describeApplicantIdentity(normalEmployee())).toBe('Mr. Ali Khan');
   });
 });
 
@@ -106,7 +106,7 @@ describe('the ZPL "Site Manager" position is a NORMAL employee', () => {
 
   it('is an ordinary applicant with an ordinary applicant line', () => {
     expect(capabilities.canApplyForPermits).toBe(true);
-    expect(describeApplicantIdentity(user)).toBe('Mr. Imran Sheikh of Company ZPL');
+    expect(describeApplicantIdentity(user)).toBe('Mr. Imran Sheikh');
   });
 });
 
@@ -153,14 +153,14 @@ describe('view all permits', () => {
 });
 
 describe('a permit’s own frozen applicant identity', () => {
-  it('reads a normal applicant as "Mr. NAME of Company COMPANY"', () => {
+  it('reads a normal applicant as "Mr. NAME", ignoring the company it still carries', () => {
     expect(
       describePermitApplicant({
         applicant_identity_kind: 'NORMAL',
         applicant_display_name: 'Ali Khan',
         applicant_company_name: 'ZPL',
       }),
-    ).toBe('Mr. Ali Khan of Company ZPL');
+    ).toBe('Mr. Ali Khan');
   });
 
   it('reads a privileged applicant as the personal name alone, even when a company field is present', () => {

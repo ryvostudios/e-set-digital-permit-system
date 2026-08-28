@@ -55,11 +55,12 @@ describe('permit types', () => {
 });
 
 describe('the applicant line', () => {
-  it('is read-only for a normal employee, worded "Mr. NAME of Company COMPANY"', () => {
+  it('is read-only for a normal employee, worded "Mr. NAME"', () => {
     stubFetch({});
     renderAs(<ApplyPermitPage />, normalEmployee());
 
-    expect(screen.getByText('Mr. Ali Khan of Company ZPL')).toBeInTheDocument();
+    expect(screen.getByText('Mr. Ali Khan')).toBeInTheDocument();
+    expect(screen.queryByText(/of Company/i)).not.toBeInTheDocument();
     // No editable control for any part of the applicant identity.
     expect(screen.queryByLabelText(/applicant name/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/applicant company/i)).not.toBeInTheDocument();
@@ -72,7 +73,7 @@ describe('the applicant line', () => {
 
     expect(screen.getByText('Farhan Aziz')).toBeInTheDocument();
     // Never a role title, a company, or a fabricated organizational line.
-    expect(screen.queryByText(/Mr\. Farhan Aziz of Company/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Mr\. Farhan Aziz/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Farhan Aziz.*CEO/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Farhan Aziz.*E-SET/)).not.toBeInTheDocument();
   });
@@ -118,7 +119,7 @@ describe('who may apply', () => {
   it('lets ZPL’s "Site Manager" POSITION apply - it is an ordinary applicant', () => {
     stubFetch({});
     renderAs(<ApplyPermitPage />, zplSiteManagerEmployee());
-    expect(screen.getByText('Mr. Imran Sheikh of Company ZPL')).toBeInTheDocument();
+    expect(screen.getByText('Mr. Imran Sheikh')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /create draft permit/i })).toBeInTheDocument();
   });
 
