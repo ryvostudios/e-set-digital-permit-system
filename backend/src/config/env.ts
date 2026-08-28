@@ -210,6 +210,31 @@ export const envSchema = z
     // "unsafe integer" check is needed the way pagination's OFFSET
     // needed one (see validation.ts), because nothing here multiplies
     // two client-influenced values together.
+    /**
+     * THE ISSUED-DOCUMENT WORKER.
+     *
+     * Issuing a permit records an immutable snapshot and queues ONE
+     * `permit_document_jobs` row; a worker then renders the PDF and
+     * uploads it. That worker existed only as an operator-run script, so
+     * on a single hosted Web Service nothing ever claimed a job: the row
+     * sat PENDING with `attempt_count = 0` and `claimed_at = NULL`
+     * forever, and `GET /permits/:id/pdf` answered 202 "still being
+     * prepared" indefinitely.
+     *
+     * It now runs inside the API process by default, which is what a
+     * one-service deployment needs. Set this to `false` ONLY where a
+     * separate worker service runs `npm run documents:process` instead -
+     * both are safe together (the claim uses `FOR UPDATE SKIP LOCKED`
+     * and a per-run claim token), but there is no reason to pay for both.
+     */
+    DOCUMENT_WORKER_ENABLED: booleanFlag.default(true),
+    /**
+     * How often the worker looks for due jobs. A permit's PDF is wanted
+     * within seconds of issuance, and an idle poll is one indexed query,
+     * so this is deliberately short. The floor keeps a misconfiguration
+     * from turning the poll into a busy loop against the database.
+     */
+    DOCUMENT_WORKER_INTERVAL_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(15_000),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(15 * 60 * 1000),
     // Coarse per-IP DoS backstop, NOT the control on any specific action.
     // Keyed by IP and therefore shared by everyone behind one office NAT,
