@@ -46,7 +46,25 @@ interface ActionConfig {
   /** A reason/remarks field: 'required' is enforced by the backend too. */
   note?: { label: string; required: boolean; hint?: string };
   confirm?: { title: string; body: string; confirmLabel: string };
+  /**
+   * What to say once the BACKEND has confirmed the transition.
+   *
+   * The transitions that end a permit's review - it is issued, it is
+   * closed - are the ones a person needs told plainly, in the words of
+   * the outcome rather than of the button they pressed: "Approve as CRO
+   * fallback - done." describes an action, and leaves the reader to
+   * infer that the permit is now issued. Everything else keeps the
+   * generic confirmation, which is accurate and unremarkable.
+   *
+   * This is only ever read AFTER the request resolves, so a refused or
+   * failed action cannot produce it - see `confirm` below.
+   */
+  success?: string;
 }
+
+/** The two routes to issuance, and the end of the permit's life. */
+const PERMIT_ISSUED = 'Permit issued successfully.';
+const PERMIT_CLOSED = 'Permit closed successfully.';
 
 const ACTION_CONFIG: Record<AvailableAction, ActionConfig> = {
   update: { variant: 'secondary' },
@@ -85,6 +103,7 @@ const ACTION_CONFIG: Record<AvailableAction, ActionConfig> = {
       body: 'You are approving this permit as HSE. It will be issued immediately and your identity is recorded as the HSE signature.',
       confirmLabel: 'Approve and issue',
     },
+    success: PERMIT_ISSUED,
   },
   hse_send_back: {
     variant: 'secondary',
@@ -97,6 +116,10 @@ const ACTION_CONFIG: Record<AvailableAction, ActionConfig> = {
       body: 'The HSE review window has expired. You are approving as CRO FALLBACK, not as HSE, and the permit will be issued.',
       confirmLabel: 'Approve as fallback',
     },
+    // The authority differs from an HSE approval - the frozen signature
+    // records CRO_FALLBACK, not HSE - but the OUTCOME is the same permit,
+    // issued, so it is reported the same way.
+    success: PERMIT_ISSUED,
   },
   hold: {
     variant: 'secondary',
@@ -117,6 +140,7 @@ const ACTION_CONFIG: Record<AvailableAction, ActionConfig> = {
   close: {
     variant: 'primary',
     note: { label: 'Closure remarks', required: false },
+    success: PERMIT_CLOSED,
   },
   renew: {
     variant: 'secondary',
@@ -228,8 +252,13 @@ export function PermitActions({
     setBusy(true);
     setError(null);
     try {
+      // Nothing below this line runs unless the request RESOLVED: a
+      // rejection - a 409 on a stale version, a 403, a refused
+      // transition - jumps straight to the catch, so a failed action can
+      // never announce success. Nor is anything assumed about the new
+      // state; the authoritative record is re-read either way.
       const { nextId } = await performAction(pending, permit, note);
-      toast.show(`${ACTION_LABELS[pending]} — done.`);
+      toast.show(config.success ?? `${ACTION_LABELS[pending]} — done.`);
       setPending(null);
       setNote('');
       if (nextId) navigate(ROUTES.permit(nextId));
