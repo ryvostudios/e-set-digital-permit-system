@@ -124,7 +124,10 @@ function authorizationSections(form: { evacuation: { completedRemarks?: string |
   return PERMIT_008_AUTHORIZATION_BANDS.map((band, index) => ({
     title: band.statement,
     blocks: [
-      { kind: 'paragraph', text: `Authorization roles: ${band.signatories.map((s) => s.label).join(' / ')}. Digital authorization details are recorded in the frozen signature band below.` },
+      // Explanatory prose, not a record: the authorizations themselves are
+      // the frozen signature band, and repeating a pointer to it under
+      // every printed statement said nothing three times.
+      { kind: 'paragraph', text: `Authorization roles: ${band.signatories.map((s) => s.label).join(' / ')}. Digital authorization details are recorded in the frozen signature band below.`, technical: true },
       ...(index === 2 ? [fields([['COMPLETED REMARKS', form.evacuation.completedRemarks], ['ACKNOWLEDGED AT HOURS', form.evacuation.acknowledgedAtHours], ['ACKNOWLEDGED REMARKS', form.evacuation.acknowledgedRemarks]])] : []),
     ],
   }));
@@ -156,8 +159,16 @@ function permitHeader(snapshot: IssuedPermitSnapshotV2, title: string, reference
     ? `${snapshot.applicantIdentity.displayName} — ${snapshot.applicantIdentity.companyName}`
     : snapshot.signatures.applicant?.displayName ?? '-';
   return [{ title: 'AUTHORITATIVE PERMIT', blocks: [fields([
-    ['FORM', reference ? `${reference} Rev 0` : title], ['PERMIT NUMBER', snapshot.permitNumber], ['JSA NUMBER', snapshot.jsaNumber],
-    ['APPLICANT', applicant], ['APPLICANT COMPANY', snapshot.applicantIdentity?.companyName ?? snapshot.company],
+    ['FORM', reference ? `${reference} Rev 0` : title],
+    // The permit number, JSA number, applicant and company are printed on
+    // EVERY page of the V3 document, in the identity band under the
+    // masthead. Repeating them in the body was presentation duplication,
+    // not a second record - the values are untouched in the snapshot and
+    // the older renderers still print them here.
+    ['PERMIT NUMBER', snapshot.permitNumber, { technical: true }],
+    ['JSA NUMBER', snapshot.jsaNumber, { technical: true }],
+    ['APPLICANT', applicant, { technical: true }],
+    ['APPLICANT COMPANY', snapshot.applicantIdentity?.companyName ?? snapshot.company, { technical: true }],
     ['ISSUED AT', snapshot.issuedAt, { format: 'timestamp' }],
     ['VALID UNTIL', snapshot.expiresAt, { format: 'timestamp' }],
     // The IANA zone is a configuration value, not something a person
@@ -170,7 +181,7 @@ function common008(snapshot: IssuedPermitSnapshotV2, form: ColdWorkFormV2 | HotW
   return [
     workWindow(form), selections(nature, form.natureOfWork), selections(hazards, form.typeOfHazard), ...extra,
     ...checklists.map((section) => checklist(section, form.sections[section.id]!)),
-    { title: 'SPECIAL PRECAUTIONS / INSTRUCTIONS', blocks: [fields([['SPECIAL PRECAUTIONS', form.specialPrecautions], ['SPECIAL INSTRUCTIONS', form.specialInstructions], ['LOTO NUMBER', form.lotoNumber], ['JSA NUMBER', snapshot.jsaNumber]])] },
+    { title: 'SPECIAL PRECAUTIONS / INSTRUCTIONS', blocks: [fields([['SPECIAL PRECAUTIONS', form.specialPrecautions], ['SPECIAL INSTRUCTIONS', form.specialInstructions], ['LOTO NUMBER', form.lotoNumber], ['JSA NUMBER', snapshot.jsaNumber, { technical: true }]])] },
   ];
 }
 
@@ -183,22 +194,34 @@ function permitSections(snapshot: IssuedPermitSnapshotV2): { title: string; sect
         { title: '1. PERMIT ISSUE', blocks: [fields([['WIND FARM NAME', form.permitIssue.windFarmName], ['WTG NUMBER', form.permitIssue.wtgNumber], ['DESCRIPTION OF WORK', form.permitIssue.descriptionOfWork], ['PERMIT START', form.permitIssue.permitStartAt, { format: 'timestamp' }], ['PERMIT EXPIRY', form.permitIssue.permitExpiryAt, { format: 'timestamp' }]])] },
         ...WTG_WORK_CHECKLIST_SECTIONS.map((section) => checklist(section, form.sections[section.id]!)),
         checklist(WTG_ISOLATION_POINTS, form.isolationPoints), selections(WTG_PPE_REQUIRED, form.ppe),
-        { title: 'AUTHORIZATION BANDS', blocks: [{ kind: 'paragraph', text: `${WTG_AUTHORIZATION_BANDS.map((band) => band.label).join(' / ')}. Digital authorization details are recorded in the frozen signature band below.` }] },
+        {
+          title: 'AUTHORIZATION BANDS',
+          blocks: [{
+            kind: 'paragraph',
+            text: `${WTG_AUTHORIZATION_BANDS.map((band) => band.label).join(' / ')}. Digital authorization details are recorded in the frozen signature band below.`,
+            // The printed band names ARE record content - they are the
+            // authorization stages the WTG form carries. The sentence
+            // after them only pointed at the signature band below, and
+            // V3 already shows that. So V3 keeps the labels and drops
+            // the pointer; V1/V2 print the original sentence untouched.
+            v3Text: WTG_AUTHORIZATION_BANDS.map((band) => band.label).join(' · '),
+          }],
+        },
       ] };
     }
     case 'COLD_WORK': {
       const form = snapshot.permitForm as ColdWorkFormV2;
-      return { title: 'COLD WORK PERMIT', sections: [...permitHeader(snapshot, 'COLD WORK PERMIT', FORM_REFERENCES.COLD_WORK), ...common008(snapshot, form, COLD_WORK_NATURE_OF_WORK, COLD_WORK_TYPE_OF_HAZARD, COLD_WORK_CHECKLIST_SECTIONS), { title: 'REFERENCES', blocks: [fields([['CONFINED SPACE PERMIT NO.', form.confinedSpacePermitRef]])] }, ...authorizationSections(form), { title: 'DOCUMENT CONTROL', blocks: [{ kind: 'paragraph', text: PERMIT_DISTRIBUTION_FOOTER }] }] };
+      return { title: 'COLD WORK PERMIT', sections: [...permitHeader(snapshot, 'COLD WORK PERMIT', FORM_REFERENCES.COLD_WORK), ...common008(snapshot, form, COLD_WORK_NATURE_OF_WORK, COLD_WORK_TYPE_OF_HAZARD, COLD_WORK_CHECKLIST_SECTIONS), { title: 'REFERENCES', blocks: [fields([['CONFINED SPACE PERMIT NO.', form.confinedSpacePermitRef]])] }, ...authorizationSections(form), { title: 'DOCUMENT CONTROL', technical: true, blocks: [{ kind: 'paragraph', text: PERMIT_DISTRIBUTION_FOOTER }] }] };
     }
     case 'HOT_WORK': {
       const form = snapshot.permitForm as HotWorkFormV2;
-      return { title: 'HOT WORK PERMIT', sections: [...permitHeader(snapshot, 'HOT WORK PERMIT', FORM_REFERENCES.HOT_WORK), ...common008(snapshot, form, HOT_WORK_NATURE_OF_WORK, HOT_WORK_TYPE_OF_HAZARD, HOT_WORK_CHECKLIST_SECTIONS, [selections({ id: 'combustion_sub_ticks', title: 'COMBUSTION & SPARK PRODUCING HAZARD — WORK METHOD', hasOther: false, options: HOT_WORK_COMBUSTION_SUB_TICKS }, form.combustionSubTicks), { title: 'FIRE WATCH', blocks: [fields([['FIRE WATCH', form.fireWatch]])] }]), { title: 'REFERENCES', blocks: [fields([['CONFINED SPACE PERMIT NO.', form.confinedSpacePermitRef]])] }, ...authorizationSections(form), { title: 'DOCUMENT CONTROL', blocks: [{ kind: 'paragraph', text: PERMIT_DISTRIBUTION_FOOTER }] }] };
+      return { title: 'HOT WORK PERMIT', sections: [...permitHeader(snapshot, 'HOT WORK PERMIT', FORM_REFERENCES.HOT_WORK), ...common008(snapshot, form, HOT_WORK_NATURE_OF_WORK, HOT_WORK_TYPE_OF_HAZARD, HOT_WORK_CHECKLIST_SECTIONS, [selections({ id: 'combustion_sub_ticks', title: 'COMBUSTION & SPARK PRODUCING HAZARD — WORK METHOD', hasOther: false, options: HOT_WORK_COMBUSTION_SUB_TICKS }, form.combustionSubTicks), { title: 'FIRE WATCH', blocks: [fields([['FIRE WATCH', form.fireWatch]])] }]), { title: 'REFERENCES', blocks: [fields([['CONFINED SPACE PERMIT NO.', form.confinedSpacePermitRef]])] }, ...authorizationSections(form), { title: 'DOCUMENT CONTROL', technical: true, blocks: [{ kind: 'paragraph', text: PERMIT_DISTRIBUTION_FOOTER }] }] };
     }
     case 'CONFINED_SPACE_ENTRY': {
       const form = snapshot.permitForm as ConfinedSpaceEntryFormV2;
       const gasRecord = form.gasTestRecord as Record<string, { oxygenAndTime?: string; testedBy?: string }>;
       const gasRows = CONFINED_SPACE_GAS_TEST_TABLE.rows.map((row) => [row, dash(gasRecord[row]?.oxygenAndTime), dash(gasRecord[row]?.testedBy)]);
-      return { title: 'CONFINED SPACE ENTRY PERMIT', sections: [...permitHeader(snapshot, 'CONFINED SPACE ENTRY PERMIT', FORM_REFERENCES.CONFINED_SPACE_ENTRY), ...common008(snapshot, form, CONFINED_SPACE_NATURE_OF_WORK, CONFINED_SPACE_TYPE_OF_HAZARD, CONFINED_SPACE_CHECKLIST_SECTIONS, [selections({ id: 'combustion_sub_ticks', title: 'COMBUSTION & SPARK PRODUCING HAZARD — WORK METHOD', hasOther: false, options: CONFINED_SPACE_COMBUSTION_SUB_TICKS }, form.combustionSubTicks), { title: 'GAS TEST RECORD', blocks: [{ kind: 'table', columns: CONFINED_SPACE_GAS_TEST_TABLE.columns.map((c) => c.label), rows: gasRows }, { kind: 'paragraph', text: CONFINED_SPACE_SLOGAN }] }, { title: 'ATTENDANT', blocks: [fields([['ATTENDANT', form.attendant]])] }]), { title: 'REFERENCES', blocks: [fields([['COLD / HOT PERMIT NO. (IF ANY)', form.relatedPermitRef]])] }, ...authorizationSections(form), { title: 'DOCUMENT CONTROL', blocks: [{ kind: 'paragraph', text: PERMIT_DISTRIBUTION_FOOTER }] }] };
+      return { title: 'CONFINED SPACE ENTRY PERMIT', sections: [...permitHeader(snapshot, 'CONFINED SPACE ENTRY PERMIT', FORM_REFERENCES.CONFINED_SPACE_ENTRY), ...common008(snapshot, form, CONFINED_SPACE_NATURE_OF_WORK, CONFINED_SPACE_TYPE_OF_HAZARD, CONFINED_SPACE_CHECKLIST_SECTIONS, [selections({ id: 'combustion_sub_ticks', title: 'COMBUSTION & SPARK PRODUCING HAZARD — WORK METHOD', hasOther: false, options: CONFINED_SPACE_COMBUSTION_SUB_TICKS }, form.combustionSubTicks), { title: 'GAS TEST RECORD', blocks: [{ kind: 'table', columns: CONFINED_SPACE_GAS_TEST_TABLE.columns.map((c) => c.label), rows: gasRows }, { kind: 'paragraph', text: CONFINED_SPACE_SLOGAN }] }, { title: 'ATTENDANT', blocks: [fields([['ATTENDANT', form.attendant]])] }]), { title: 'REFERENCES', blocks: [fields([['COLD / HOT PERMIT NO. (IF ANY)', form.relatedPermitRef]])] }, ...authorizationSections(form), { title: 'DOCUMENT CONTROL', technical: true, blocks: [{ kind: 'paragraph', text: PERMIT_DISTRIBUTION_FOOTER }] }] };
     }
   }
 }
@@ -216,7 +239,7 @@ function jsaPage1(snapshot: IssuedPermitSnapshotV2): DocumentPage {
   const form = snapshot.jsaForm.page1;
   const applicant = snapshot.signatures.applicant;
   return { title: `JOB SAFETY ANALYSIS — PAGE 1 OF 2 — ${FORM_REFERENCES.JSA} Rev 0`, sections: [
-    { title: 'JOB INFORMATION', blocks: [fields([['JSA NUMBER', snapshot.jsaNumber], ['PERMIT NUMBER', snapshot.permitNumber], ['SITE / WTG', form.siteOrWtg], ['DATE / TIME', form.dateTime, { format: 'timestamp' }], ['S. NO.', form.serialNo], ['JOB / WORK', form.jobOrWork], ['JSA COMPLETED BY', applicant ? `${applicant.displayName}, ${applicant.designation}` : '-']])] },
+    { title: 'JOB INFORMATION', blocks: [fields([['JSA NUMBER', snapshot.jsaNumber, { technical: true }], ['PERMIT NUMBER', snapshot.permitNumber, { technical: true }], ['SITE / WTG', form.siteOrWtg], ['DATE / TIME', form.dateTime, { format: 'timestamp' }], ['S. NO.', form.serialNo], ['JOB / WORK', form.jobOrWork], ['JSA COMPLETED BY', applicant ? `${applicant.displayName}, ${applicant.designation}` : '-']])] },
     { title: 'REQUIRED PERMITS', blocks: [fields([['ANY WORKING PERMITS REQUIRED?', form.anyPermitsRequired]]), ...selections(JSA_REQUIRED_PERMITS, form.requiredPermits).blocks] },
     { title: 'HSE CHECKLIST', blocks: [{ kind: 'paragraph', text: JSA_HSE_CHECKLIST_INSTRUCTION }] },
     ...JSA_HSE_CHECKLIST_CATEGORIES.map((category) => selections(category, form.hseChecklist[category.id]!)),
@@ -257,7 +280,9 @@ export function buildIssuedDocumentPagesV2(snapshot: IssuedPermitSnapshotV2): Do
       title: `AUTHORITATIVE ${permit.title}`,
       masthead: masthead(permit.title, reference, null),
       identity: identityBand(snapshot),
-      footerNote: PERMIT_DISTRIBUTION_FOOTER,
+      // No paper-distribution strip: this document is one immutable PDF,
+      // not a carbon set. The form reference stays in the masthead.
+      footerNote: null,
       sections: [...permit.sections, digitalAuthorization(snapshot)],
     },
     { ...jsaPage1(snapshot), masthead: masthead('JOB SAFETY ANALYSIS', FORM_REFERENCES.JSA, 'PAGE 1 OF 2'), identity: identityBand(snapshot), footerNote: `${FORM_REFERENCES.JSA} · PAGE 1 OF 2` },

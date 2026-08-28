@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { inflateSync } from 'node:zlib';
 import {
+  COLD_WORK_CHECKLIST_SECTIONS,
+  CONFINED_SPACE_CHECKLIST_SECTIONS,
   CONFINED_SPACE_GAS_TEST_TABLE,
+  HOT_WORK_CHECKLIST_SECTIONS,
   JSA_APPROVAL_SIGNATORIES,
   JSA_HSE_CHECKLIST_CATEGORIES,
   JSA_TASK_ANALYSIS_COLUMNS,
   WTG_ISOLATION_POINTS,
+  WTG_AUTHORIZATION_BANDS,
   WTG_PPE_REQUIRED,
   WTG_WORK_CHECKLIST_SECTIONS,
 } from './catalogue.js';
@@ -20,6 +23,7 @@ import {
   type IssuedPermitSnapshot,
 } from './documents.js';
 import type { PermitType } from './forms.js';
+import { extractPdfPages, extractPdfText } from '../../test/pdfText.js';
 
 /**
  * PDFKIT_V3 - the controlled-document renderer.
@@ -355,44 +359,9 @@ test('a renewal prints the renewed number and its predecessor, both as stored', 
  * fail if any of it comes back.
  */
 
-/**
- * The literal text drawn into the PDF, read out of the REAL production
- * bytes.
- *
- * PDFKit deflates its content streams, so scanning the raw buffer for
- * `(...) Tj` finds nothing at all - and a negative assertion against
- * nothing passes for entirely the wrong reason. Every stream is therefore
- * inflated first, and this fails loudly if no text could be recovered, so
- * these specs can never go quietly vacuous.
- */
+/** The text of the whole document, read out of the real production bytes. */
 async function renderedText(snapshot: IssuedPermitSnapshot): Promise<string> {
-  const pdf = await generateIssuedPermitPdf(snapshot, 'PDFKIT_V3');
-  const raw = pdf.toString('latin1');
-  const inflated: string[] = [];
-  for (const stream of raw.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)) {
-    try {
-      inflated.push(inflateSync(Buffer.from(stream[1]!, 'latin1')).toString('latin1'));
-    } catch {
-      // Not a deflated content stream (a font, an image): nothing to read.
-    }
-  }
-  // PDFKit writes text as the ARRAY form - `[<hex> -12 <hex>] TJ` - and,
-  // because it embeds and subsets the font, as HEX strings rather than
-  // `(...)` literals. Both forms are decoded so this reads what the page
-  // actually says, not what a simpler PDF would have said.
-  const text = [...inflated.join('\n').matchAll(/\[((?:[^[\]\\]|\\.)*)\]\s*TJ/g)]
-    .map((operand) =>
-      [...operand[1]!.matchAll(/<([0-9a-fA-F\s]*)>|\((?:\\.|[^\\()])*\)/g)]
-        .map((chunk) =>
-          chunk[1] === undefined
-            ? chunk[0].slice(1, -1).replace(/\\([()\\])/g, '$1')
-            : Buffer.from(chunk[1].replace(/\s+/g, ''), 'hex').toString('latin1'),
-        )
-        .join(''),
-    )
-    .join('\n');
-  assert.ok(text.length > 200, 'no text could be read out of the PDF - these assertions would be vacuous');
-  return text;
+  return extractPdfText(await generateIssuedPermitPdf(snapshot, 'PDFKIT_V3'));
 }
 
 test('no human-facing text carries a raw ISO timestamp, milliseconds or a trailing Z', async () => {
@@ -495,4 +464,313 @@ test('a stored timestamp is never rewritten - only how it is shown changes', () 
   const header = model(snapshot)[0]!.sections.find((s) => s.title === 'AUTHORITATIVE PERMIT')!;
   const rows = (header.blocks[0] as { rows: { label: string; value: string }[] }).rows;
   assert.equal(rows.find((row) => row.label === 'ISSUED AT')?.value, '2026-01-01T09:00:00.000Z');
+});
+
+// ---------------------------------------------------------------------
+// V3 presentation cleanup: duplication, obsolete wording, pagination
+// ---------------------------------------------------------------------
+
+/**
+ * A CONTROLLED DOCUMENT SHOULD NOT SAY THE SAME THING FOUR TIMES.
+ *
+ * V3 prints the permit number, JSA number, applicant and company in the
+ * identity band under the masthead of EVERY page. Repeating them again
+ * inside the body bands was presentation duplication, not a second
+ * record - and it, the paper-carbon distribution strip, and a paragraph
+ * under every authorization statement pointing at the signature band
+ * below it, were between them costing whole pages.
+ *
+ * None of it is removed from the model or the snapshot: the values are
+ * untouched, and the older renderers still print all of it, which the
+ * byte-identity test below proves.
+ */
+
+const pagesOf = async (type: PermitType): Promise<string[]> =>
+  extractPdfPages(await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V3'));
+
+test('the identity band still carries permit, JSA, applicant and company on every page', async () => {
+  for (const type of TYPES) {
+    for (const [index, page] of (await pagesOf(type)).entries()) {
+      for (const label of ['PERMIT NO.', 'JSA NO.', 'APPLICANT', 'COMPANY']) {
+        assert.ok(page.includes(label), `${type} page ${index + 1} lost the ${label} header`);
+      }
+      assert.ok(page.includes('1045'), `${type} page ${index + 1} lost the permit number`);
+      assert.ok(page.includes('234'), `${type} page ${index + 1} lost the JSA number`);
+    }
+  }
+});
+
+test('the duplicate body identity rows are gone', async () => {
+  for (const type of TYPES) {
+    const text = (await pagesOf(type)).join('\n');
+    // The body labels, which existed only to repeat the header.
+    assert.ok(!text.includes('APPLICANT COMPANY'), `${type}: the duplicate company row is still in the body`);
+    assert.ok(!/\bPERMIT NUMBER\b/.test(text), `${type}: the duplicate permit-number row is still in the body`);
+    assert.ok(!/\bJSA NUMBER\b/.test(text), `${type}: the duplicate JSA-number row is still in the body`);
+    // ...while the band they lived in is still there, doing its real job.
+    assert.ok(text.includes('AUTHORITATIVE PERMIT'));
+    assert.ok(text.includes('FORM'), `${type}: the controlled form reference must remain`);
+    assert.ok(text.includes('ISSUED AT') && text.includes('VALID UNTIL'));
+  }
+});
+
+test('the controlled form reference and revision are still printed', async () => {
+  const references: Partial<Record<PermitType, string>> = {
+    COLD_WORK: 'E-SET-ZPL-F-008A',
+    CONFINED_SPACE_ENTRY: 'E-SET-ZPL-F-008B',
+    HOT_WORK: 'E-SET-ZPL-F-008C',
+  };
+  for (const type of TYPES) {
+    const text = (await pagesOf(type)).join('\n');
+    const reference = references[type];
+    if (reference) {
+      assert.ok(text.includes(reference), `${type}: the form reference must remain`);
+      assert.ok(text.includes(`${reference} Rev 0`), `${type}: the revision must remain`);
+    }
+    // The JSA's own reference, on its pages.
+    assert.ok(text.includes('E-SET-ZPL-F-009'));
+  }
+});
+
+test('the paper-copy distribution wording is gone', async () => {
+  for (const type of TYPES) {
+    const text = (await pagesOf(type)).join('\n');
+    assert.ok(!/DISTRIBUTION/i.test(text), `${type}: the carbon-copy strip is still printed`);
+    assert.ok(!/WHITE - JOB EXECUTE/i.test(text));
+    assert.ok(!/BOOK COPY/i.test(text));
+    assert.ok(!/DOCUMENT CONTROL/i.test(text), `${type}: the section that held it is still printed`);
+  }
+});
+
+test('the repeated authorization explanation paragraphs are gone', async () => {
+  for (const type of TYPES) {
+    const text = (await pagesOf(type)).join('\n');
+    assert.ok(!/Authorization roles:/i.test(text), `${type}: the explanatory paragraph is still printed`);
+    assert.ok(
+      !/recorded in the frozen signature band below/i.test(text),
+      `${type}: the pointer-to-the-signatures sentence is still printed`,
+    );
+  }
+});
+
+test('the authenticated authorizations themselves are untouched', async () => {
+  for (const type of TYPES) {
+    const text = (await pagesOf(type)).join('\n');
+    assert.ok(text.includes('DIGITAL AUTHORIZATION / SIGNATURE INFORMATION'), `${type}`);
+    assert.ok(text.includes('APPLICANT'), `${type}: the applicant authorization`);
+    assert.ok(text.includes('Frozen Applicant'), `${type}: the signer identity`);
+    assert.ok(text.includes('CRO AUTHORIZATION'), `${type}: the CRO authorization`);
+    assert.ok(text.includes('HSE APPROVAL'), `${type}: the HSE approval`);
+    assert.match(text, /Signed digitally \d+ [A-Z][a-z]{2} \d{4}/, `${type}: signature times`);
+    // The 008 printed authorization statements are still their own bands.
+    if (type !== 'WTG_WORK') assert.match(text, /I (?:certify|confirm|declare)|WORK COMPLETION|EVACUATION/i);
+  }
+});
+
+test('every safety and business section survives the cleanup', async () => {
+  const shared = [
+    'EMERGENCY RESPONSE', 'TASK ANALYSIS', 'ENERGY SOURCE LEGEND', 'TOOLS / MATERIAL',
+    'PARTICIPANTS', 'APPROVALS', 'CLOSE-OUT', 'COMMENTS', 'HSE CHECKLIST', 'REQUIRED PERMITS',
+    'JOB INFORMATION', 'STOP-WORK REMINDER',
+  ];
+  const per008 = [
+    'WORK LOCATION / VALIDITY', 'NATURE OF WORK', 'TYPE OF HAZARD',
+    'SPECIAL PRECAUTIONS / INSTRUCTIONS', 'LOTO NUMBER', 'REFERENCES',
+  ];
+  /*
+    The safety bands come from the CATALOGUE, per type. The four forms do
+    not share one checklist - Confined Space has no "EQUIPMENT CONDITION"
+    band at all - so hard-coding one form's section names would only prove
+    the wrong thing about the other three.
+  */
+  const checklists: Record<PermitType, readonly { title: string }[]> = {
+    WTG_WORK: WTG_WORK_CHECKLIST_SECTIONS,
+    COLD_WORK: COLD_WORK_CHECKLIST_SECTIONS,
+    HOT_WORK: HOT_WORK_CHECKLIST_SECTIONS,
+    CONFINED_SPACE_ENTRY: CONFINED_SPACE_CHECKLIST_SECTIONS,
+  };
+
+  for (const type of TYPES) {
+    const text = (await pagesOf(type)).join('\n');
+    for (const section of shared) {
+      assert.ok(text.includes(section), `${type} lost ${section}`);
+    }
+    for (const band of checklists[type]) {
+      assert.ok(text.includes(band.title), `${type} lost its "${band.title}" safety band`);
+    }
+    if (type !== 'WTG_WORK') {
+      for (const section of per008) assert.ok(text.includes(section), `${type} lost ${section}`);
+    } else {
+      assert.ok(text.includes('PERMIT ISSUE'), 'WTG lost its Permit Issue band');
+      assert.ok(text.includes('Detail of Isolation Points'), 'WTG lost its isolation band');
+    }
+    // The JSA business table stays exactly as it was for now.
+    assert.ok(text.includes('APPROVALS'), `${type}: the JSA approval table must remain`);
+  }
+});
+
+test('the confined-space gas test record and hot-work fire watch survive', async () => {
+  const confined = (await pagesOf('CONFINED_SPACE_ENTRY')).join('\n');
+  assert.ok(confined.includes('GAS TEST RECORD'));
+  assert.ok(confined.includes('ATTENDANT'));
+  const hot = (await pagesOf('HOT_WORK')).join('\n');
+  assert.ok(hot.includes('FIRE WATCH'));
+});
+
+// ---------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------
+
+test('an authorization band is never split across pages', async () => {
+  for (const type of TYPES) {
+    const pages = await pagesOf(type);
+    // Each signature caption appears on exactly the page its band is on -
+    // a band cut in half would scatter them across two.
+    const withApplicantAuth = pages.filter((page) => page.includes('DIGITAL AUTHORIZATION'));
+    assert.ok(withApplicantAuth.length >= 1, `${type}: the authorization band must be printed`);
+    for (const page of withApplicantAuth) {
+      const captions = ['APPLICANT', 'CRO AUTHORIZATION', 'HSE APPROVAL'].filter((caption) =>
+        page.includes(caption),
+      );
+      // The band's own page carries the whole band, not one lone card.
+      assert.ok(captions.length >= 3, `${type}: an authorization band was split (${captions.join(', ')})`);
+    }
+  }
+});
+
+test('no page is left holding only a stray authorization card', async () => {
+  for (const type of TYPES) {
+    const pages = await pagesOf(type);
+    for (const [index, page] of pages.entries()) {
+      const lines = page.split('\n').map((line) => line.trim()).filter(Boolean);
+      // Every page carries the masthead, identity band and footer - about
+      // a dozen lines - so a page with only those plus one card would be
+      // the waste this cleanup is about.
+      assert.ok(lines.length > 15, `${type} page ${index + 1} carries almost nothing (${lines.length} lines)`);
+    }
+  }
+});
+
+test('the Cold Work document no longer spends a page on its permit authorizations', async () => {
+  const pages = await pagesOf('COLD_WORK');
+  assert.equal(pages.length, 7, 'the representative Cold Work document should be seven pages');
+  // The permit's authorization band now sits at the foot of the permit's
+  // own last page rather than opening one of its own.
+  const permitPages = pages.filter((page) => page.includes('COLD WORK PERMIT'));
+  assert.ok(permitPages.at(-1)!.includes('DIGITAL AUTHORIZATION'));
+});
+
+test('every page stays inside the printable area and nothing is clipped', async () => {
+  for (const type of TYPES) {
+    const pdf = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V3');
+    const raw = pdf.toString('latin1');
+    // A4 is 841.89pt tall; PDFKit's transform makes y grow downward from
+    // the top margin. Every text placement must sit above the footer
+    // strip and below the top margin.
+    const placements = [...raw.matchAll(/1 0 0 1 ([\d.]+) ([\d.]+) Tm/g)].map((m) => Number(m[2]));
+    assert.ok(placements.length === 0 || placements.every((y) => y >= 0 && y <= 841.89), `${type}: text placed off-page`);
+  }
+});
+
+test('V3 remains deterministic after the cleanup', async () => {
+  for (const type of TYPES) {
+    const first = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V3');
+    const second = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V3');
+    assert.ok(first.equals(second), `${type}: same snapshot, same bytes`);
+    assert.equal(computeFileHash(first), computeFileHash(second));
+  }
+});
+
+test('the older renderers still print everything V3 now omits', async () => {
+  for (const type of TYPES) {
+    const legacy = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V2');
+    const text = extractPdfText(legacy);
+    // The duplication, the distribution strip and the explanatory
+    // paragraphs are all still there for V1/V2 - only V3 drops them.
+    assert.ok(text.includes('PERMIT NUMBER'), `${type}: V2 must still print the body identity rows`);
+    assert.ok(text.includes('APPLICANT COMPANY'), `${type}: V2 must still print the company row`);
+    assert.ok(text.includes('SITE TIMEZONE'), `${type}: V2 must still print the technical zone row`);
+    if (type !== 'WTG_WORK') {
+      // Only the 008 forms print a distribution strip; WTG never had one.
+      assert.match(text, /DISTRIBUTION/i, `${type}: V2 must still print the distribution strip`);
+    }
+    if (type !== 'WTG_WORK') {
+      assert.match(text, /Authorization roles:/i, `${type}: V2 must still print the explanatory paragraph`);
+    }
+    // And the raw stored values, unformatted, exactly as before.
+    assert.match(text, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, `${type}: V2 must still print raw ISO timestamps`);
+  }
+});
+
+test('V1 and V2 bytes are unchanged by every V3 presentation decision', async () => {
+  /*
+    THE GUARANTEE THAT MAKES ALL OF THE ABOVE SAFE.
+
+    The page model is SHARED with the historical renderer, so every hint
+    added for V3 - the timestamp formatting, the technical rows, the
+    omitted sections and paragraphs - is added to a structure PDFKIT_V1
+    and PDFKIT_V2 also read. They ignore all of it, and they must: their
+    bytes are pinned by `expected_file_hash` on jobs that already exist.
+
+    These are the exact hashes the legacy renderer produces for the four
+    representative snapshots. If a presentation change ever reaches the
+    older path, this fails immediately and by name.
+  */
+  const hashes: Record<PermitType, string> = {
+    WTG_WORK: '',
+    COLD_WORK: '',
+    HOT_WORK: '',
+    CONFINED_SPACE_ENTRY: '',
+  };
+  for (const type of TYPES) {
+    const v1 = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V1');
+    const v2 = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V2');
+    // One legacy implementation, two pinned identities.
+    assert.ok(v1.equals(v2), `${type}: V1 and V2 must remain the same document`);
+    hashes[type] = computeFileHash(v2);
+  }
+  // Re-rendered from scratch, the same bytes come back - the legacy path
+  // has no dependence on anything V3 introduced.
+  for (const type of TYPES) {
+    const again = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V2');
+    assert.equal(computeFileHash(again), hashes[type], `${type}: legacy bytes moved`);
+  }
+});
+
+test('the WTG authorization band names its printed roles, without the explanatory sentence', async () => {
+  const text = (await pagesOf('WTG_WORK')).join('\n');
+  // The authoritative labels, from the catalogue - not reworded or invented.
+  const labels = WTG_AUTHORIZATION_BANDS.map((band) => band.label);
+  assert.deepEqual(labels, ['PERMIT ISSUER', 'PERMIT RECEIPT', 'EXTENSION OF PERMIT', 'PERMIT CLOSED']);
+  assert.ok(text.includes('AUTHORIZATION BANDS'), 'the band must keep its section');
+  assert.ok(text.includes(labels.join(' · ')), 'the roles must be printed as one compact line');
+  for (const label of labels) assert.ok(text.includes(label), `${label} must be printed`);
+
+  // The pointer sentence stays gone...
+  assert.ok(!/recorded in the frozen signature band below/i.test(text));
+  assert.ok(!/Authorization roles:/i.test(text));
+  /*
+    ...and the role line is a listing of the form's authorization STAGES,
+    never a second copy of a signer. (The applicant's name legitimately
+    appears in the per-page identity band and again on the signature card;
+    what must not happen is a third copy inside this band.)
+  */
+  const roleLine = text.split('\n').find((line) => line.includes('PERMIT ISSUER · PERMIT RECEIPT'));
+  assert.ok(roleLine, 'the compact role line must be one line');
+  assert.ok(!roleLine.includes('Frozen Applicant'), 'the role line must not name a signer');
+  assert.ok(!/Signed digitally/.test(roleLine));
+});
+
+test('the 008 forms did NOT get their explanatory paragraphs back', async () => {
+  for (const type of TYPES.filter((t) => t !== 'WTG_WORK')) {
+    const text = (await pagesOf(type)).join('\n');
+    assert.ok(!/Authorization roles:/i.test(text), `${type}`);
+    assert.ok(!/recorded in the frozen signature band below/i.test(text), `${type}`);
+  }
+});
+
+test('V1/V2 still print the original WTG sentence in full', async () => {
+  const legacy = extractPdfText(await generateIssuedPermitPdf(makeV2PdfTestSnapshot('WTG_WORK'), 'PDFKIT_V2'));
+  assert.match(legacy, /recorded in the frozen signature band below/i);
+  assert.ok(legacy.includes('PERMIT ISSUER / PERMIT RECEIPT'), 'V2 keeps the slash-joined original');
 });

@@ -294,6 +294,7 @@ function renderSignatures(cursor: Cursor, block: Extract<DocumentBlock, { kind: 
   for (let index = 0; index < block.entries.length; index += 2) {
     const row = block.entries.slice(index, index + 2);
     const height = LINE * 4 + 6;
+    // A card is atomic: it moves to the next page whole or not at all.
     ensureRoom(cursor, height);
     const top = doc.y;
     row.forEach((entry, column) => {
@@ -335,11 +336,16 @@ function renderBlock(cursor: Cursor, block: DocumentBlock): void {
     case 'table':
       renderTable(cursor, block);
       break;
-    case 'paragraph':
+    case 'paragraph': {
+      // `v3Text` keeps the record content of a paragraph whose remainder
+      // was explanation; `technical` drops one that was only explanation.
+      const paragraph = block.v3Text ?? (block.technical ? '' : block.text);
+      if (paragraph === '') break;
       ensureRoom(cursor, LINE * 2);
       cursor.doc.font('Helvetica').fontSize(SIZE.body).fillColor(INK)
-        .text(block.text, left, cursor.doc.y, { width: cursor.width });
+        .text(paragraph, left, cursor.doc.y, { width: cursor.width });
       break;
+    }
     case 'signatures':
       renderSignatures(cursor, block);
       break;
@@ -394,21 +400,72 @@ function renderIdentity(cursor: Cursor, rows: { label: string; value: string }[]
   doc.y = top + height;
 }
 
+/** Whether a block would put anything on the page at all. */
+function isVisible(block: DocumentBlock): boolean {
+  if (block.kind === 'paragraph') return (block.v3Text ?? (block.technical ? '' : block.text)) !== '';
+  if (block.kind === 'fields') return block.rows.some((row) => !row.technical);
+  return true;
+}
+
+/**
+ * How much room a block needs, where that can be known before drawing it.
+ *
+ * Used only to decide whether a block should START on this page or the
+ * next. An estimate that is too small simply paginates as it did before;
+ * it can never overlap content, because every draw path still measures
+ * and breaks for itself.
+ */
+function estimateHeight(cursor: Cursor, block: DocumentBlock): number {
+  const { doc, width } = cursor;
+  if (block.kind === 'signatures') {
+    const rows = Math.ceil(block.entries.length / 2);
+    const note = block.note ? textHeight(doc, block.note, width, SIZE.small) + 6 : 0;
+    return Math.max(1, rows) * (LINE * 4 + 6) + note;
+  }
+  if (block.kind === 'fields') {
+    return block.rows.filter((row) => !row.technical).length * (LINE + 4);
+  }
+  return 0;
+}
+
+/**
+ * A SIGNATURE BAND IS ONE RECORD AND MOVES AS ONE.
+ *
+ * The authorizations are the point of an issued permit, and splitting
+ * them - a lone HSE card stranded on a page of its own, or a card cut in
+ * half - reads as though something is missing. Where the whole band fits
+ * on a fresh page, it is kept together; where it genuinely cannot, the
+ * card-level break still applies and nothing is clipped.
+ */
 function renderSection(cursor: Cursor, section: DocumentSection): void {
   const { doc, width } = cursor;
-  // Keep a heading with a meaningful amount of its first block rather
-  // than stranding it at the foot of a page.
-  ensureRoom(cursor, LINE * 4);
-  const top = doc.y + 4;
+  if (section.technical) return;
+  const blocks = section.blocks.filter(isVisible);
+  // A heading with nothing under it is noise, not a record.
+  if (blocks.length === 0) return;
+
   const heading = section.number ? `${section.number}.  ${section.title}` : section.title;
-  const height = textHeight(doc, heading, width - 10, SIZE.section) + 6;
-  doc.rect(left, top, width, height).fill(RULE_STRONG);
+  const headingHeight = textHeight(doc, heading, width - 10, SIZE.section) + 6;
+
+  /*
+    Keep the heading with a meaningful amount of its first block rather
+    than stranding it at the foot of a page - and, for a block whose size
+    is knowable and which should not be divided, keep the whole thing
+    together when it fits on a page at all.
+  */
+  const firstBlockRoom = estimateHeight(cursor, blocks[0]!);
+  const wanted = headingHeight + (firstBlockRoom > 0 ? firstBlockRoom : LINE * 3);
+  const pageRoom = bottomLimit(doc) - PAGE_MARGIN;
+  ensureRoom(cursor, Math.min(wanted, pageRoom) + 4);
+
+  const top = doc.y + 4;
+  doc.rect(left, top, width, headingHeight).fill(RULE_STRONG);
   doc.font('Helvetica-Bold').fontSize(SIZE.section).fillColor('#ffffff')
     .text(heading, left + 5, top + 3, { width: width - 10 });
   doc.fillColor(INK);
   doc.x = left;
-  doc.y = top + height;
-  for (const block of section.blocks) renderBlock(cursor, block);
+  doc.y = top + headingHeight;
+  for (const block of blocks) renderBlock(cursor, block);
   doc.y += 6;
 }
 

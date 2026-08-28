@@ -74,7 +74,21 @@ export type DocumentBlock =
       columns?: number;
     }
   | { kind: 'table'; columns: string[]; rows: string[][] }
-  | { kind: 'paragraph'; text: string }
+  | {
+      kind: 'paragraph';
+      text: string;
+      /** PDFKIT_V3 only: explanatory prose, not record content. */
+      technical?: boolean;
+      /**
+       * PDFKIT_V3 only: what to print INSTEAD of `text`.
+       *
+       * For a paragraph that mixes record content with explanation, so
+       * V3 can keep the part that matters without the part that does
+       * not. The older renderers print `text` exactly as they always
+       * have, which is why this is an override rather than an edit.
+       */
+      v3Text?: string;
+    }
   | { kind: 'signatures'; entries: SignatureEntry[]; note: string | null };
 
 export interface SignatureEntry {
@@ -90,6 +104,13 @@ export interface DocumentSection {
   blocks: DocumentBlock[];
   /** The number the paper form prints beside this heading, where it prints one. */
   number?: string | null;
+  /**
+   * PDFKIT_V3 only: a section that exists for the older renderers but
+   * carries nothing a person needs on the printed document. V3 omits it
+   * entirely, heading included; V1/V2 still print it, so their bytes are
+   * unchanged.
+   */
+  technical?: boolean;
 }
 
 /** The printed identity band: issuer, document title and form reference. */
