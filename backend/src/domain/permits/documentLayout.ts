@@ -31,10 +31,34 @@ export interface FieldRow {
   value: string;
 }
 
+/**
+ * PRESENTATION HINTS, ADDED FOR THE PDFKIT_V3 RENDERER.
+ *
+ * Every field below is OPTIONAL and carries no content of its own - it
+ * describes how content the model already holds is PRINTED. The older
+ * renderers do not read any of them, so populating them cannot change a
+ * byte of what PDFKIT_V1/V2 produce for a snapshot they already
+ * rendered; V3 uses them to draw the response columns, section numbers
+ * and mastheads the paper form actually has.
+ *
+ * They live on the shared model rather than in a parallel one so there
+ * stays exactly ONE place that decides what an issued document contains.
+ */
+
 export type DocumentBlock =
   | { kind: 'fields'; rows: FieldRow[] }
-  | { kind: 'checklist'; items: Array<{ label: string; response: string; remarks: string | null }> }
-  | { kind: 'selections'; items: Array<{ label: string; selected: boolean; remarks: string | null }> }
+  | {
+      kind: 'checklist';
+      items: Array<{ label: string; response: string; remarks: string | null }>;
+      /** The tick columns this band actually prints, e.g. `['YES','NO']`. */
+      columns?: readonly string[];
+    }
+  | {
+      kind: 'selections';
+      items: Array<{ label: string; selected: boolean; remarks: string | null }>;
+      /** How many tick boxes the printed band puts on a row. */
+      columns?: number;
+    }
   | { kind: 'table'; columns: string[]; rows: string[][] }
   | { kind: 'paragraph'; text: string }
   | { kind: 'signatures'; entries: SignatureEntry[]; note: string | null };
@@ -50,11 +74,26 @@ export interface SignatureEntry {
 export interface DocumentSection {
   title: string;
   blocks: DocumentBlock[];
+  /** The number the paper form prints beside this heading, where it prints one. */
+  number?: string | null;
+}
+
+/** The printed identity band: issuer, document title and form reference. */
+export interface DocumentMasthead {
+  issuer: string;
+  title: string;
+  reference: string | null;
+  pageLabel: string | null;
 }
 
 export interface DocumentPage {
   title: string;
   sections: DocumentSection[];
+  masthead?: DocumentMasthead;
+  /** Server-authoritative identity printed under the masthead. */
+  identity?: FieldRow[];
+  /** The line the paper form prints at the foot of the page. */
+  footerNote?: string | null;
 }
 
 const PERMIT_TYPE_TITLES = {

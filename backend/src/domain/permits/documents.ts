@@ -4,6 +4,7 @@ import PDFDocument from 'pdfkit';
 import { env } from '../../config/env.js';
 import { query, type QueryFn } from '../../db/pool.js';
 import { buildIssuedDocumentPages, type DocumentBlock, type DocumentPage } from './documentLayout.js';
+import { renderIssuedPermitPdfV3 } from './documentRendererV3.js';
 import type { JsaForm, PermitForm, PermitFormVersion, PermitType } from './forms.js';
 import type { JsaFormV2, JsaFormVersionV2, PermitFormV2, PermitFormVersionV2 } from './formsV2.js';
 import { toDisplayNumber } from './numbering.js';
@@ -339,8 +340,41 @@ export interface IssuedDocumentSnapshotRow {
   created_at: string;
 }
 
-/** The renderer identity persisted on `permit_document_jobs.renderer_version` (allowlisted by migration 0016). Bumped from PDFKIT_V1 because this renderer produces a different, richer document: Permit page(s), then JSA page 1, then JSA page 2. */
-export const CURRENT_RENDERER_VERSION = 'PDFKIT_V2';
+/**
+ * THE RENDERER IDENTITIES, and why there are three.
+ *
+ * `permit_document_jobs.renderer_version` names the exact renderer whose
+ * bytes a job is pinned to, alongside the `expected_file_hash` of those
+ * bytes. A job that has already established an identity is NEVER
+ * re-rendered by a newer renderer - the claim below refuses it - because
+ * the stored file, its hash, and the document someone downloaded must go
+ * on agreeing with each other for the life of the record.
+ *
+ * That is why improving the document means ADDING a renderer, never
+ * editing one. `PDFKIT_V1` and `PDFKIT_V2` keep producing exactly what
+ * they always produced; `PDFKIT_V3` draws the controlled document the
+ * on-screen form shows and is what new jobs pin to. The database
+ * allowlist (migration 0032, widening 0016) knows all three.
+ */
+export const RENDERER_VERSIONS = ['PDFKIT_V1', 'PDFKIT_V2', 'PDFKIT_V3'] as const;
+export type RendererVersion = (typeof RENDERER_VERSIONS)[number];
+
+export function isRendererVersion(value: string | null | undefined): value is RendererVersion {
+  return typeof value === 'string' && (RENDERER_VERSIONS as readonly string[]).includes(value);
+}
+
+/** What a NEW job pins to. Existing jobs keep whatever they already pinned. */
+export const CURRENT_RENDERER_VERSION: RendererVersion = 'PDFKIT_V3';
+
+/**
+ * The label the legacy renderer prints in its trailer.
+ *
+ * A LITERAL, DELIBERATELY - not `CURRENT_RENDERER_VERSION`. This string
+ * is inside the PDF, so reading the moving constant here would have
+ * changed the bytes of every legacy render the moment a newer renderer
+ * was added, and the pinned hash of every existing job with it.
+ */
+const LEGACY_RENDERER_LABEL = 'PDFKIT_V2';
 
 const PAGE_MARGIN = 50;
 
@@ -453,7 +487,7 @@ function renderPage(doc: PDFKit.PDFDocument, page: DocumentPage, contentWidth: n
  * modification dates come from the snapshot's authoritative issuance
  * timestamp, not from `Date.now()`).
  */
-export async function generateIssuedPermitPdf(snapshot: IssuedPermitSnapshot): Promise<Buffer> {
+async function renderIssuedPermitPdfLegacy(snapshot: IssuedPermitSnapshot): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const authoritativeDate = new Date(snapshot.issuanceOccurredAt);
     const doc = new PDFDocument({
@@ -491,10 +525,39 @@ export async function generateIssuedPermitPdf(snapshot: IssuedPermitSnapshot): P
       .font('Helvetica')
       .fontSize(8)
       .fillColor('gray')
-      .text(`Snapshot captured at: ${snapshot.snapshotTakenAt}. Renderer: ${CURRENT_RENDERER_VERSION}.`);
+      .text(`Snapshot captured at: ${snapshot.snapshotTakenAt}. Renderer: ${LEGACY_RENDERER_LABEL}.`);
 
     doc.end();
   });
+}
+
+/**
+ * Renders the combined Permit + JSA PDF from an immutable snapshot only -
+ * "CORE BUSINESS RULE: every ISSUED permit has ONE combined PDF
+ * containing PERMIT then JSA (NOT two separate PDFs)".
+ *
+ * WHICH RENDERER RUNS IS THE JOB'S OWN PINNED IDENTITY, never a choice
+ * made here. A job that already established `renderer_version` renders
+ * with that renderer for the rest of its life, so its stored bytes stay
+ * reproducible; only a job that has pinned nothing yet gets the current
+ * one. An unrecognised identity is refused rather than rendered by a
+ * renderer that would produce different bytes under its name.
+ */
+export async function generateIssuedPermitPdf(
+  snapshot: IssuedPermitSnapshot,
+  rendererVersion: RendererVersion = CURRENT_RENDERER_VERSION,
+): Promise<Buffer> {
+  switch (rendererVersion) {
+    case 'PDFKIT_V1':
+    case 'PDFKIT_V2':
+      return renderIssuedPermitPdfLegacy(snapshot);
+    case 'PDFKIT_V3':
+      return renderIssuedPermitPdfV3(snapshot, buildIssuedDocumentPages(snapshot), 'PDFKIT_V3');
+    default: {
+      const unreachable: never = rendererVersion;
+      throw new Error(`unknown renderer version: ${String(unreachable)}`);
+    }
+  }
 }
 
 export type DocumentStorageErrorCode =
@@ -761,7 +824,21 @@ export async function processPendingDocumentJobs(
       if (!hasValidSnapshotHash(row.snapshot, row.snapshot_hash, row.hash_version)) {
         throw new Error('snapshot integrity verification failed');
       }
-      const pdfBuffer = await generateIssuedPermitPdf(row.snapshot);
+      /*
+        A JOB RENDERS WITH THE IDENTITY IT ALREADY HAS. `renderer_version`
+        is null only for a job that has never established one, and that is
+        the only case the current renderer is used - so an existing
+        PENDING or FAILED job pinned to PDFKIT_V1/V2 keeps producing the
+        bytes it was designed to produce, and adding a renderer can never
+        retro-render anything. An identity this build does not implement
+        is refused outright rather than rendered by a different renderer
+        under its name.
+      */
+      if (row.renderer_version !== null && !isRendererVersion(row.renderer_version)) {
+        throw new Error('unknown pinned renderer version');
+      }
+      const rendererVersion: RendererVersion = row.renderer_version ?? CURRENT_RENDERER_VERSION;
+      const pdfBuffer = await generateIssuedPermitPdf(row.snapshot, rendererVersion);
       const fileHash = computeFileHash(pdfBuffer);
       const storagePath = `permits/${row.permit_id}/${row.snapshot_id}.pdf`;
 
@@ -778,7 +855,7 @@ export async function processPendingDocumentJobs(
             AND (renderer_version IS NULL OR renderer_version = $4)
             AND (expected_file_hash IS NULL OR expected_file_hash = $3)
           RETURNING id`,
-        [row.id, claimToken, fileHash, CURRENT_RENDERER_VERSION],
+        [row.id, claimToken, fileHash, rendererVersion],
       );
       if (intended.rows.length === 0) throw new Error('document intended identity conflict');
 

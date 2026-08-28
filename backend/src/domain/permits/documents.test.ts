@@ -173,11 +173,14 @@ class FakeDocumentsDb {
       return { rows };
     }
     if (sql.startsWith('UPDATE permit_document_jobs') && sql.includes('renderer_version = COALESCE')) {
-      const [id, claimToken, fileHash] = params as [string, string, string];
+      // Mirrors the real statement: the identity is COALESCEd from the
+      // one the caller pins ($4), and an already-established identity is
+      // never quietly replaced by a different one.
+      const [id, claimToken, fileHash, rendererVersion] = params as [string, string, string, string];
       const job = this.jobs.find((j) => j.id === id);
       if (!job || job.status !== 'PROCESSING' || job.claim_token !== claimToken) return { rows: [] };
-      if ((job.renderer_version && job.renderer_version !== 'PDFKIT_V1') || (job.expected_file_hash && job.expected_file_hash !== fileHash)) return { rows: [] };
-      job.renderer_version = 'PDFKIT_V1'; job.expected_file_hash = fileHash;
+      if ((job.renderer_version && job.renderer_version !== rendererVersion) || (job.expected_file_hash && job.expected_file_hash !== fileHash)) return { rows: [] };
+      job.renderer_version = job.renderer_version ?? rendererVersion; job.expected_file_hash = fileHash;
       return { rows: [{ id }] };
     }
     if (sql.startsWith('UPDATE permit_document_jobs') && sql.includes("status = 'GENERATED'")) {

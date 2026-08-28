@@ -185,6 +185,34 @@ Versioned, plain SQL migration files, applied in filename order by
   non-extension public application function. Live effective-privilege and
   rolled-back attempt audits verified both boundaries.
 
+- `0032_pdf_renderer_v3.sql`: **NOT APPLIED — awaiting deployment.**
+  Widens the document renderer allowlist a second time, to admit
+  `PDFKIT_V3`: the renderer that draws the issued PDF as the controlled
+  form it is (masthead, identity band, numbered sections, bordered field
+  grids, checklist bands with the printed YES/NO/N-A columns, tick grids,
+  signature bands), so the PDF and the on-screen document read as one
+  piece of paperwork.
+
+  The allowlist is **widened, never replaced** — `PDFKIT_V1` and
+  `PDFKIT_V2` stay valid — and the migration touches no data at all:
+
+  1. Every `GENERATED` document keeps its bytes, its file hash and its
+     storage object. Nothing is re-rendered or re-hashed.
+  2. Every job that already pinned a `renderer_version` keeps it, and the
+     application renders that job with that renderer. A V1/V2 job is
+     never re-rendered by V3.
+  3. Only a job that has pinned nothing yet — a permit issued after this
+     deploys — establishes `PDFKIT_V3`.
+
+  The document estate is therefore intentionally mixed afterwards:
+  permits issued before it keep the document they were issued with, which
+  is the correct outcome for an immutable record rather than something to
+  correct with a backfill. It aborts if any job row carries a
+  renderer identity outside the allowlist.
+
+  No form contract, snapshot, snapshot hash, capability, policy or grant
+  is touched.
+
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
 later, scoped implementation sections — not here.

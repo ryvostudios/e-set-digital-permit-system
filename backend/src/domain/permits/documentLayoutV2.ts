@@ -8,6 +8,7 @@ import {
   CONFINED_SPACE_NATURE_OF_WORK,
   CONFINED_SPACE_SLOGAN,
   CONFINED_SPACE_TYPE_OF_HAZARD,
+  DOCUMENT_ISSUER,
   FORM_REFERENCES,
   HOT_WORK_CHECKLIST_SECTIONS,
   HOT_WORK_COMBUSTION_SUB_TICKS,
@@ -36,7 +37,7 @@ import {
   type SelectionSection,
 } from './catalogue.js';
 import type { IssuedPermitSnapshot } from './documents.js';
-import type { DocumentBlock, DocumentPage, DocumentSection } from './documentLayout.js';
+import type { DocumentBlock, DocumentMasthead, DocumentPage, DocumentSection } from './documentLayout.js';
 import {
   JSA_FORM_VERSION_V2,
   PERMIT_FORM_VERSIONS_V2,
@@ -74,11 +75,23 @@ function fields(rows: Array<[string, string | null | undefined]>): DocumentBlock
   return { kind: 'fields', rows: rows.map(([label, value]) => ({ label, value: dash(value) })) };
 }
 
+/**
+ * The printed tick columns for a band. A YES/NO band has no N/A column on
+ * paper, so it must not be given one - `NA` there would be a response the
+ * form does not offer.
+ */
+const RESPONSE_COLUMNS = { YES_NO_NA: ['YES', 'NO', 'NA'], YES_NO: ['YES', 'NO'] } as const;
+
 function checklist(section: ChecklistSection, rawAnswers: unknown): DocumentSection {
   const answers = rawAnswers as Record<string, { response: string; remarks?: string }>;
   return {
     title: section.title,
-    blocks: [{ kind: 'checklist', items: section.items.map((item) => ({ label: item.label, ...response(answers[item.id]!) })) }],
+    number: section.printedNumber ?? null,
+    blocks: [{
+      kind: 'checklist',
+      columns: RESPONSE_COLUMNS[section.responses] ?? RESPONSE_COLUMNS.YES_NO,
+      items: section.items.map((item) => ({ label: item.label, ...response(answers[item.id]!) })),
+    }],
   };
 }
 
@@ -86,7 +99,7 @@ function selections(section: SelectionSection, rawAnswers: unknown): DocumentSec
   const answers = rawAnswers as Record<string, boolean | string | undefined>;
   const items = section.options.map((item) => ({ label: item.label, selected: answers[item.id] === true, remarks: null as string | null }));
   if (section.hasOther) items.push({ label: 'Other', selected: Boolean(answers.other), remarks: typeof answers.other === 'string' ? answers.other : null });
-  return { title: section.title, blocks: [{ kind: 'selections', items }] };
+  return { title: section.title, number: section.printedNumber ?? null, blocks: [{ kind: 'selections', columns: 3, items }] };
 }
 
 function workWindow(form: { workWindow: { equipment?: string | undefined; area?: string | undefined; fromHours?: string | undefined; toHours?: string | undefined; extendedTo?: string | undefined } }): DocumentSection {
@@ -104,6 +117,27 @@ function authorizationSections(form: { evacuation: { completedRemarks?: string |
       ...(index === 2 ? [fields([['COMPLETED REMARKS', form.evacuation.completedRemarks], ['ACKNOWLEDGED AT HOURS', form.evacuation.acknowledgedAtHours], ['ACKNOWLEDGED REMARKS', form.evacuation.acknowledgedRemarks]])] : []),
     ],
   }));
+}
+
+/** The printed masthead for one logical page. Presentation only - PDFKIT_V3 draws it, the older renderers ignore it. */
+function masthead(title: string, reference: string | null, pageLabel: string | null): DocumentMasthead {
+  return { issuer: DOCUMENT_ISSUER, title, reference, pageLabel };
+}
+
+/**
+ * The identity band every printed form carries: the numbers and the
+ * applicant, all SERVER-DERIVED and frozen in the snapshot. Never form
+ * content, and never re-resolved from a live profile.
+ */
+function identityBand(snapshot: IssuedPermitSnapshotV2): { label: string; value: string }[] {
+  const applicant = snapshot.applicantIdentity?.displayName ?? snapshot.signatures.applicant?.displayName ?? '-';
+  const company = snapshot.applicantIdentity?.companyName ?? snapshot.company ?? '-';
+  return [
+    { label: 'PERMIT NO.', value: dash(snapshot.permitNumber) },
+    { label: 'APPLICANT', value: dash(applicant) },
+    { label: 'COMPANY', value: dash(company) },
+    { label: 'JSA NO.', value: dash(snapshot.jsaNumber) },
+  ];
 }
 
 function permitHeader(snapshot: IssuedPermitSnapshotV2, title: string, reference?: string): DocumentSection[] {
@@ -194,7 +228,24 @@ function jsaPage2(snapshot: IssuedPermitSnapshotV2): DocumentPage {
   ] };
 }
 
+const PERMIT_REFERENCES: Partial<Record<string, string>> = {
+  COLD_WORK: FORM_REFERENCES.COLD_WORK,
+  HOT_WORK: FORM_REFERENCES.HOT_WORK,
+  CONFINED_SPACE_ENTRY: FORM_REFERENCES.CONFINED_SPACE_ENTRY,
+};
+
 export function buildIssuedDocumentPagesV2(snapshot: IssuedPermitSnapshotV2): DocumentPage[] {
   const permit = permitSections(snapshot);
-  return [{ title: `AUTHORITATIVE ${permit.title}`, sections: [...permit.sections, digitalAuthorization(snapshot)] }, jsaPage1(snapshot), jsaPage2(snapshot)];
+  const reference = PERMIT_REFERENCES[snapshot.permitType] ?? null;
+  return [
+    {
+      title: `AUTHORITATIVE ${permit.title}`,
+      masthead: masthead(permit.title, reference, null),
+      identity: identityBand(snapshot),
+      footerNote: PERMIT_DISTRIBUTION_FOOTER,
+      sections: [...permit.sections, digitalAuthorization(snapshot)],
+    },
+    { ...jsaPage1(snapshot), masthead: masthead('JOB SAFETY ANALYSIS', FORM_REFERENCES.JSA, 'PAGE 1 OF 2'), identity: identityBand(snapshot), footerNote: `${FORM_REFERENCES.JSA} · PAGE 1 OF 2` },
+    { ...jsaPage2(snapshot), masthead: masthead('JOB SAFETY ANALYSIS', FORM_REFERENCES.JSA, 'PAGE 2 OF 2'), identity: identityBand(snapshot), footerNote: `${FORM_REFERENCES.JSA} · PAGE 2 OF 2` },
+  ];
 }

@@ -806,6 +806,13 @@ export const FORM_REFERENCES = {
   JSA: 'E-SET-ZPL-F-009',
 } as const;
 
+/**
+ * The issuing organisation, as printed at the head of every controlled
+ * document. Here with the rest of the printed wording so the PDF has one
+ * source for it rather than a string of its own.
+ */
+export const DOCUMENT_ISSUER = 'E-SET · Strategic Engineering Technologies (Pvt.) Limited';
+
 /** Printed on 008A/B/C. */
 export const PERMIT_DISTRIBUTION_FOOTER =
   'DISTRIBUTION: WHITE - JOB EXECUTE: BLUE - ISSUER: YELLOW - BOOK COPY:';

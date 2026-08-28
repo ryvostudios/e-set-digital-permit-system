@@ -207,7 +207,9 @@ test('the rendered PDF is a real multi-page document carrying Permit, JSA, and s
   // Permit page, JSA page 1, JSA page 2.
   const pageCount = pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g)?.length ?? 0;
   assert.ok(pageCount >= 3, `expected at least 3 pages, got ${pageCount}`);
-  assert.equal(CURRENT_RENDERER_VERSION, 'PDFKIT_V2');
+  // A NEW job pins to the current renderer. Existing jobs keep the
+  // identity they already established - see documentRendererV3.test.ts.
+  assert.equal(CURRENT_RENDERER_VERSION, 'PDFKIT_V3');
 });
 
 test('an application-clock skew cannot change the rendered bytes (the document dates come from the snapshot)', async () => {
