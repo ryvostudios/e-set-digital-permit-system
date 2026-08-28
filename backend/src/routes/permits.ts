@@ -10,7 +10,7 @@ import {
   STATUS_VIEW_CAPABILITIES,
 } from '../domain/permits/access.js';
 import { getDocumentForPermit, hasExpectedFileHash, resolveDocumentStorageAdapter } from '../domain/permits/documents.js';
-import { toDisplayNumber } from '../domain/permits/numbering.js';
+import { toDisplayNumber, toPermitNumber } from '../domain/permits/numbering.js';
 import { searchPermitLifecycleEvents, searchPermits } from '../domain/permits/search.js';
 import {
   cancelPermit,
@@ -98,7 +98,7 @@ async function resolvePermitReadContext(
 // boundary, keeps that an easily-swappable presentation concern rather
 // than something baked into stored data or the service layer.
 function serializePermit(permit: PermitRow) {
-  return { ...permit, permitDisplayNumber: toDisplayNumber(BigInt(permit.permit_sequence)) };
+  return { ...permit, permitDisplayNumber: toPermitNumber(permit.permit_type, permit.permit_sequence) };
 }
 
 /**
@@ -109,7 +109,7 @@ function serializePermit(permit: PermitRow) {
  * form content is available from permit detail alone.
  */
 function serializePermitSummary(permit: PermitSummaryRow) {
-  return { ...permit, permitDisplayNumber: toDisplayNumber(BigInt(permit.permit_sequence)) };
+  return { ...permit, permitDisplayNumber: toPermitNumber(permit.permit_type, permit.permit_sequence) };
 }
 
 function serializeJsa(jsa: JsaRow) {
@@ -566,7 +566,9 @@ permitsRouter.get('/permits/:id/pdf', requireAuth, async (req: Request, res: Res
     return;
   }
 
-  const safeFileName = `permit-${toDisplayNumber(BigInt(permit.permit_sequence))}.pdf`;
+  // An issued permit always has a number; the formatter is used anyway so
+  // the filename can never disagree with the document inside it.
+  const safeFileName = `permit-${toPermitNumber(permit.permit_type, permit.permit_sequence)}.pdf`;
   res.status(200);
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${safeFileName}"`);

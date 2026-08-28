@@ -45,7 +45,7 @@ describe('the list', () => {
     stubFetch({ 'GET /api/v1/permits/search': searchResponse([record()]) });
     renderAs(<RecordsPage />, normalEmployee());
 
-    await screen.findAllByText('000001');
+    await screen.findAllByText('WTG-1');
     expect(screen.getAllByText(/WTG Work Permit/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/North Farm · WTG-14/).length).toBeGreaterThan(0);
   });
@@ -88,7 +88,7 @@ describe('filtering', () => {
     const user = userEvent.setup();
     const { calls } = stubFetch({ 'GET /api/v1/permits/search': searchResponse([record()]) });
     renderAs(<RecordsPage />, normalEmployee());
-    await screen.findAllByText('000001');
+    await screen.findAllByText('WTG-1');
 
     await user.selectOptions(screen.getByLabelText(/^status/i), 'ISSUED');
     await user.click(screen.getByRole('button', { name: /apply filters/i }));
@@ -111,7 +111,7 @@ describe('filtering', () => {
       'GET /api/v1/permits/search': searchResponse([record()], { totalCount: 60, totalPages: 3, hasNextPage: true }),
     });
     renderAs(<RecordsPage />, normalEmployee());
-    await screen.findAllByText('000001');
+    await screen.findAllByText('WTG-1');
 
     await user.click(screen.getByRole('button', { name: /^next$/i }));
     await waitFor(() => expect(calls.some((call) => call.url.includes('page=2'))).toBe(true));
@@ -154,7 +154,7 @@ describe('visibility after a permission change', () => {
         forbidden ? { status: 403, body: { error: 'forbidden' } } : searchResponse([record()]),
     });
     renderAs(<RecordsPage />, normalEmployee());
-    await screen.findAllByText('000001');
+    await screen.findAllByText('WTG-1');
 
     forbidden = true;
     invalidateAll();

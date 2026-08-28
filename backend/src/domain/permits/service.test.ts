@@ -32,6 +32,7 @@ import {
   type PermitsServiceDeps,
 } from './service.js';
 import { PERMIT_TYPES, type PermitType } from './forms.js';
+import { toPermitNumber } from './numbering.js';
 import {
   makeHotWorkForm,
   makeJsaFormColumns,
@@ -3533,8 +3534,10 @@ test('renewPermit: notifies the applicant with the NEW Permit Number, creates a 
   const outboxMessage = db.whatsappOutbox.find((m) => m.event_type === 'RENEWED');
   assert.ok(outboxMessage);
   const payload = JSON.parse(outboxMessage!.payload) as { previousPermitNumber?: string; newPermitNumber?: string };
-  assert.equal(payload.previousPermitNumber, closed.permit_sequence);
-  assert.equal(payload.newPermitNumber, renewed.permit.permit_sequence);
+  // Both are the formatted, prefixed numbers - the renewal message names
+  // the permits the way every other surface does.
+  assert.equal(payload.previousPermitNumber, toPermitNumber('WTG_WORK', closed.permit_sequence));
+  assert.equal(payload.newPermitNumber, toPermitNumber('WTG_WORK', renewed.permit.permit_sequence));
 });
 
 test('a mid-transaction failure rolls back the notification/outbox/snapshot rows together with the permit transition itself - a successful transition never partially loses its side effects, and a failed one never partially keeps them', async () => {
@@ -4039,7 +4042,8 @@ test('a renewed permit carries over the form content and inherits the frozen sig
     };
     previousPermitNumber: string;
   };
-  assert.equal(snapshot.previousPermitNumber, issued.permit_sequence);
+  // The snapshot carries the FORMATTED number, as every surface does.
+  assert.equal(snapshot.previousPermitNumber, toPermitNumber('WTG_WORK', issued.permit_sequence));
   assert.equal(snapshot.signatures.applicant?.displayName, 'Display Name of owner');
   assert.equal(snapshot.signatures.hse?.displayName, 'Display Name of hse-1');
   assert.equal(snapshot.signatures.renewal?.displayName, 'Dania Iqbal');
@@ -4104,7 +4108,9 @@ test('notification prose names the permit type beside the number', async () => {
 
   const notification = db.notifications.find((n) => n.notification_type === 'PERMIT_SUBMITTED');
   assert.ok(notification, 'a submission notification must exist');
-  const number = permit.permit_sequence;
+  // The number a person reads is the prefixed one - `WTG-3`, not `3`.
+  const number = toPermitNumber('WTG_WORK', submitted.permit.permit_sequence);
+  assert.match(number, /^WTG-\d+$/);
   assert.equal(notification.title, `WTG Work Permit ${number} submitted for CRO review`);
   assert.equal(notification.message, `WTG Work Permit ${number} is awaiting CRO review.`);
   // The type is added BESIDE the number, never substituted for it.
@@ -4130,7 +4136,7 @@ test('every notification a permit produces names its type, at every transition',
   }
 });
 
-test('the WhatsApp payload keeps the bare authoritative permit number, unprefixed', async () => {
+test('the WhatsApp payload carries the same permit number every other surface shows', async () => {
   const db = new FakeDb();
   db.grantCapability('cro-a', 'permit.cro_review');
   db.grantCapability('hse-1', 'permit.hse_review');
@@ -4140,9 +4146,14 @@ test('the WhatsApp payload keeps the bare authoritative permit number, unprefixe
   assert.ok(outbox, 'an ISSUED outbox message must exist');
   // The fake stores the payload exactly as the column does: JSON text.
   const payload = JSON.parse(outbox.payload) as { permitNumber: string };
-  // The structured business field is the stored number and nothing else.
-  assert.equal(payload.permitNumber, issued.permit_sequence);
-  assert.ok(/^\d+$/.test(payload.permitNumber), 'the payload number must stay bare');
+  /*
+    A WhatsApp message is read by a person, so it carries the same
+    authoritative number as the register, the record and the PDF. One
+    permit must not be called `WTG-3` on screen and `3` in the message
+    that tells someone about it.
+  */
+  assert.equal(payload.permitNumber, toPermitNumber('WTG_WORK', issued.permit_sequence));
+  assert.match(payload.permitNumber, /^WTG-\d+$/);
 });
 
 /**

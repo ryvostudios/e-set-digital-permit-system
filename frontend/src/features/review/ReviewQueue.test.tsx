@@ -39,7 +39,7 @@ describe('the CRO queue', () => {
   it('lists the permits awaiting review', async () => {
     stubFetch({ 'GET /api/v1/permits/queue': queueResponse([permitSummary({ status: 'PENDING_CRO' })]) });
     renderAs(<CroQueuePage />, croEmployee());
-    expect((await screen.findAllByText('000001')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('WTG-1')).length).toBeGreaterThan(0);
   });
 
   it('shows an empty queue as an explicit state, not a blank panel', async () => {
@@ -84,7 +84,7 @@ describe('the HSE queue', () => {
   it('lists permits for a genuine E-SET HSE approver', async () => {
     stubFetch({ 'GET /api/v1/permits/queue': queueResponse([permitSummary({ status: 'PENDING_HSE' })]) });
     renderAs(<HseQueuePage />, hseApprover());
-    expect((await screen.findAllByText('000001')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('WTG-1')).length).toBeGreaterThan(0);
   });
 
   it('is REFUSED to ZPL’s "HSE" position - a different company’s job title, with no approval authority', async () => {

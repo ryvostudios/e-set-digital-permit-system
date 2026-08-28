@@ -23,6 +23,7 @@ import {
   type IssuedPermitSnapshot,
 } from './documents.js';
 import type { PermitType } from './forms.js';
+import { toPermitNumber } from './numbering.js';
 import { extractPdfPages, extractPdfText } from '../../test/pdfText.js';
 
 /**
@@ -134,7 +135,7 @@ test('each page carries the E-SET masthead and the server-derived identity band'
         ['PERMIT NO.', 'APPLICANT', 'COMPANY', 'JSA NO.'],
       );
       // Frozen snapshot identity, never a live lookup.
-      assert.equal(page.identity![0]!.value, '1045');
+      assert.equal(page.identity![0]!.value, toPermitNumber(type, 1045n));
       assert.equal(page.identity![1]!.value, 'Frozen Applicant');
       assert.equal(page.identity![3]!.value, '234');
     }
@@ -405,7 +406,7 @@ test('the timezone is named once, in words, not as a configuration value', async
 
 test('the footer names the permit and the page, and nothing else', async () => {
   const text = await renderedText(makeV2PdfTestSnapshot('HOT_WORK'));
-  assert.match(text, /Permit 1045 · JSA 234/, 'the footer must identify the permit');
+  assert.match(text, /Permit HW-1045 · JSA 234/, 'the footer must identify the permit');
   assert.match(text, /Page 1 of \d+/);
   assert.ok(!/snapshot|renderer/i.test(text));
 });
@@ -494,7 +495,7 @@ test('the identity band still carries permit, JSA, applicant and company on ever
       for (const label of ['PERMIT NO.', 'JSA NO.', 'APPLICANT', 'COMPANY']) {
         assert.ok(page.includes(label), `${type} page ${index + 1} lost the ${label} header`);
       }
-      assert.ok(page.includes('1045'), `${type} page ${index + 1} lost the permit number`);
+      assert.ok(page.includes(toPermitNumber(type, 1045n)), `${type} page ${index + 1} lost the permit number`);
       assert.ok(page.includes('234'), `${type} page ${index + 1} lost the JSA number`);
     }
   }
@@ -773,4 +774,24 @@ test('V1/V2 still print the original WTG sentence in full', async () => {
   const legacy = extractPdfText(await generateIssuedPermitPdf(makeV2PdfTestSnapshot('WTG_WORK'), 'PDFKIT_V2'));
   assert.match(legacy, /recorded in the frozen signature band below/i);
   assert.ok(legacy.includes('PERMIT ISSUER / PERMIT RECEIPT'), 'V2 keeps the slash-joined original');
+});
+
+test('the issued PDF prints the prefixed permit number, not a bare one', async () => {
+  const expected: Record<PermitType, string> = {
+    WTG_WORK: 'WTG-1045',
+    COLD_WORK: 'CW-1045',
+    HOT_WORK: 'HW-1045',
+    CONFINED_SPACE_ENTRY: 'CS-1045',
+  };
+  for (const type of TYPES) {
+    const text = (await pagesOf(type)).join('\n');
+    assert.ok(text.includes(expected[type]), `${type}: the document must read ${expected[type]}`);
+    // The identity band on every page carries it.
+    for (const [index, page] of (await pagesOf(type)).entries()) {
+      assert.ok(page.includes(expected[type]), `${type} page ${index + 1} must carry the permit number`);
+    }
+    // The JSA number beside it stays bare - its series is unchanged.
+    assert.ok(text.includes('234'), `${type}: the JSA number is still plain`);
+    assert.ok(!text.includes('JSA-234'), `${type}: the JSA number must not be prefixed`);
+  }
 });

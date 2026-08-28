@@ -218,7 +218,7 @@ test('buildIssuedPermitSnapshot captures the Permit Number, JSA Number, and issu
   const permit = makePermit();
   const jsa = makeJsa();
   const snapshot = buildIssuedPermitSnapshot(permit, jsa, null, makeIssuanceEvent('2026-01-01T09:00:01.000Z'), makeSignatureSet());
-  assert.equal(snapshot.permitNumber, '1045');
+  assert.equal(snapshot.permitNumber, 'WTG-1045');
   assert.equal(snapshot.jsaNumber, '234');
   assert.equal(snapshot.status, 'ISSUED');
   assert.equal(snapshot.company, 'ESET');
@@ -255,8 +255,8 @@ test('buildIssuedPermitSnapshot records the previous Permit Number for a renewal
   const oldPermit = makePermit({ id: 'permit-old', permit_sequence: '1045' });
   const newPermit = makePermit({ id: 'permit-new', permit_sequence: '1046', previous_permit_id: 'permit-old' });
   const snapshot = buildIssuedPermitSnapshot(newPermit, makeJsa(), oldPermit, makeIssuanceEvent(), makeSignatureSet());
-  assert.equal(snapshot.permitNumber, '1046');
-  assert.equal(snapshot.previousPermitNumber, '1045');
+  assert.equal(snapshot.permitNumber, 'WTG-1046');
+  assert.equal(snapshot.previousPermitNumber, 'WTG-1045');
 });
 
 test('computeSnapshotHash is deterministic regardless of property insertion order', () => {

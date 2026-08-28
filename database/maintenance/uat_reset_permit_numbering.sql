@@ -181,6 +181,32 @@ BEGIN
 END;
 $$;
 
+-- ---------------------------------------------------------------------
+-- 2b. The permit domain must look the way this script expects
+-- ---------------------------------------------------------------------
+-- Every table below is emptied in section 4. If the schema has moved and
+-- one of them is not there, stop now: a half-cleared permit domain is
+-- worse than an uncleared one, and guessing is not an option when the
+-- next statement is a DELETE.
+DO $$
+DECLARE
+  domain_table TEXT;
+BEGIN
+  FOREACH domain_table IN ARRAY ARRAY[
+    'permits', 'jsas', 'permit_lifecycle_events', 'permit_signatures',
+    'notifications', 'whatsapp_outbox_messages',
+    'issued_document_snapshots', 'issued_document_snapshot_integrity',
+    'permit_document_jobs'
+  ] LOOP
+    IF to_regclass('public.' || quote_ident(domain_table)) IS NULL THEN
+      RAISE EXCEPTION
+        'UAT reset aborted: permit-domain table public.% does not exist. The schema does not match this script - check it before running anything destructive.', domain_table;
+    END IF;
+  END LOOP;
+  RAISE NOTICE 'Permit domain verified: 9 table(s) present and ready to clear.';
+END;
+$$;
+
 DO $$
 DECLARE
   path TEXT;
@@ -279,11 +305,17 @@ ALTER TABLE permit_lifecycle_events           ENABLE TRIGGER permit_lifecycle_ev
 -- PER TYPE for permits; ONE GLOBAL SERIES for the JSA, which is unchanged
 -- business rule.
 --
--- The per-type counters only exist once migration 0033 has been applied.
--- This script is safe in either order:
---   * cleanup BEFORE 0033 - the table is absent, nothing to reset, and
---     0033 then seeds all four counters at 1 from an empty register;
---   * cleanup AFTER 0033  - the counters exist and are set back to 1 here.
+-- AFTER MIGRATION 0034 a permit number is issued on the first successful
+-- submission, not at creation - so once this has run, a newly created
+-- draft carries NO number ("Not assigned") and the first permit of each
+-- type SUBMITTED becomes WTG-1 / CW-1 / HW-1 / CS-1. Setting the counters
+-- back to 1 is what makes that first submission start the register at 1.
+--
+-- 0033 IS APPLIED ON THE LIVE DATABASE, so the counters exist and are
+-- reset here. The conditional remains for a database that predates it -
+-- a fresh environment being built up from scratch - where there is
+-- simply nothing to reset and 0033 then seeds all four counters at 1
+-- from an empty register.
 DO $$
 BEGIN
   IF to_regclass('public.permit_number_counters') IS NOT NULL THEN
@@ -295,8 +327,12 @@ BEGIN
 END;
 $$;
 
--- The pre-form (untyped) permit series, and the global JSA series.
--- ALTER SEQUENCE ... RESTART is transactional, so a rollback undoes it.
+-- The two permit-domain sequences, and only those: the legacy pre-form
+-- permit series (which after 0034 can only ever be drawn on by a
+-- pre-form row created past DRAFT, and never by a draft), and the global
+-- JSA series, so the next JSA created is JSA 1. No other sequence in the
+-- database is touched. `ALTER SEQUENCE ... RESTART` is transactional, so
+-- a rollback undoes it.
 ALTER SEQUENCE permit_number_seq RESTART WITH 1;
 ALTER SEQUENCE jsa_number_seq RESTART WITH 1;
 
@@ -310,6 +346,7 @@ DECLARE
   protected TEXT;
   observed BIGINT;
   expected BIGINT;
+  jsa_next BIGINT;
 BEGIN
   -- (a) The register is empty and nothing was orphaned behind it.
   SELECT (SELECT count(*) FROM permits)
@@ -359,6 +396,14 @@ BEGIN
     IF EXISTS (SELECT 1 FROM permit_number_counters WHERE next_value <> 1) THEN
       RAISE EXCEPTION 'UAT reset incomplete: a permit type counter is not back at 1';
     END IF;
+  END IF;
+
+  -- (d2) The JSA series starts again at 1, so the first JSA created after
+  -- this is JSA 1. `is_called = false` means the next `nextval` returns
+  -- `last_value` itself rather than the one after it.
+  SELECT last_value INTO jsa_next FROM jsa_number_seq;
+  IF jsa_next <> 1 OR (SELECT is_called FROM jsa_number_seq) THEN
+    RAISE EXCEPTION 'UAT reset incomplete: the JSA sequence would not start again at 1';
   END IF;
 
   -- (e) Nothing outside the permit register moved. Re-counted from the

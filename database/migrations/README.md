@@ -185,7 +185,7 @@ Versioned, plain SQL migration files, applied in filename order by
   non-extension public application function. Live effective-privilege and
   rolled-back attempt audits verified both boundaries.
 
-- `0032_pdf_renderer_v3.sql`: **NOT APPLIED — awaiting deployment.**
+- `0032_pdf_renderer_v3.sql`: **APPLIED / LIVE.**
   Widens the document renderer allowlist a second time, to admit
   `PDFKIT_V3`: the renderer that draws the issued PDF as the controlled
   form it is (masthead, identity band, numbered sections, bordered field
@@ -212,6 +212,42 @@ Versioned, plain SQL migration files, applied in filename order by
 
   No form contract, snapshot, snapshot hash, capability, policy or grant
   is touched.
+
+- `0033_per_permit_type_numbering.sql`: **APPLIED / LIVE.** Gives each
+  permit type its own number series, allocated by a database-side
+  per-type counter (`permit_number_counters` +
+  `allocate_permit_sequence()`) under a row lock, with uniqueness
+  enforced per `(permit_type, permit_sequence)` rather than globally. The
+  JSA series is untouched and remains one global sequence. It renumbered
+  nothing: each type's counter was seeded from the highest number that
+  type already held.
+
+- `0034_permit_number_on_submission.sql`: **NOT APPLIED — awaiting
+  deployment.** The only outstanding migration. It moves ALLOCATION from
+  0033's `BEFORE INSERT` trigger to the `DRAFT -> submitted` transition,
+  so a draft never consumes a permit number:
+
+  1. `permit_sequence` becomes nullable, and a DRAFT is always NULL —
+     typed or untyped, newly created or saved a hundred times, and
+     whatever number a request tries to supply.
+  2. The number is issued inside the submitting transaction, from the
+     permit type's own counter. A submission that fails or rolls back
+     leaves an unnumbered DRAFT and consumes nothing.
+  3. Once issued it is permanent: it cannot be changed, cleared, or
+     stripped by pushing the permit back to DRAFT, and it is never
+     recycled.
+  4. Two constraints make the rule structural rather than conventional:
+     `permits_draft_is_unnumbered` and
+     `permits_sequence_required_after_draft`.
+
+  It aborts if any non-DRAFT permit has no number. Drafts that 0033 had
+  already numbered are RELEASED (set back to NULL) — those numbers were
+  never in the operational register, because nothing was ever submitted
+  under them — and no counter is rewound, so a released number is never
+  reused. Nothing submitted, issued or closed is altered.
+
+  0033's counter table, allocator function and unique indexes are reused
+  unchanged; only its trigger is replaced.
 
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in

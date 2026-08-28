@@ -7,7 +7,7 @@ import { buildIssuedDocumentPages, type DocumentBlock, type DocumentPage } from 
 import { renderIssuedPermitPdfV3 } from './documentRendererV3.js';
 import type { JsaForm, PermitForm, PermitFormVersion, PermitType } from './forms.js';
 import type { JsaFormV2, JsaFormVersionV2, PermitFormV2, PermitFormVersionV2 } from './formsV2.js';
-import { toDisplayNumber } from './numbering.js';
+import { toDisplayNumber, toPermitNumber } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
 import type { SnapshotSignatureSet } from './signatures.js';
 import { computeNextMidnightUtc } from './validity.js';
@@ -118,6 +118,12 @@ export function buildIssuedPermitSnapshot(
   if (!permit.permit_type || !permit.form_version || !permit.form_payload) {
     throw new Error('buildIssuedPermitSnapshot requires a permit with a completed, validated form');
   }
+  // An issued permit has been through submission, so the database has
+  // already issued its number (migration 0034). Refuse rather than
+  // snapshot a document that says "Not assigned" for ever.
+  if (permit.permit_sequence === null) {
+    throw new Error('buildIssuedPermitSnapshot requires a permit that has been assigned a permit number');
+  }
   if (!jsa.form_version || !jsa.form_payload) {
     throw new Error('buildIssuedPermitSnapshot requires a JSA with a completed, validated form');
   }
@@ -128,7 +134,7 @@ export function buildIssuedPermitSnapshot(
   return {
     snapshotVersion: 'ISSUED_PERMIT_SNAPSHOT_V2',
     permitId: permit.id,
-    permitNumber: toDisplayNumber(BigInt(permit.permit_sequence)),
+    permitNumber: toPermitNumber(permit.permit_type, permit.permit_sequence),
     jsaId: jsa.id,
     jsaNumber: toDisplayNumber(BigInt(jsa.jsa_sequence)),
     status: 'ISSUED',
@@ -149,7 +155,7 @@ export function buildIssuedPermitSnapshot(
     expiresAt: computeNextMidnightUtc(issuedAt, permit.site_timezone).toISOString(),
     siteTimezone: permit.site_timezone,
     previousPermitId: permit.previous_permit_id,
-    previousPermitNumber: previousPermit ? toDisplayNumber(BigInt(previousPermit.permit_sequence)) : null,
+    previousPermitNumber: previousPermit ? toPermitNumber(previousPermit.permit_type, previousPermit.permit_sequence) : null,
     jsaCreatedBy: jsa.created_by,
     jsaCreatedAt: toIsoTimestamp(jsa.created_at),
     issuanceEventId: issuanceEvent.id,

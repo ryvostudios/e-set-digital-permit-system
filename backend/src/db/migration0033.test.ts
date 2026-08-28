@@ -5,6 +5,7 @@ import { PGlite } from '@electric-sql/pglite';
 
 const migrationUrl = new URL('../../../database/migrations/0033_per_permit_type_numbering.sql', import.meta.url);
 const resetUrl = new URL('../../../database/maintenance/uat_reset_permit_numbering.sql', import.meta.url);
+const migration0034Url = new URL('../../../database/migrations/0034_permit_number_on_submission.sql', import.meta.url);
 
 const TYPES = ['WTG_WORK', 'COLD_WORK', 'HOT_WORK', 'CONFINED_SPACE_ENTRY'] as const;
 
@@ -746,4 +747,158 @@ test('migration 0033 has no BEGIN/COMMIT of its own - the runner owns the transa
   const sql = await readFile(migrationUrl, 'utf8');
   assert.ok(!/^BEGIN;/m.test(sql), '0033 must not open its own transaction');
   assert.ok(!/^COMMIT;/m.test(sql), '0033 must not commit - that would unbind it from its schema_migrations row');
+});
+
+// ---------------------------------------------------------------------
+// The UAT reset, against the schema it will actually run on
+// ---------------------------------------------------------------------
+
+/**
+ * THE REAL DEPLOYMENT ORDER IS 0033 (live), then 0034, then the reset.
+ *
+ * 0034 adds a trigger on every INSERT and UPDATE of `permits` and two new
+ * CHECK constraints, and the reset UPDATEs `permits` on its way to
+ * clearing the renewal lineage - so the two have to be exercised
+ * together, not separately. These specs run the reset against a database
+ * that has BOTH migrations applied, which the earlier reset specs (built
+ * before 0034 existed) do not.
+ */
+
+/** The nine permit-domain tables the reset clears. */
+const PERMIT_DOMAIN_TABLES = [
+  'permits', 'jsas', 'permit_lifecycle_events', 'permit_signatures',
+  'notifications', 'whatsapp_outbox_messages',
+  'issued_document_snapshots', 'issued_document_snapshot_integrity',
+  'permit_document_jobs',
+];
+
+async function createResetEstateWith0034(): Promise<PGlite> {
+  const db = await createResetEstate(true);
+  await db.exec(await readFile(migration0034Url, 'utf8'));
+  return db;
+}
+
+test('the reset still runs cleanly with 0034 applied', async () => {
+  const db = await createResetEstateWith0034();
+  try {
+    // A realistic UAT estate: submitted, issued and closed permits with
+    // their whole workflow tail, plus unnumbered drafts.
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    for (const type of TYPES) {
+      const jsa = await db.query<{ id: number }>('INSERT INTO jsas DEFAULT VALUES RETURNING id');
+      await db.query("INSERT INTO permits (jsa_id, permit_type, status) VALUES ($1, $2, 'DRAFT')", [
+        jsa.rows[0]!.id,
+        type,
+      ]);
+    }
+
+    await db.exec(arm(await readReset()));
+
+    for (const table of [...PERMIT_DOMAIN_TABLES]) {
+      assert.equal(await countOf(db, table), 0, `${table} must be empty`);
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test('after the reset, every type starts again at 1 on FIRST SUBMISSION', async () => {
+  const db = await createResetEstateWith0034();
+  try {
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    await db.exec(arm(await readReset()));
+
+    const counters = await db.query<{ permit_type: string; next_value: string | number }>(
+      'SELECT permit_type, next_value FROM permit_number_counters ORDER BY permit_type',
+    );
+    assert.equal(counters.rows.length, 4);
+    assert.ok(counters.rows.every((row) => Number(row.next_value) === 1));
+
+    // A new draft is UNNUMBERED under 0034...
+    const jsa = await db.query<{ id: number; jsa_sequence: string | number }>(
+      'INSERT INTO jsas DEFAULT VALUES RETURNING id, jsa_sequence',
+    );
+    const draft = await db.query<{ id: number; permit_sequence: number | null }>(
+      "INSERT INTO permits (jsa_id, permit_type, status) VALUES ($1, 'COLD_WORK', 'DRAFT') RETURNING id, permit_sequence",
+      [jsa.rows[0]!.id],
+    );
+    assert.equal(draft.rows[0]!.permit_sequence, null, 'a fresh draft carries no number');
+    assert.equal(Number(jsa.rows[0]!.jsa_sequence), 1, 'and the first JSA is JSA 1');
+
+    // ...and becomes CW-1 only when it is submitted.
+    const submitted = await db.query<{ permit_sequence: number }>(
+      "UPDATE permits SET status = 'PENDING_CRO' WHERE id = $1 RETURNING permit_sequence",
+      [draft.rows[0]!.id],
+    );
+    assert.equal(Number(submitted.rows[0]!.permit_sequence), 1, 'the register starts at CW-1');
+  } finally {
+    await db.close();
+  }
+});
+
+test('after the reset the four series are independent and start at 1 each', async () => {
+  const db = await createResetEstateWith0034();
+  try {
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    await db.exec(arm(await readReset()));
+
+    const observed: { type: string; permit: number; jsa: number }[] = [];
+    for (const type of [...TYPES, 'COLD_WORK'] as const) {
+      const jsa = await db.query<{ id: number; jsa_sequence: string | number }>(
+        'INSERT INTO jsas DEFAULT VALUES RETURNING id, jsa_sequence',
+      );
+      const permit = await db.query<{ id: number }>(
+        "INSERT INTO permits (jsa_id, permit_type, status) VALUES ($1, $2, 'DRAFT') RETURNING id",
+        [jsa.rows[0]!.id, type],
+      );
+      const submitted = await db.query<{ permit_sequence: number }>(
+        "UPDATE permits SET status = 'PENDING_CRO' WHERE id = $1 RETURNING permit_sequence",
+        [permit.rows[0]!.id],
+      );
+      observed.push({
+        type,
+        permit: Number(submitted.rows[0]!.permit_sequence),
+        jsa: Number(jsa.rows[0]!.jsa_sequence),
+      });
+    }
+    // WTG-1 / CW-1 / HW-1 / CS-1, then CW-2 - with the JSA counting
+    // globally straight through, 1..5.
+    assert.deepEqual(observed.map((entry) => entry.permit), [1, 1, 1, 1, 2]);
+    assert.deepEqual(observed.map((entry) => entry.jsa), [1, 2, 3, 4, 5]);
+  } finally {
+    await db.close();
+  }
+});
+
+test('the reset aborts if a permit-domain table is missing, before deleting anything', async () => {
+  const db = await createResetEstateWith0034();
+  try {
+    await createIssuedEstatePermit(db, 'COLD_WORK');
+    // The workflow tail has to go first - the point is the ABORT, not a
+    // foreign-key error.
+    await db.exec('ALTER TABLE permits DISABLE TRIGGER permits_assign_permit_sequence_trigger');
+    await db.exec('DROP TABLE permit_document_jobs');
+
+    await assert.rejects(
+      db.exec(arm(await readReset())),
+      /permit-domain table public\.permit_document_jobs does not exist/,
+    );
+    await db.exec('ROLLBACK').catch(() => {});
+    assert.equal(await countOf(db, 'permits'), 1, 'nothing was deleted');
+  } finally {
+    await db.close();
+  }
+});
+
+test('the reset leaves every protected table untouched with 0034 applied', async () => {
+  const db = await createResetEstateWith0034();
+  try {
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    await db.exec(arm(await readReset()));
+    for (const table of PROTECTED_TABLES) {
+      assert.equal(await countOf(db, table), 1, `${table} must survive`);
+    }
+  } finally {
+    await db.close();
+  }
 });

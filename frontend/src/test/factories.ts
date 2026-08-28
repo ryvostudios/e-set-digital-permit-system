@@ -135,8 +135,9 @@ export function siteManager(): CurrentUser {
 export function permitSummary(overrides: Partial<PermitSummary> = {}): PermitSummary {
   return {
     id: 'permit-1',
+    // A submitted WTG permit, numbered by the server on submission.
     permit_sequence: '1',
-    permitDisplayNumber: '000001',
+    permitDisplayNumber: 'WTG-1',
     jsa_id: 'jsa-1',
     status: 'DRAFT' as PermitStatus,
     version: 1,

@@ -15,6 +15,7 @@ import { generateIssuedPermitPdf, type IssuedPermitSnapshot } from './documents.
 import { JSA_FORM_VERSION_V2, PERMIT_FORM_VERSIONS_V2, parseJsaFormV2, parsePermitFormV2, type PermitFormV2 } from './formsV2.js';
 import type { PermitType } from './forms.js';
 import { makeSignatureSet } from './formFixtures.test.js';
+import { toPermitNumber } from './numbering.js';
 
 const answers = (section: ChecklistSection) => Object.fromEntries(section.items.map((item) => [item.id, { response: section.responses === 'YES_NO_NA' ? 'NA' : 'NO' }]));
 const sections = (items: readonly ChecklistSection[]) => Object.fromEntries(items.map((section) => [section.id, answers(section)]));
@@ -56,7 +57,9 @@ function jsaForm() {
 
 export function makeV2PdfTestSnapshot(type: PermitType): IssuedPermitSnapshot {
   return {
-    snapshotVersion: 'ISSUED_PERMIT_SNAPSHOT_V2', permitId: `permit-${type}`, permitNumber: '1045', jsaId: 'jsa-234', jsaNumber: '234', status: 'ISSUED', company: 'UNTRUSTED CLIENT COMPANY', companyOther: null,
+    // The snapshot stores the number as issuance formatted it - `CW-1045`,
+    // the same string every other surface shows.
+    snapshotVersion: 'ISSUED_PERMIT_SNAPSHOT_V2', permitId: `permit-${type}`, permitNumber: toPermitNumber(type, 1045n), jsaId: 'jsa-234', jsaNumber: '234', status: 'ISSUED', company: 'UNTRUSTED CLIENT COMPANY', companyOther: null,
     applicantIdentity: { kind: 'NORMAL', displayName: 'Frozen Applicant', companyCode: 'E_SET', companyName: 'Frozen E-SET Company' }, createdBy: 'applicant-uuid', submittedAt: '2026-01-01T08:00:00.000Z', issuedAt: '2026-01-01T09:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z', siteTimezone: 'UTC', previousPermitId: null, previousPermitNumber: null, jsaCreatedBy: 'applicant-uuid', jsaCreatedAt: '2026-01-01T07:00:00.000Z', issuanceEventId: 'event-1', issuanceEventType: 'HSE_APPROVED', issuanceActorUserId: 'hse-uuid', issuanceOccurredAt: '2026-01-01T09:00:00.000Z', snapshotTakenAt: '2026-01-01T09:00:01.000Z',
     permitType: type, permitFormVersion: PERMIT_FORM_VERSIONS_V2[type], permitForm: permitForm(type), jsaFormVersion: JSA_FORM_VERSION_V2, jsaForm: jsaForm(), signatures: makeSignatureSet({ applicant: { ...makeSignatureSet().applicant!, displayName: 'Frozen Applicant' } }),
   };

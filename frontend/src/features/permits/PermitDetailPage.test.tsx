@@ -35,14 +35,14 @@ function renderDetail(detail: ReturnType<typeof permitDetail>, user = normalEmpl
 describe('the record', () => {
   it('shows the permit number, its status, and the linked JSA number', async () => {
     renderDetail(permitDetail());
-    expect(await screen.findByRole('heading', { level: 1, name: /permit 000001/i })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: /permit WTG-1/i })).toBeInTheDocument();
     expect(screen.getAllByText(/draft/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/JSA 000001/)).toBeInTheDocument();
   });
 
   it('presents Permit, JSA, and History as three sections of one record', async () => {
     renderDetail(permitDetail());
-    await screen.findByRole('heading', { level: 1, name: /permit 000001/i });
+    await screen.findByRole('heading', { level: 1, name: /permit WTG-1/i });
     const tabs = screen.getByRole('tablist', { name: /permit record sections/i });
     expect(within(tabs).getByRole('tab', { name: /^permit$/i })).toBeInTheDocument();
     expect(within(tabs).getByRole('tab', { name: /job safety analysis/i })).toBeInTheDocument();
@@ -52,7 +52,7 @@ describe('the record', () => {
   it('says the JSA is incomplete rather than showing an empty form as if it were filled in', async () => {
     const user = userEvent.setup();
     renderDetail(permitDetail());
-    await screen.findByRole('heading', { level: 1, name: /permit 000001/i });
+    await screen.findByRole('heading', { level: 1, name: /permit WTG-1/i });
 
     await user.click(screen.getByRole('tab', { name: /job safety analysis/i }));
     expect(await screen.findByText(/has not been completed yet/i)).toBeInTheDocument();
@@ -95,7 +95,7 @@ describe('the applicant on a submitted permit', () => {
 
   it('is never an editable field, at any status', async () => {
     renderDetail(permitDetail({ permit: permit({ status: 'PENDING_CRO' }), availableActions: ['forward_hse'] }), croEmployee());
-    await screen.findByRole('heading', { level: 1, name: /permit 000001/i });
+    await screen.findByRole('heading', { level: 1, name: /permit WTG-1/i });
     expect(screen.queryByLabelText(/applicant/i)).not.toBeInTheDocument();
   });
 });
@@ -150,7 +150,7 @@ describe('available actions come from the server', () => {
 
   it('hides the edit control when the backend does not offer "update"', async () => {
     renderDetail(permitDetail({ availableActions: [] }));
-    await screen.findByRole('heading', { level: 1, name: /permit 000001/i });
+    await screen.findByRole('heading', { level: 1, name: /permit WTG-1/i });
     expect(screen.queryByRole('button', { name: /edit permit and jsa/i })).not.toBeInTheDocument();
   });
 
@@ -245,7 +245,7 @@ describe('performing an action', () => {
 describe('the permit document', () => {
   it('is not offered before the permit has been issued', async () => {
     renderDetail(permitDetail());
-    await screen.findByRole('heading', { level: 1, name: /permit 000001/i });
+    await screen.findByRole('heading', { level: 1, name: /permit WTG-1/i });
     expect(screen.queryByRole('button', { name: /download permit document/i })).not.toBeInTheDocument();
   });
 

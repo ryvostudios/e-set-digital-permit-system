@@ -75,7 +75,20 @@ export type AvailableAction =
 /** The list/summary projection - identical to the detail row minus `form_payload`. */
 export interface PermitSummary {
   id: string;
-  permit_sequence: string;
+  /**
+   * The authoritative permit number within its type's series - NULL while
+   * the permit is a DRAFT. The database issues it on the first successful
+   * submission and it is permanent thereafter.
+   */
+  permit_sequence: string | null;
+  /**
+   * That number as people read it: `HW-12`, or `Not assigned` while the
+   * permit is still a draft.
+   *
+   * FORMATTED BY THE SERVER, in one place, so a permit cannot be called
+   * one thing on a list and another on its own document. Never build this
+   * in the browser.
+   */
   permitDisplayNumber: string;
   jsa_id: string;
   status: PermitStatus;

@@ -48,7 +48,64 @@ export const PERMIT_TYPE_LABELS = {
  * identifier, never stored, and never the authoritative Permit No. A
  * pre-form permit has no type to name, so it reads "Permit 1" as before.
  */
-export function toPermitLabel(permitType: PermitType | null, sequenceValue: bigint): string {
-  const number = toDisplayNumber(sequenceValue);
+export function toPermitLabel(
+  permitType: PermitType | null,
+  sequenceValue: bigint | number | string | null | undefined,
+): string {
+  const number = toPermitNumber(permitType, sequenceValue);
   return permitType ? `${PERMIT_TYPE_LABELS[permitType]} ${number}` : `Permit ${number}`;
+}
+
+// =====================================================================
+// THE AUTHORITATIVE PERMIT NUMBER, AS PEOPLE READ IT
+// =====================================================================
+
+/**
+ * The printed prefix for each permit type.
+ *
+ * DERIVED, NEVER STORED. The database keeps the type and a number -
+ * `HOT_WORK` and `12` - and the prefix is produced from the type here.
+ * Storing "HW" beside `HOT_WORK` would be the same fact twice, and two
+ * copies of a fact are two things that can disagree.
+ */
+export const PERMIT_NUMBER_PREFIXES = {
+  WTG_WORK: 'WTG',
+  COLD_WORK: 'CW',
+  HOT_WORK: 'HW',
+  CONFINED_SPACE_ENTRY: 'CS',
+} as const;
+
+/**
+ * What a permit with no number yet is called.
+ *
+ * A DRAFT has not entered the register, so it has nothing to be called.
+ * It is not `0`, not `-`, and above all not the number it would get if
+ * it were submitted right now - someone else may submit first.
+ */
+export const UNASSIGNED_PERMIT_NUMBER = 'Not assigned';
+
+/**
+ * THE ONE PLACE A PERMIT NUMBER BECOMES TEXT: `HW-12`, or
+ * `Not assigned` while it is still a draft.
+ *
+ * Every surface reads this - the register, the queues, the record,
+ * notifications, the issued PDF, the download filename - because a
+ * permit that is called one thing on screen and another on its document
+ * is not one permit.
+ */
+export function toPermitNumber(
+  permitType: PermitType | null | undefined,
+  sequenceValue: bigint | number | string | null | undefined,
+): string {
+  if (sequenceValue === null || sequenceValue === undefined) return UNASSIGNED_PERMIT_NUMBER;
+  const number = toDisplayNumber(BigInt(sequenceValue));
+  const prefix = permitType ? PERMIT_NUMBER_PREFIXES[permitType] : undefined;
+  // A pre-form permit has no type and therefore no prefix; its number is
+  // still its number.
+  return prefix ? `${prefix}-${number}` : number;
+}
+
+/** Whether a permit has been entered in the register yet. */
+export function hasPermitNumber(sequenceValue: bigint | number | string | null | undefined): boolean {
+  return sequenceValue !== null && sequenceValue !== undefined;
 }

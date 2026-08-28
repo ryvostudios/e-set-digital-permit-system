@@ -68,7 +68,13 @@ export interface PermitRow {
   // column DEFAULT) - a bigint, returned by pg as a string. The
   // human-visible display format is not confirmed yet; see
   // domain/permits/numbering.ts::toDisplayNumber.
-  permit_sequence: string;
+  /**
+   * The authoritative permit number within its type's series - NULL
+   * while the permit is a DRAFT. The database issues it on the first
+   * successful submission (migration 0034) and freezes it thereafter.
+   * A bigint comes back as text, hence `string`.
+   */
+  permit_sequence: string | null;
   jsa_id: string;
   status: PermitStatus;
   version: number;

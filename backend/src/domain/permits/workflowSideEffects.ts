@@ -8,7 +8,7 @@ import {
   getIssuedSnapshotForPermit,
   type IssuanceEventMetadata,
 } from './documents.js';
-import { toDisplayNumber, toPermitLabel } from './numbering.js';
+import { toDisplayNumber, toPermitLabel, toPermitNumber } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
 import { buildSnapshotSignatureSet, getPermitSignatures, type SnapshotSignatureSet } from './signatures.js';
 
@@ -29,8 +29,15 @@ import { buildSnapshotSignatureSet, getPermitSignatures, type SnapshotSignatureS
  * parameterized one.
  */
 
+/**
+ * The permit's authoritative number, as the outbox payload carries it.
+ * A permit only reaches these side effects once it has been submitted,
+ * so it always has one - the formatter still handles the absence rather
+ * than asserting, because a thrown error here would roll back a
+ * legitimate workflow transition.
+ */
 function permitNumberOf(permit: PermitRow): string {
-  return toDisplayNumber(BigInt(permit.permit_sequence));
+  return toPermitNumber(permit.permit_type, permit.permit_sequence);
 }
 
 /**
@@ -45,7 +52,7 @@ function permitNumberOf(permit: PermitRow): string {
  * number, unprefixed.
  */
 function permitLabelOf(permit: PermitRow): string {
-  return toPermitLabel(permit.permit_type, BigInt(permit.permit_sequence));
+  return toPermitLabel(permit.permit_type, permit.permit_sequence);
 }
 
 function jsaNumberOf(jsa: JsaRow): string {
