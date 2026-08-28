@@ -64,12 +64,17 @@
 -- WhatsApp outbox rows, issued document snapshots, their integrity rows,
 -- and document jobs. Every one is permit-workflow data.
 --
--- NOT TOUCHED, and asserted afterwards: accounts (`auth.users`,
--- `app_users`, `app_user_access`), workforce profiles, companies, teams,
--- positions, team_positions, capabilities, capability grants, user team
--- positions, account audit, privileged access events, the CEO bootstrap
--- row, and `schema_migrations`. No schema object is created, altered or
--- dropped; no capability, policy or grant is changed.
+-- NOT TOUCHED, and asserted afterwards: every table in the PROTECTED SET
+-- declared in section 2 - account access, workforce profiles, companies,
+-- teams, positions, team positions, capabilities and their grants,
+-- privileged identities, the CEO bootstrap row, account audit, privileged
+-- access events, and `schema_migrations`. That set is declared ONCE and
+-- used for both the before and after counts, so the two can never drift
+-- apart. No schema object is created, altered or dropped; no capability,
+-- policy or grant is changed.
+--
+-- Supabase's own `auth.users` is in another schema and is never
+-- referenced here at all.
 --
 -- STORAGE IS NOT COVERED, AND THIS SCRIPT DOES NOT PRETEND OTHERWISE.
 -- The generated PDFs live in the private `issued-permit-documents`
@@ -127,20 +132,54 @@ $$;
 -- The surviving counts are captured now and asserted unchanged at the
 -- end, so "accounts and workforce are untouched" is proven rather than
 -- promised.
-CREATE TEMP TABLE uat_reset_protected_before ON COMMIT DROP AS
-SELECT 'app_users' AS table_name, count(*) AS rows FROM app_users
-UNION ALL SELECT 'app_user_access', count(*) FROM app_user_access
-UNION ALL SELECT 'workforce_profiles', count(*) FROM workforce_profiles
-UNION ALL SELECT 'companies', count(*) FROM companies
-UNION ALL SELECT 'teams', count(*) FROM teams
-UNION ALL SELECT 'positions', count(*) FROM positions
-UNION ALL SELECT 'team_positions', count(*) FROM team_positions
-UNION ALL SELECT 'capabilities', count(*) FROM capabilities
-UNION ALL SELECT 'team_position_capabilities', count(*) FROM team_position_capabilities
-UNION ALL SELECT 'user_team_positions', count(*) FROM user_team_positions
-UNION ALL SELECT 'account_audit_events', count(*) FROM account_audit_events
-UNION ALL SELECT 'privileged_access_events', count(*) FROM privileged_access_events
-UNION ALL SELECT 'schema_migrations', count(*) FROM schema_migrations;
+--
+-- THE SET IS DECLARED ONCE, HERE, and read again by the verification in
+-- section 7. An earlier version of this script wrote the list out twice
+-- and included `app_users`, which does not exist in this schema - the run
+-- aborted on it before any destructive statement, which is the behaviour
+-- one wants, but the list should not have been able to drift or to name a
+-- table nobody had checked. Both problems are structural, and both are
+-- fixed by having exactly one list and verifying every name in it really
+-- exists before anything is deleted.
+CREATE TEMP TABLE uat_reset_protected_tables (table_name TEXT PRIMARY KEY) ON COMMIT DROP;
+INSERT INTO uat_reset_protected_tables (table_name) VALUES
+  ('account_audit_events'),
+  ('app_user_access'),
+  ('capabilities'),
+  ('companies'),
+  ('initial_ceo_bootstrap'),
+  ('positions'),
+  ('privileged_access_events'),
+  ('privileged_identities'),
+  ('schema_migrations'),
+  ('team_position_capabilities'),
+  ('team_positions'),
+  ('teams'),
+  ('user_capability_grants'),
+  ('user_team_positions'),
+  ('workforce_profiles');
+
+CREATE TEMP TABLE uat_reset_protected_before (table_name TEXT PRIMARY KEY, rows BIGINT NOT NULL) ON COMMIT DROP;
+
+DO $$
+DECLARE
+  protected TEXT;
+  observed BIGINT;
+BEGIN
+  FOR protected IN SELECT table_name FROM uat_reset_protected_tables ORDER BY table_name LOOP
+    -- A protected table that is not there is a schema mismatch, not
+    -- something to skip: stop now, before anything is deleted.
+    IF to_regclass('public.' || quote_ident(protected)) IS NULL THEN
+      RAISE EXCEPTION
+        'UAT reset aborted: protected table public.% does not exist. The protected set in this script does not match this database - check it before running anything destructive.', protected;
+    END IF;
+    EXECUTE format('SELECT count(*) FROM public.%I', protected) INTO observed;
+    INSERT INTO uat_reset_protected_before (table_name, rows) VALUES (protected, observed);
+  END LOOP;
+  RAISE NOTICE 'Protected set verified: % table(s) present and counted.',
+    (SELECT count(*) FROM uat_reset_protected_before);
+END;
+$$;
 
 DO $$
 DECLARE
@@ -268,7 +307,9 @@ DO $$
 DECLARE
   leftover BIGINT;
   still_disabled TEXT;
-  changed TEXT;
+  protected TEXT;
+  observed BIGINT;
+  expected BIGINT;
 BEGIN
   -- (a) The register is empty and nothing was orphaned behind it.
   SELECT (SELECT count(*) FROM permits)
@@ -320,31 +361,26 @@ BEGIN
     END IF;
   END IF;
 
-  -- (e) Nothing outside the permit register moved.
-  SELECT string_agg(format('%s (%s -> %s)', b.table_name, b.rows, a.rows), ', ' ORDER BY b.table_name)
-    INTO changed
-    FROM uat_reset_protected_before b
-    JOIN (
-      SELECT 'app_users' AS table_name, count(*) AS rows FROM app_users
-      UNION ALL SELECT 'app_user_access', count(*) FROM app_user_access
-      UNION ALL SELECT 'workforce_profiles', count(*) FROM workforce_profiles
-      UNION ALL SELECT 'companies', count(*) FROM companies
-      UNION ALL SELECT 'teams', count(*) FROM teams
-      UNION ALL SELECT 'positions', count(*) FROM positions
-      UNION ALL SELECT 'team_positions', count(*) FROM team_positions
-      UNION ALL SELECT 'capabilities', count(*) FROM capabilities
-      UNION ALL SELECT 'team_position_capabilities', count(*) FROM team_position_capabilities
-      UNION ALL SELECT 'user_team_positions', count(*) FROM user_team_positions
-      UNION ALL SELECT 'account_audit_events', count(*) FROM account_audit_events
-      UNION ALL SELECT 'privileged_access_events', count(*) FROM privileged_access_events
-      UNION ALL SELECT 'schema_migrations', count(*) FROM schema_migrations
-    ) a ON a.table_name = b.table_name
-   WHERE a.rows <> b.rows;
-  IF changed IS NOT NULL THEN
-    RAISE EXCEPTION 'UAT reset refused to commit: protected table(s) changed: %', changed;
+  -- (e) Nothing outside the permit register moved. Re-counted from the
+  -- SAME declared set as section 2, so the before and after lists cannot
+  -- disagree about which tables are protected.
+  FOR protected IN SELECT table_name FROM uat_reset_protected_tables ORDER BY table_name LOOP
+    EXECUTE format('SELECT count(*) FROM public.%I', protected) INTO observed;
+    SELECT rows INTO expected FROM uat_reset_protected_before WHERE table_name = protected;
+    IF expected IS NULL THEN
+      RAISE EXCEPTION 'UAT reset refused to commit: no before-count was taken for protected table %', protected;
+    END IF;
+    IF observed <> expected THEN
+      RAISE EXCEPTION 'UAT reset refused to commit: protected table % changed (% -> %)', protected, expected, observed;
+    END IF;
+  END LOOP;
+
+  IF (SELECT count(*) FROM uat_reset_protected_before) <> (SELECT count(*) FROM uat_reset_protected_tables) THEN
+    RAISE EXCEPTION 'UAT reset refused to commit: the protected set was not fully counted before the deletes';
   END IF;
 
-  RAISE NOTICE 'UAT reset verified: register empty, seven append-only guards enabled, protected tables unchanged.';
+  RAISE NOTICE 'UAT reset verified: register empty, seven append-only guards enabled, % protected table(s) unchanged.',
+    (SELECT count(*) FROM uat_reset_protected_tables);
 END;
 $$;
 

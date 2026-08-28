@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 
@@ -343,12 +343,29 @@ const APPEND_ONLY_GUARDS: readonly (readonly [string, string])[] = [
   ['permit_lifecycle_events', 'permit_lifecycle_events_append_only'],
 ];
 
-/** Tables the reset must never touch, with a row each so "unchanged" is observable. */
+/**
+ * Tables the reset must never touch, with a row each so "unchanged" is
+ * observable.
+ *
+ * This is the REAL set in this schema. An earlier version of the script
+ * also listed `app_users`, which exists only in some test fixtures and
+ * has never been a table in any migration - the live run aborted on it
+ * before deleting anything. `the protected set names only tables that
+ * really exist` below is the spec that catches that class of mistake.
+ */
 const PROTECTED_TABLES = [
-  'app_users', 'app_user_access', 'workforce_profiles', 'companies', 'teams', 'positions',
-  'team_positions', 'capabilities', 'team_position_capabilities', 'user_team_positions',
-  'account_audit_events', 'privileged_access_events', 'schema_migrations',
+  'account_audit_events', 'app_user_access', 'capabilities', 'companies', 'initial_ceo_bootstrap',
+  'positions', 'privileged_access_events', 'privileged_identities', 'schema_migrations',
+  'team_position_capabilities', 'team_positions', 'teams', 'user_capability_grants',
+  'user_team_positions', 'workforce_profiles',
 ];
+
+/** The protected set the script itself declares, read straight out of its SQL. */
+function declaredProtectedTables(sql: string): string[] {
+  const block = /INSERT INTO uat_reset_protected_tables \(table_name\) VALUES([\s\S]*?);/.exec(sql);
+  assert.ok(block, 'the reset must declare its protected set in one place');
+  return [...block[1]!.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]!);
+}
 
 /**
  * The estate the reset actually runs against: the permit workflow tables
@@ -634,6 +651,80 @@ test('the reset works BEFORE migration 0033, and 0033 then seeds all four types 
     assert.equal(counters.rows.length, 4);
     assert.ok(counters.rows.every((row) => Number(row.next_value) === 1));
     assert.deepEqual(await createPermit(db, 'COLD_WORK'), { permit: 1, jsa: 1 });
+  } finally {
+    await db.close();
+  }
+});
+
+test('the protected set names only tables that really exist after every migration', async () => {
+  const sql = await readReset();
+  const declared = declaredProtectedTables(sql);
+
+  // Every migration's DDL, plus the ledger table the runner itself creates.
+  const migrationsDir = new URL('../../../database/migrations/', import.meta.url);
+  const files = (await readdir(migrationsDir)).filter((file) => file.endsWith('.sql')).sort();
+  let ddl = '';
+  for (const file of files) ddl += await readFile(new URL(file, migrationsDir), 'utf8');
+  ddl += await readFile(new URL('../db/migrate.ts', import.meta.url), 'utf8');
+
+  for (const table of declared) {
+    const created = new RegExp(`CREATE TABLE (IF NOT EXISTS )?(public\\.)?${table}\\b`).test(ddl);
+    assert.ok(created, `protected table "${table}" is never created by any migration`);
+  }
+
+  // The specific name that took the live run down.
+  assert.ok(!declared.includes('app_users'), 'app_users is not a table in this schema');
+  // And the declared set is exactly the real one.
+  assert.deepEqual([...declared].sort(), [...PROTECTED_TABLES].sort());
+});
+
+test('the protected set is declared once and reused, so before and after cannot drift', async () => {
+  const sql = await readReset();
+  // Exactly one declaration...
+  assert.equal((sql.match(/INSERT INTO uat_reset_protected_tables/g) ?? []).length, 1);
+  // ...read by BOTH the before-snapshot and the after-verification.
+  assert.equal((sql.match(/FROM uat_reset_protected_tables/g) ?? []).length >= 2, true);
+  // No hand-written second list survives.
+  assert.ok(!/UNION ALL SELECT '[a-z_]+', count\(\*\)/.test(sql), 'the duplicated count list must be gone');
+});
+
+test('the reset aborts before deleting anything if a protected table is missing', async () => {
+  const db = await createResetEstate(true);
+  try {
+    await createIssuedEstatePermit(db, 'COLD_WORK');
+    // A protected table named in the script but absent from the database -
+    // exactly the live failure, which must stay non-destructive.
+    await db.exec('DROP TABLE privileged_identities');
+
+    await assert.rejects(db.exec(arm(await readReset())), /protected table public\.privileged_identities does not exist/);
+    await db.exec('ROLLBACK').catch(() => {});
+
+    // Nothing was deleted, and the append-only guards were never touched.
+    assert.equal(await countOf(db, 'permits'), 1);
+    assert.equal(await countOf(db, 'permit_lifecycle_events'), 1);
+    assert.equal(await countOf(db, 'permit_document_jobs'), 1);
+    for (const [, trigger] of APPEND_ONLY_GUARDS) {
+      assert.equal((await triggerStates(db)).get(trigger), 'O', `${trigger} must still be enabled`);
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test('the identity, capability-grant and bootstrap tables are protected too', async () => {
+  const db = await createResetEstate(true);
+  try {
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    await db.exec(arm(await readReset()));
+
+    // The three that the first version of the protected set left out.
+    for (const table of ['user_capability_grants', 'privileged_identities', 'initial_ceo_bootstrap']) {
+      assert.equal(await countOf(db, table), 1, `${table} must survive the reset`);
+    }
+    // ...and the rest of the set with them.
+    for (const table of PROTECTED_TABLES) {
+      assert.equal(await countOf(db, table), 1, `${table} must survive the reset`);
+    }
   } finally {
     await db.close();
   }
