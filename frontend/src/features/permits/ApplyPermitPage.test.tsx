@@ -85,10 +85,40 @@ describe('the applicant line', () => {
     expect(screen.queryByText(/Sara Ahmed.*Site Manager/)).not.toBeInTheDocument();
   });
 
-  it('says explicitly that the system records it', () => {
+  /*
+    IT DOES NOT EXPLAIN ITSELF.
+
+    The page used to print "The system records this identity when the
+    permit is submitted. It cannot be changed here." beside the
+    applicant's own name. That is an implementation detail: a person
+    reading their name under the heading "Applicant" does not need to be
+    told which part of the software put it there, and there is no control
+    to type over it anyway.
+
+    The GUARANTEE is unchanged and is asserted right below this: the
+    identity is never sent, and the server derives it. Removing the
+    sentence removed wording, not authority.
+  */
+  it('does not annotate the identity as system-set', () => {
     stubFetch({});
     renderAs(<ApplyPermitPage />, normalEmployee());
-    expect(screen.getByText(/cannot be changed here/i)).toBeInTheDocument();
+
+    // The identity itself is still shown.
+    expect(screen.getByText('Mr. Ali Khan')).toBeInTheDocument();
+    // ...with none of the explanatory wording around it.
+    expect(screen.queryByText(/cannot be changed here/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/set by the system/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/records this identity/i)).not.toBeInTheDocument();
+  });
+
+  it('offers no way to type an identity - there is no control at all', () => {
+    stubFetch({});
+    const { container } = renderAs(<ApplyPermitPage />, normalEmployee());
+    // The only inputs on the page are the permit-type radios.
+    const typeable = [...container.querySelectorAll('input, textarea, select')].filter(
+      (element) => (element as HTMLInputElement).type !== 'radio',
+    );
+    expect(typeable).toHaveLength(0);
   });
 
   it('never appears in the request body - the server derives it', async () => {

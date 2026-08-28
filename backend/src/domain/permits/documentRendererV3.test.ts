@@ -795,3 +795,28 @@ test('the issued PDF prints the prefixed permit number, not a bare one', async (
     assert.ok(!text.includes('JSA-234'), `${type}: the JSA number must not be prefixed`);
   }
 });
+
+/*
+  THE DOCUMENT SAYS WHO, NOT HOW.
+
+  The screens used to annotate the applicant's own name with "(set by
+  the system)" while a permit was being filled in. The printed document
+  never carried that wording and must never acquire it: the identity band
+  is a record of who applied, and how the software arrived at the value
+  is not part of the record.
+
+  The values themselves are asserted elsewhere in this file; this guards
+  only against explanatory wording creeping in beside them.
+*/
+test('no renderer explains that the identity band is system-derived', async () => {
+  const wording = /set by (the )?system|system[- ]set|automatically set|set automatically|auto-?filled|cannot be changed/i;
+  for (const type of TYPES) {
+    for (const renderer of ['PDFKIT_V1', 'PDFKIT_V2', 'PDFKIT_V3'] as const) {
+      const text = extractPdfText(await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), renderer));
+      assert.ok(!wording.test(text), `${type}/${renderer} must not explain the identity band`);
+      // ...while still printing the identity it is a band FOR.
+      assert.ok(text.includes('Frozen Applicant'), `${type}/${renderer} must still name the applicant`);
+      assert.ok(text.includes(toPermitNumber(type, 1045n)), `${type}/${renderer} must still print the permit number`);
+    }
+  }
+});

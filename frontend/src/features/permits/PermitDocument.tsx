@@ -286,15 +286,17 @@ export function PermitDocument({
         ) : null}
       </DocumentSection>
 
-      <DocumentSection number="2" title="Applicant" note="Recorded by the system at submission">
+      {/*
+        No empty state of its own: `DocumentField` already renders an
+        unrecorded value as "Not recorded" in the muted style, so a
+        sentence underneath would only say the same thing again - and the
+        version that used to be here explained WHERE the value comes from,
+        which is not something a reader of the record needs to know.
+      */}
+      <DocumentSection number="2" title="Applicant">
         <FieldGrid>
           <DocumentField label="Applicant" value={applicant ?? ''} strong full />
         </FieldGrid>
-        {!applicant ? (
-          <p className="muted text-sm">
-            The applicant identity is recorded by the system when the permit is submitted.
-          </p>
-        ) : null}
       </DocumentSection>
 
       {permit.form_payload && permit.permit_type === 'WTG_WORK' ? (

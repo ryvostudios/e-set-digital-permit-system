@@ -75,9 +75,6 @@ export function ApplyPermitPage() {
           <FieldGrid>
             <DocumentField label="Recorded applicant" value={describeApplicantIdentity(user)} strong full />
           </FieldGrid>
-          <p className="muted text-sm" style={{ marginTop: 'var(--space-3)' }}>
-            The system records this identity when the permit is submitted. It cannot be changed here.
-          </p>
         </Card>
 
         <Card title="Permit type">

@@ -233,7 +233,16 @@ export function DocField({
   type = 'text',
   multiline = false,
   full = false,
-  /** Server-authoritative values are DISPLAYED but never editable. */
+  /**
+   * Server-authoritative values are DISPLAYED but never editable - the
+   * permit number, the JSA number, and the applicant's own identity.
+   *
+   * It is not annotated as such on screen. A person reading their own
+   * name beside the word "Applicant" does not need to be told which part
+   * of the software put it there, and the absence of a control already
+   * says it cannot be typed over. What the flag does is the part that
+   * matters, and it is unchanged: it removes the input entirely.
+   */
   authoritative = false,
   hideLabel = false,
 }: {
@@ -277,9 +286,6 @@ export function DocField({
       ) : (
         <span className={value ? 'doc__field-value' : 'doc__field-value doc__field-value--empty'}>
           {value || '—'}
-          {authoritative && mode === 'edit' ? (
-            <span className="doc__field-note"> (set by the system)</span>
-          ) : null}
         </span>
       )}
     </div>
