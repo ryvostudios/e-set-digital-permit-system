@@ -4,6 +4,7 @@ import { listNotifications, markNotificationRead } from '../../api/endpoints';
 import { asApiError } from '../../api/errors';
 import type { AppNotification, NotificationListResponse } from '../../api/types';
 import { ROUTES } from '../../app/routes';
+import { invalidateAll } from '../../lib/cache';
 import { formatRelative } from '../../lib/format';
 import { useApiResource } from '../../lib/useApiResource';
 import { Button } from '../../ui/Button';
@@ -93,7 +94,22 @@ export function NotificationsPage() {
     setError(null);
     try {
       await markNotificationRead(id);
-      resource.reload();
+      /*
+        NOT `resource.reload()`. THE UNREAD COUNT IS NOT ON THIS SCREEN.
+        The badges in the header and the sidebar are drawn by AppShell
+        from its OWN `unread` request, so reloading only this list left
+        the list correct and both badges frozen at the count they had
+        when the frame mounted - "no unread notifications" under a badge
+        still reading 2.
+
+        `invalidateAll` is the existing signal for exactly this: it tells
+        every mounted resource to re-read, which is this list AND the
+        count, from the same server the count came from. Nothing is
+        adjusted locally, so the badge can never drift from what the
+        backend would say. It does not bump the identity generation -
+        the account has not changed, only one row's `read_at`.
+      */
+      invalidateAll();
     } catch (caught) {
       setError(asApiError(caught).message);
     } finally {
