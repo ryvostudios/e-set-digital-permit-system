@@ -4260,3 +4260,132 @@ test('an N/A answer alone is enough to submit, because choosing it is a judgemen
   const stored = result.permit.form_payload as unknown as { sections: Record<string, Record<string, { response: unknown }>> };
   assert.equal(stored.sections[sectionId]![itemId]!.response, 'NA', 'NA must survive exactly');
 });
+
+// ---------------------------------------------------------------------
+// The HSE priority window: the parts the matrix asked for that were not
+// already pinned
+// ---------------------------------------------------------------------
+
+/**
+ * THE WINDOW IS A PRIORITY, NOT A DEADLINE FOR HSE.
+ *
+ * When it expires nothing happens to the permit: it stays PENDING_HSE
+ * until somebody acts. HSE keeps its ordinary approval, and an authorized
+ * CRO merely becomes eligible as well. The first successful approval
+ * wins, and the loser is refused because the permit has moved on - not
+ * because a clock said so.
+ */
+
+test('expiry issues nothing by itself - the permit simply waits', async () => {
+  const db = new FakeDb();
+  const permit = await createPendingHsePermit(db);
+  db.advanceTime(FIVE_MINUTES_MS * 4);
+
+  // Nobody has acted. The permit is exactly where it was.
+  const stored = db.permits.get(permit.id)!;
+  assert.equal(stored.status, 'PENDING_HSE');
+  assert.equal(stored.issued_at, null);
+  assert.equal(stored.version, permit.version, 'no version was consumed by time passing');
+  // And no issuance side effect happened.
+  assert.equal(db.documentSnapshots.length, 0, 'no snapshot may be created by expiry');
+  assert.equal(db.documentJobs.length, 0, 'and no document job either');
+});
+
+test('HSE may still approve long after the window expired, while nobody has won', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  const permit = await createPendingHsePermit(db);
+  db.advanceTime(FIVE_MINUTES_MS + 60_000); // 10:06
+
+  const result = await hseApprove('hse-1', permit.id, { expectedVersion: permit.version }, db.deps());
+
+  assert.equal(result.outcome, 'ok', 'the window never removes HSE authority');
+  if (result.outcome !== 'ok') return;
+  assert.equal(result.permit.status, 'ISSUED');
+  // And it is recorded as an ordinary HSE approval, not a fallback.
+  const events = db.queries.filter((q) => q.sql.startsWith('INSERT INTO permit_lifecycle_events'));
+  assert.equal(events.at(-1)?.params?.[1], 'HSE_APPROVED');
+});
+
+test('exactly one issuance snapshot exists, whichever path won', async () => {
+  for (const winner of ['HSE', 'CRO'] as const) {
+    const db = new FakeDb();
+    db.grantCapability('cro-a', 'permit.cro_review');
+    const permit = await createPendingHsePermit(db);
+    db.advanceTime(FIVE_MINUTES_MS);
+
+    const issued =
+      winner === 'HSE'
+        ? await hseApprove('hse-1', permit.id, { expectedVersion: permit.version }, db.deps())
+        : await croFallbackApprove('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
+    assert.equal(issued.outcome, 'ok', `${winner} must win`);
+
+    // One permit, one immutable snapshot - the same issuance path for both.
+    assert.equal(db.documentSnapshots.length, 1, `${winner}: exactly one snapshot`);
+    assert.equal(db.documentSnapshots[0]!.permit_id, permit.id);
+    assert.equal(db.documentJobs.length, 1, `${winner}: exactly one document job`);
+
+    // The loser's attempt afterwards creates no second one.
+    const loser =
+      winner === 'HSE'
+        ? await croFallbackApprove('cro-1', permit.id, { expectedVersion: permit.version }, db.deps())
+        : await hseApprove('hse-1', permit.id, { expectedVersion: permit.version }, db.deps());
+    assert.notEqual(loser.outcome, 'ok', `${winner}: the loser must be refused`);
+    assert.equal(db.documentSnapshots.length, 1, `${winner}: still exactly one snapshot`);
+    assert.equal(db.documentJobs.length, 1, `${winner}: still exactly one document job`);
+  }
+});
+
+test('the winning path is distinguishable in the lifecycle record', async () => {
+  // HSE wins.
+  const hseDb = new FakeDb();
+  hseDb.grantCapability('cro-a', 'permit.cro_review');
+  const hsePermit = await createPendingHsePermit(hseDb);
+  await hseApprove('hse-1', hsePermit.id, { expectedVersion: hsePermit.version }, hseDb.deps());
+  const hseEvents = hseDb.queries.filter((q) => q.sql.startsWith('INSERT INTO permit_lifecycle_events'));
+  assert.equal(hseEvents.at(-1)?.params?.[1], 'HSE_APPROVED');
+  assert.equal(hseEvents.at(-1)?.params?.[2], 'hse-1', 'the actual actor is recorded');
+
+  // CRO fallback wins.
+  const croDb = new FakeDb();
+  croDb.grantCapability('cro-a', 'permit.cro_review');
+  const croPermit = await createPendingHsePermit(croDb);
+  croDb.advanceTime(FIVE_MINUTES_MS);
+  await croFallbackApprove('cro-9', croPermit.id, { expectedVersion: croPermit.version }, croDb.deps());
+  const croEvents = croDb.queries.filter((q) => q.sql.startsWith('INSERT INTO permit_lifecycle_events'));
+  assert.equal(croEvents.at(-1)?.params?.[1], 'CRO_FALLBACK_APPROVED', 'a fallback is not an HSE approval');
+  assert.equal(croEvents.at(-1)?.params?.[2], 'cro-9', 'the CRO who actually pressed it');
+});
+
+test('any authorized CRO may fall back - not only the one who forwarded', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  // `createPendingHsePermit` forwards as cro-1; a different CRO acts here.
+  const permit = await createPendingHsePermit(db);
+  db.advanceTime(FIVE_MINUTES_MS);
+
+  const result = await croFallbackApprove('a-different-cro', permit.id, { expectedVersion: permit.version }, db.deps());
+
+  assert.equal(result.outcome, 'ok');
+  const events = db.queries.filter((q) => q.sql.startsWith('INSERT INTO permit_lifecycle_events'));
+  assert.equal(events.at(-1)?.params?.[2], 'a-different-cro');
+});
+
+test('a stale replay of the losing approval cannot issue a second time', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  const permit = await createPendingHsePermit(db);
+  db.advanceTime(FIVE_MINUTES_MS);
+
+  const won = await croFallbackApprove('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
+  assert.equal(won.outcome, 'ok');
+
+  // The same request replayed - the version it carries is now stale AND
+  // the permit is no longer PENDING_HSE. Either alone is enough.
+  for (let replay = 0; replay < 3; replay += 1) {
+    const again = await croFallbackApprove('cro-1', permit.id, { expectedVersion: permit.version }, db.deps());
+    assert.notEqual(again.outcome, 'ok', 'a replay must never issue again');
+  }
+  assert.equal(db.documentSnapshots.length, 1, 'still exactly one issuance');
+  assert.equal(db.documentJobs.length, 1, 'and one document job');
+});

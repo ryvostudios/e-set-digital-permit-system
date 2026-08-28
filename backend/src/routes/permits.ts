@@ -396,6 +396,22 @@ permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Respons
     validity,
     availableActions,
     history,
+    /*
+      THE SERVER'S OWN CLOCK, so a countdown can be drawn without trusting
+      the device's.
+
+      `hse_review_deadline_at` is authoritative and set by the database,
+      but a browser rendering "time remaining" would otherwise subtract it
+      from `Date.now()` - and a device whose clock is wrong by ten minutes
+      would show a window that has expired when it has not, or the
+      reverse. Pairing the deadline with the instant the server read it
+      lets the screen measure elapsed time locally and stay correct
+      whatever the device thinks the wall-clock time is.
+
+      Presentation only. It decides nothing: every action is authorized
+      against the database's own `now()` when it is attempted.
+    */
+    serverTime: new Date().toISOString(),
     // The frozen signature identities, never re-resolved from a live
     // profile - the same values the immutable snapshot and PDF carry.
     signatures,

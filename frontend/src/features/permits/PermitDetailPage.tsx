@@ -14,6 +14,7 @@ import { JsaDocument } from './JsaDocument';
 import { PermitActions } from './PermitActions';
 import { PermitDocument } from './PermitDocument';
 import { PermitHistory } from './PermitHistory';
+import { HseReviewWindow } from './HseReviewWindow';
 import { PermitPdfButton } from './PermitPdfButton';
 import { emptyJsaForm, emptyPermitForm, pruneEmptyStrings } from './forms/defaults';
 import { JsaFormFields } from './forms/JsaFormFields';
@@ -143,7 +144,7 @@ export function PermitDetailPage() {
   if (resource.error) return <ErrorState error={resource.error} onRetry={resource.reload} />;
   if (!detail) return <ErrorState error={{ code: 'not_found' }} />;
 
-  const { permit, jsa, validity, availableActions, history, signatures, document } = detail;
+  const { permit, jsa, validity, availableActions, history, signatures, document, serverTime } = detail;
   const canEdit = availableActions.includes('update');
 
   /**
@@ -213,6 +214,27 @@ export function PermitDetailPage() {
           ) : null
         }
       />
+
+      {/*
+        THE HSE APPROVAL PRIORITY WINDOW, shown to whoever is looking -
+        CRO and HSE see the same clock, because the question "whose turn
+        is it?" has one answer.
+
+        Rendered only while the permit is actually PENDING_HSE, so the
+        moment it is issued (by either path) the countdown and every
+        control tied to it disappear with it. When the window runs out the
+        record is re-read, so the fallback action appears on the SERVER's
+        terms rather than because a timer in the browser reached zero.
+      */}
+      {permit.status === 'PENDING_HSE' && permit.hse_review_deadline_at ? (
+        <div style={{ marginBottom: 'var(--space-4)' }}>
+          <HseReviewWindow
+            deadlineAt={permit.hse_review_deadline_at}
+            serverTime={serverTime}
+            onExpired={resource.reload}
+          />
+        </div>
+      ) : null}
 
       {permit.status === 'PENDING_CORRECTION' ? (
         <div style={{ marginBottom: 'var(--space-4)' }}>

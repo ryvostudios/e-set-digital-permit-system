@@ -204,6 +204,7 @@ export function permitDetail(overrides: Partial<PermitDetailResponse> = {}): Per
     history: [],
     signatures: [],
     document: null,
+    serverTime: '2026-08-20T08:00:00.000Z',
     ...overrides,
   };
 }

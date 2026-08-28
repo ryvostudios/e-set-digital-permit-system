@@ -214,6 +214,15 @@ export interface PermitDetailResponse {
   history: LifecycleEvent[];
   signatures: PermitSignature[];
   document: PermitDocumentStatus | null;
+  /**
+   * The server's clock when this record was read.
+   *
+   * Paired with `permit.hse_review_deadline_at` so the HSE priority
+   * countdown can be drawn without trusting the device's clock. It is
+   * presentation only - every action is authorized against the
+   * database's own time when it is attempted.
+   */
+  serverTime: string;
 }
 
 // ---------------------------------------------------------------------

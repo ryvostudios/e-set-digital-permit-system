@@ -1747,3 +1747,94 @@ test('the catalogue reads nothing from the database', async () => {
     await close();
   }
 });
+
+// ---------------------------------------------------------------------
+// CRO fallback approval: the authorization gate, over real HTTP
+// ---------------------------------------------------------------------
+
+/**
+ * THE UI IS NOT THE SECURITY BOUNDARY.
+ *
+ * Whether the fallback button is on screen is decided by the server's
+ * action hints, but nothing depends on that: these drive the real route
+ * over real HTTP, so an attempt made straight at the API - by someone who
+ * never saw a button, or who called it before the window expired - meets
+ * the same gates.
+ *
+ * Business correctness of the outcome (the 4:59.999 / 5:00.000 boundary,
+ * the one-winner race) is proven in domain/permits/service.test.ts. What
+ * is proven here is that the gates cannot be walked around.
+ */
+function fallbackApproveRequest(url: string, token?: string): Promise<Response> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  return fetch(`${url}/api/v1/permits/${SOME_PERMIT_ID}/fallback-approve`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ version: 1 }),
+  });
+}
+
+test('POST /permits/:id/fallback-approve rejects an unauthenticated caller (401)', async () => {
+  grantedCapabilities = ['permit.fallback_approve'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await fallbackApproveRequest(url)).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/fallback-approve denies an ordinary employee (403)', async () => {
+  // An applicant, with no review authority of any kind.
+  grantedCapabilities = ['permit.create', 'permit.submit'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await fallbackApproveRequest(url, VALID_TOKEN)).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/fallback-approve denies a CRO without the fallback capability (403)', async () => {
+  /*
+    A real CRO - they may review, forward, send back and hold - but
+    fallback approval is a separately granted authority, and holding the
+    rest of the CRO role does not confer it.
+  */
+  grantedCapabilities = ['permit.cro_review', 'permit.forward_hse', 'permit.send_back', 'permit.hold'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await fallbackApproveRequest(url, VALID_TOKEN)).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/fallback-approve denies an HSE approver (403)', async () => {
+  // HSE approves on its own authority; it is not the fallback.
+  grantedCapabilities = ['permit.hse_review'];
+  const { url, close } = await startServer();
+  try {
+    assert.equal((await fallbackApproveRequest(url, VALID_TOKEN)).status, 403);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/fallback-approve lets a capable CRO reach the handler/service', async () => {
+  grantedCapabilities = ['permit.fallback_approve'];
+  const { url, close } = await startServer();
+  try {
+    const res = await fallbackApproveRequest(url, VALID_TOKEN);
+    // Neither auth gate short-circuited it...
+    assert.notEqual(res.status, 401);
+    assert.notEqual(res.status, 403);
+    // ...and the fake DB behind this request holds no such permit, so the
+    // service's own not-found outcome is what proves control genuinely
+    // reached it rather than a stubbed-out auth layer.
+    assert.equal(res.status, 404);
+  } finally {
+    await close();
+  }
+});

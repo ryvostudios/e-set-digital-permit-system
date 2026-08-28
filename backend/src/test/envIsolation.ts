@@ -57,6 +57,18 @@ const DETERMINISTIC_KEYS: Readonly<Record<string, string>> = {
   SUPABASE_URL: 'https://test-project.supabase.co',
   SUPABASE_PUBLISHABLE_KEY: 'test-publishable-key-not-a-real-credential',
   SITE_TIMEZONE: 'Asia/Karachi',
+  /*
+    A test run's request volume must not depend on a production throttle.
+
+    The mutation limiter is keyed by IP, and a route suite drives dozens
+    of requests from 127.0.0.1 through one shared limiter - so the
+    production default of 30 turns "this suite grew" into "an unrelated
+    test now returns 429". The limiter itself, including its rejection
+    behaviour and its sanitized 429, is proven directly in
+    middleware/rateLimit.test.ts against its own instances, which do not
+    read this value.
+  */
+  RATE_LIMIT_MUTATION_MAX: '1000',
 };
 
 for (const key of OPERATOR_ONLY_KEYS) delete process.env[key];
