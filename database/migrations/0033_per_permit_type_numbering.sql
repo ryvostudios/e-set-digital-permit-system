@@ -56,8 +56,14 @@
 -- every type at 1 requires deleting the existing workflow data, which is
 -- a pre-production/UAT operation with its own separately-approved
 -- procedure and is deliberately NOT in this migration.
-
-BEGIN;
+--
+-- NO EXPLICIT BEGIN/COMMIT. `db/migrate.ts` already runs each migration
+-- file inside a transaction and writes its `schema_migrations` ledger row
+-- in that same transaction. A `COMMIT;` inside the file would end the
+-- runner's transaction early, so the schema change would land BEFORE the
+-- ledger row - and an interruption in that window would leave 0033
+-- applied but unrecorded, which the next run would try to apply again and
+-- fail on. Migrations 0001-0031 all rely on the runner for this reason.
 
 -- =====================================================================
 -- 1. The per-type allocator
@@ -283,5 +289,3 @@ BEGIN
   END IF;
 END;
 $$;
-
-COMMIT;

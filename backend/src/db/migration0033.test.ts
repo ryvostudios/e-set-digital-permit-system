@@ -332,44 +332,268 @@ test('browser-facing roles hold nothing on the counter table', async () => {
 // The UAT reset procedure
 // ---------------------------------------------------------------------
 
-test('the UAT reset is disarmed in source control and aborts having changed nothing', async () => {
-  const sql = await readFile(resetUrl, 'utf8');
-  // The guard is a manual edit, and it must be committed in the OFF position.
+/** The seven append-only DELETE guards the reset must suspend and restore. */
+const APPEND_ONLY_GUARDS: readonly (readonly [string, string])[] = [
+  ['whatsapp_outbox_messages', 'whatsapp_outbox_no_delete'],
+  ['notifications', 'notifications_no_delete'],
+  ['permit_document_jobs', 'permit_document_jobs_no_delete'],
+  ['issued_document_snapshot_integrity', 'issued_document_snapshot_integrity_append_only'],
+  ['issued_document_snapshots', 'issued_document_snapshots_append_only'],
+  ['permit_signatures', 'permit_signatures_append_only'],
+  ['permit_lifecycle_events', 'permit_lifecycle_events_append_only'],
+];
+
+/** Tables the reset must never touch, with a row each so "unchanged" is observable. */
+const PROTECTED_TABLES = [
+  'app_users', 'app_user_access', 'workforce_profiles', 'companies', 'teams', 'positions',
+  'team_positions', 'capabilities', 'team_position_capabilities', 'user_team_positions',
+  'account_audit_events', 'privileged_access_events', 'schema_migrations',
+];
+
+/**
+ * The estate the reset actually runs against: the permit workflow tables
+ * with their REAL append-only triggers and REAL `ON DELETE RESTRICT`
+ * foreign keys, plus the account/workforce tables it must leave alone.
+ *
+ * The triggers are the whole point. Without them these specs would prove
+ * nothing about the one genuinely risky thing this script does.
+ */
+async function createResetEstate(applyMigration0033: boolean): Promise<PGlite> {
+  const db = await createPre0033Db();
+  await db.exec(`
+    CREATE FUNCTION forbid_mutation() RETURNS TRIGGER LANGUAGE plpgsql AS $fm$
+    BEGIN
+      RAISE EXCEPTION '% on %.% is not permitted - this table is append-only', TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME;
+    END; $fm$;
+
+    CREATE TABLE permit_lifecycle_events (
+      id SERIAL PRIMARY KEY,
+      permit_id INTEGER NOT NULL REFERENCES permits (id) ON DELETE RESTRICT
+    );
+    CREATE TABLE notifications (
+      id SERIAL PRIMARY KEY,
+      permit_id INTEGER REFERENCES permits (id) ON DELETE RESTRICT,
+      source_event_id INTEGER NOT NULL REFERENCES permit_lifecycle_events (id) ON DELETE RESTRICT
+    );
+    CREATE TABLE whatsapp_outbox_messages (
+      id SERIAL PRIMARY KEY,
+      permit_id INTEGER NOT NULL REFERENCES permits (id) ON DELETE RESTRICT,
+      source_event_id INTEGER NOT NULL REFERENCES permit_lifecycle_events (id) ON DELETE RESTRICT
+    );
+    CREATE TABLE issued_document_snapshots (
+      id SERIAL PRIMARY KEY,
+      permit_id INTEGER NOT NULL REFERENCES permits (id) ON DELETE RESTRICT,
+      source_event_id INTEGER NOT NULL REFERENCES permit_lifecycle_events (id) ON DELETE RESTRICT
+    );
+    CREATE TABLE issued_document_snapshot_integrity (
+      snapshot_id INTEGER PRIMARY KEY REFERENCES issued_document_snapshots (id) ON DELETE RESTRICT
+    );
+    CREATE TABLE permit_document_jobs (
+      id SERIAL PRIMARY KEY,
+      snapshot_id INTEGER NOT NULL REFERENCES issued_document_snapshots (id) ON DELETE RESTRICT,
+      storage_path TEXT
+    );
+    CREATE TABLE permit_signatures (
+      id SERIAL PRIMARY KEY,
+      permit_id INTEGER NOT NULL REFERENCES permits (id) ON DELETE RESTRICT,
+      source_event_id INTEGER NOT NULL REFERENCES permit_lifecycle_events (id) ON DELETE RESTRICT
+    );
+
+    CREATE TRIGGER whatsapp_outbox_no_delete BEFORE DELETE ON whatsapp_outbox_messages FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+    CREATE TRIGGER whatsapp_outbox_no_truncate BEFORE TRUNCATE ON whatsapp_outbox_messages FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
+    CREATE TRIGGER notifications_no_delete BEFORE DELETE ON notifications FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+    CREATE TRIGGER permit_document_jobs_no_delete BEFORE DELETE ON permit_document_jobs FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+    CREATE TRIGGER issued_document_snapshot_integrity_append_only BEFORE UPDATE OR DELETE ON issued_document_snapshot_integrity FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+    CREATE TRIGGER issued_document_snapshots_append_only BEFORE UPDATE OR DELETE ON issued_document_snapshots FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+    CREATE TRIGGER permit_signatures_append_only BEFORE UPDATE OR DELETE ON permit_signatures FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+    CREATE TRIGGER permit_lifecycle_events_append_only BEFORE UPDATE OR DELETE ON permit_lifecycle_events FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+  `);
+  for (const table of PROTECTED_TABLES) {
+    await db.exec(`CREATE TABLE ${table} (id SERIAL PRIMARY KEY); INSERT INTO ${table} DEFAULT VALUES;`);
+  }
+  if (applyMigration0033) await applyMigration(db);
+  return db;
+}
+
+/** A permit carrying the whole workflow tail an issued demo permit leaves behind. */
+async function createIssuedEstatePermit(db: PGlite, permitType: string): Promise<void> {
+  const jsa = await db.query<{ id: number }>('INSERT INTO jsas DEFAULT VALUES RETURNING id');
+  const permit = await db.query<{ id: number }>(
+    "INSERT INTO permits (jsa_id, permit_type, status, issued_at) VALUES ($1, $2, 'ISSUED', now()) RETURNING id",
+    [jsa.rows[0]!.id, permitType],
+  );
+  const permitId = permit.rows[0]!.id;
+  const event = await db.query<{ id: number }>(
+    'INSERT INTO permit_lifecycle_events (permit_id) VALUES ($1) RETURNING id',
+    [permitId],
+  );
+  const eventId = event.rows[0]!.id;
+  await db.query('INSERT INTO notifications (permit_id, source_event_id) VALUES ($1, $2)', [permitId, eventId]);
+  await db.query('INSERT INTO whatsapp_outbox_messages (permit_id, source_event_id) VALUES ($1, $2)', [permitId, eventId]);
+  await db.query('INSERT INTO permit_signatures (permit_id, source_event_id) VALUES ($1, $2)', [permitId, eventId]);
+  const snapshot = await db.query<{ id: number }>(
+    'INSERT INTO issued_document_snapshots (permit_id, source_event_id) VALUES ($1, $2) RETURNING id',
+    [permitId, eventId],
+  );
+  const snapshotId = snapshot.rows[0]!.id;
+  await db.query('INSERT INTO issued_document_snapshot_integrity (snapshot_id) VALUES ($1)', [snapshotId]);
+  await db.query('INSERT INTO permit_document_jobs (snapshot_id, storage_path) VALUES ($1, $2)', [
+    snapshotId,
+    `permits/${permitId}/${snapshotId}.pdf`,
+  ]);
+}
+
+const readReset = (): Promise<string> => readFile(resetUrl, 'utf8');
+const arm = (sql: string): string => sql.replace("confirmed TEXT := 'NO';", "confirmed TEXT := 'YES';");
+
+async function triggerStates(db: PGlite): Promise<Map<string, string>> {
+  const rows = await db.query<{ tgname: string; tgenabled: string }>(
+    'SELECT tgname, tgenabled FROM pg_catalog.pg_trigger WHERE NOT tgisinternal',
+  );
+  return new Map(rows.rows.map((row) => [row.tgname, row.tgenabled]));
+}
+
+async function countOf(db: PGlite, table: string): Promise<number> {
+  const rows = await db.query<{ count: string | number }>(`SELECT count(*)::text AS count FROM ${table}`);
+  return Number(rows.rows[0]!.count);
+}
+
+test('the reset is committed DISARMED and aborts having changed nothing', async () => {
+  const sql = await readReset();
   assert.match(sql, /confirmed TEXT := 'NO';/);
   assert.ok(!/confirmed TEXT := 'YES';/.test(sql), 'the reset must never be committed armed');
-  // It is not a migration.
+  // It is not a migration, and it does not live in the migrations directory.
   assert.ok(!resetUrl.pathname.includes('/migrations/'));
 
-  const db = await migratedDb();
+  const db = await createResetEstate(true);
   try {
-    await createPermit(db, 'COLD_WORK');
+    await createIssuedEstatePermit(db, 'COLD_WORK');
     await assert.rejects(db.exec(sql), /not armed/);
-    // The raised guard leaves the transaction aborted; end it before reading.
     await db.exec('ROLLBACK').catch(() => {});
-    const permits = await db.query<{ count: string | number }>('SELECT count(*)::text AS count FROM permits');
-    assert.equal(Number(permits.rows[0]!.count), 1, 'a disarmed reset must delete nothing');
+    assert.equal(await countOf(db, 'permits'), 1, 'a disarmed reset must delete nothing');
   } finally {
     await db.close();
   }
 });
 
-test('when armed on a test estate, the reset restarts every type at 1 and the JSA at 1', async () => {
-  const db = await migratedDb();
-  try {
-    // The reset's own tables, reduced to what it deletes from.
-    await db.exec(`
-      CREATE TABLE whatsapp_outbox_messages (id SERIAL PRIMARY KEY);
-      CREATE TABLE notifications (id SERIAL PRIMARY KEY);
-      CREATE TABLE permit_document_jobs (id SERIAL PRIMARY KEY);
-      CREATE TABLE issued_document_snapshot_integrity (id SERIAL PRIMARY KEY);
-      CREATE TABLE issued_document_snapshots (id SERIAL PRIMARY KEY);
-      CREATE TABLE permit_signatures (id SERIAL PRIMARY KEY);
-      CREATE TABLE permit_lifecycle_events (id SERIAL PRIMARY KEY);
-    `);
-    for (const type of [...TYPES, 'COLD_WORK', 'COLD_WORK']) await createPermit(db, type);
+test('the issued-permit rejection is gone - an ISSUED demo permit is cleared', async () => {
+  const sql = await readReset();
+  assert.ok(!/have been ISSUED/.test(sql), 'the issued_at guard must no longer refuse the reset');
 
-    const armed = (await readFile(resetUrl, 'utf8')).replace("confirmed TEXT := 'NO';", "confirmed TEXT := 'YES';");
-    await db.exec(armed);
+  const db = await createResetEstate(true);
+  try {
+    await createIssuedEstatePermit(db, 'COLD_WORK');
+    await db.exec(arm(sql));
+    assert.equal(await countOf(db, 'permits'), 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('the cleanup clears every FK-related workflow table, leaving no orphan', async () => {
+  const db = await createResetEstate(true);
+  try {
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    for (const [table] of APPEND_ONLY_GUARDS) {
+      assert.ok(await countOf(db, table) > 0, `${table} must be populated first`);
+    }
+
+    await db.exec(arm(await readReset()));
+
+    for (const table of [...APPEND_ONLY_GUARDS.map(([t]) => t), 'permits', 'jsas']) {
+      assert.equal(await countOf(db, table), 0, `${table} must be empty`);
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test('every append-only guard is disabled only inside the reset and restored before commit', async () => {
+  const db = await createResetEstate(true);
+  try {
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    const before = await triggerStates(db);
+    for (const [, trigger] of APPEND_ONLY_GUARDS) {
+      assert.equal(before.get(trigger), 'O', `${trigger} must start enabled`);
+    }
+
+    await db.exec(arm(await readReset()));
+
+    const after = await triggerStates(db);
+    for (const [, trigger] of APPEND_ONLY_GUARDS) {
+      assert.equal(after.get(trigger), 'O', `${trigger} must be re-enabled`);
+    }
+    // Every trigger in the database is in exactly the state it started
+    // in - nothing else was disturbed on the way past.
+    assert.deepEqual([...after.entries()].sort(), [...before.entries()].sort());
+
+    // And they genuinely work again: the tables are append-only once more.
+    await createIssuedEstatePermit(db, 'HOT_WORK');
+    await assert.rejects(db.exec('DELETE FROM permit_lifecycle_events'), /append-only/);
+    await db.exec('ROLLBACK').catch(() => {});
+    await assert.rejects(db.exec('DELETE FROM notifications'), /append-only/);
+    await db.exec('ROLLBACK').catch(() => {});
+  } finally {
+    await db.close();
+  }
+});
+
+test('the reset refuses to commit if a guard is left disabled', async () => {
+  const db = await createResetEstate(true);
+  try {
+    await createIssuedEstatePermit(db, 'COLD_WORK');
+    // A botched edit that forgets one re-enable must not reach COMMIT.
+    const sabotaged = arm(await readReset()).replace(
+      'ALTER TABLE permit_signatures                 ENABLE TRIGGER permit_signatures_append_only;',
+      '-- deliberately not re-enabled',
+    );
+    await assert.rejects(db.exec(sabotaged), /still disabled/);
+    await db.exec('ROLLBACK').catch(() => {});
+    // The rollback restored the data AND the protection together.
+    assert.equal(await countOf(db, 'permits'), 1);
+    assert.equal((await triggerStates(db)).get('permit_signatures_append_only'), 'O');
+  } finally {
+    await db.close();
+  }
+});
+
+test('protected account, workforce and migration-history tables are untouched', async () => {
+  const db = await createResetEstate(true);
+  try {
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    await db.exec(arm(await readReset()));
+    for (const table of PROTECTED_TABLES) {
+      assert.equal(await countOf(db, table), 1, `${table} must be untouched`);
+    }
+  } finally {
+    await db.close();
+  }
+});
+
+test('the reset refuses to commit if a protected table was disturbed', async () => {
+  const db = await createResetEstate(true);
+  try {
+    await createIssuedEstatePermit(db, 'COLD_WORK');
+    const sabotaged = arm(await readReset()).replace(
+      'DELETE FROM whatsapp_outbox_messages;',
+      'DELETE FROM whatsapp_outbox_messages;\nDELETE FROM workforce_profiles;',
+    );
+    await assert.rejects(db.exec(sabotaged), /protected table/);
+    await db.exec('ROLLBACK').catch(() => {});
+    assert.equal(await countOf(db, 'workforce_profiles'), 1);
+  } finally {
+    await db.close();
+  }
+});
+
+test('counters and both sequences restart, and the register begins again at 1', async () => {
+  const db = await createResetEstate(true);
+  try {
+    // The live shape: four types sitting at scattered high-water marks.
+    for (const type of [...TYPES, 'COLD_WORK', 'WTG_WORK', 'WTG_WORK']) {
+      await createIssuedEstatePermit(db, type);
+    }
+    await db.exec(arm(await readReset()));
 
     const counters = await db.query<{ permit_type: string; next_value: string | number }>(
       'SELECT permit_type, next_value FROM permit_number_counters ORDER BY permit_type',
@@ -377,36 +601,58 @@ test('when armed on a test estate, the reset restarts every type at 1 and the JS
     assert.equal(counters.rows.length, 4);
     assert.ok(counters.rows.every((row) => Number(row.next_value) === 1));
 
-    // Everything starts again: each type at 1, the JSA at 1 globally.
+    // Each type restarts at 1; the JSA series restarts at 1 GLOBALLY.
     assert.deepEqual(await createPermit(db, 'COLD_WORK'), { permit: 1, jsa: 1 });
     assert.deepEqual(await createPermit(db, 'HOT_WORK'), { permit: 1, jsa: 2 });
-    assert.deepEqual(await createPermit(db, 'COLD_WORK'), { permit: 2, jsa: 3 });
+    assert.deepEqual(await createPermit(db, 'WTG_WORK'), { permit: 1, jsa: 3 });
+    assert.deepEqual(await createPermit(db, 'CONFINED_SPACE_ENTRY'), { permit: 1, jsa: 4 });
+    // ...and they advance independently from there.
+    assert.deepEqual(await createPermit(db, 'WTG_WORK'), { permit: 2, jsa: 5 });
+    assert.deepEqual(await createPermit(db, 'COLD_WORK'), { permit: 2, jsa: 6 });
   } finally {
     await db.close();
   }
 });
 
-test('the reset refuses to run against a database holding issued permits', async () => {
-  const db = await migratedDb();
+test('the reset works BEFORE migration 0033, and 0033 then seeds all four types at 1', async () => {
+  // The recommended rollout order: an empty register makes 0033's own
+  // seed produce the desired state, with no counter reset needed at all.
+  const db = await createResetEstate(false);
   try {
-    await db.exec(`
-      CREATE TABLE whatsapp_outbox_messages (id SERIAL PRIMARY KEY);
-      CREATE TABLE notifications (id SERIAL PRIMARY KEY);
-      CREATE TABLE permit_document_jobs (id SERIAL PRIMARY KEY);
-      CREATE TABLE issued_document_snapshot_integrity (id SERIAL PRIMARY KEY);
-      CREATE TABLE issued_document_snapshots (id SERIAL PRIMARY KEY);
-      CREATE TABLE permit_signatures (id SERIAL PRIMARY KEY);
-      CREATE TABLE permit_lifecycle_events (id SERIAL PRIMARY KEY);
-    `);
-    await createPermit(db, 'COLD_WORK');
-    await db.exec("UPDATE permits SET issued_at = now(), status = 'ISSUED'");
+    for (const type of TYPES) await createIssuedEstatePermit(db, type);
+    await db.exec(arm(await readReset()));
 
-    const armed = (await readFile(resetUrl, 'utf8')).replace("confirmed TEXT := 'NO';", "confirmed TEXT := 'YES';");
-    await assert.rejects(db.exec(armed), /have been ISSUED/);
-    await db.exec('ROLLBACK').catch(() => {});
-    const permits = await db.query<{ count: string | number }>('SELECT count(*)::text AS count FROM permits');
-    assert.equal(Number(permits.rows[0]!.count), 1);
+    // The counter table does not exist yet - the reset must not assume it.
+    const exists = await db.query<{ present: boolean }>(
+      "SELECT to_regclass('public.permit_number_counters') IS NOT NULL AS present",
+    );
+    assert.equal(exists.rows[0]!.present, false);
+
+    await applyMigration(db);
+
+    const counters = await db.query<{ next_value: string | number }>('SELECT next_value FROM permit_number_counters');
+    assert.equal(counters.rows.length, 4);
+    assert.ok(counters.rows.every((row) => Number(row.next_value) === 1));
+    assert.deepEqual(await createPermit(db, 'COLD_WORK'), { permit: 1, jsa: 1 });
   } finally {
     await db.close();
   }
+});
+
+test('the reset reports the storage objects it cannot delete, and never claims to have removed them', async () => {
+  const sql = await readReset();
+  assert.match(sql, /SQL CANNOT DELETE THESE/);
+  assert.match(sql, /issued-permit-documents/);
+  assert.match(sql, /SELECT storage_path FROM permit_document_jobs/);
+  // The paths are printed BEFORE the jobs table is emptied - the only
+  // moment they are still knowable.
+  assert.ok(
+    sql.indexOf('SELECT storage_path FROM permit_document_jobs') < sql.indexOf('DELETE FROM permit_document_jobs;'),
+  );
+});
+
+test('migration 0033 has no BEGIN/COMMIT of its own - the runner owns the transaction', async () => {
+  const sql = await readFile(migrationUrl, 'utf8');
+  assert.ok(!/^BEGIN;/m.test(sql), '0033 must not open its own transaction');
+  assert.ok(!/^COMMIT;/m.test(sql), '0033 must not commit - that would unbind it from its schema_migrations row');
 });
