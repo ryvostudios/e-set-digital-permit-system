@@ -288,3 +288,69 @@ test('searchPermitLifecycleEvents: chronological ordering is deterministic under
   assert.deepEqual(page.items.map((e) => e.id), ['e1', 'e2']);
   assert.equal(page.totalCount, 3);
 });
+
+/**
+ * PER-TYPE PERMIT NUMBERING (migration 0033).
+ *
+ * Each permit type is its own series, so Cold Work #1 and Hot Work #1 are
+ * two different permits. A search by NUMBER ALONE is therefore no longer
+ * a unique lookup - it legitimately matches one permit per type - and the
+ * caller narrows it with the permit type filter that already exists.
+ * Nothing here may quietly pick one and hide the rest.
+ */
+function numberedPermit(type: string, sequence: string, id: string): FakePermitJoinRow {
+  return makePermit({ id, permit_sequence: sequence, permit_type: type as PermitSummaryRow['permit_type'], created_by: 'me' });
+}
+
+test('searchPermits: the same permit number in different types returns every match, not one', async () => {
+  const rows = [
+    numberedPermit('COLD_WORK', '1', 'cold-1'),
+    numberedPermit('HOT_WORK', '1', 'hot-1'),
+    numberedPermit('WTG_WORK', '1', 'wtg-1'),
+    numberedPermit('CONFINED_SPACE_ENTRY', '1', 'confined-1'),
+    numberedPermit('COLD_WORK', '2', 'cold-2'),
+  ];
+  const page = await searchPermits(
+    { viewerId: 'me', allowedStatuses: [], viewAll: true },
+    { permitNumber: 1 },
+    { page: 1, pageSize: 20 },
+    { query: buildPermitsQuery(rows) },
+  );
+  assert.equal(page.totalCount, 4, 'permit number 1 exists once per type');
+  assert.deepEqual(page.items.map((p) => p.id).sort(), ['cold-1', 'confined-1', 'hot-1', 'wtg-1']);
+  // Every row carries the type that disambiguates it.
+  assert.ok(page.items.every((p) => p.permit_type !== null));
+});
+
+test('searchPermits: number plus type resolves to exactly one permit', async () => {
+  const rows = [
+    numberedPermit('COLD_WORK', '1', 'cold-1'),
+    numberedPermit('HOT_WORK', '1', 'hot-1'),
+    numberedPermit('WTG_WORK', '1', 'wtg-1'),
+  ];
+  for (const [type, expected] of [['COLD_WORK', 'cold-1'], ['HOT_WORK', 'hot-1'], ['WTG_WORK', 'wtg-1']] as const) {
+    const page = await searchPermits(
+      { viewerId: 'me', allowedStatuses: [], viewAll: true },
+      { permitNumber: 1, permitType: type },
+      { page: 1, pageSize: 20 },
+      { query: buildPermitsQuery(rows) },
+    );
+    assert.equal(page.totalCount, 1, `${type} #1 must resolve uniquely`);
+    assert.equal(page.items[0]!.id, expected);
+  }
+});
+
+test('searchPermits: the JSA number stays a globally unique lookup', async () => {
+  const rows = [
+    makePermit({ id: 'cold-1', permit_sequence: '1', jsa_sequence: '7', permit_type: 'COLD_WORK', created_by: 'me' }),
+    makePermit({ id: 'hot-1', permit_sequence: '1', jsa_sequence: '8', permit_type: 'HOT_WORK', created_by: 'me' }),
+  ];
+  const page = await searchPermits(
+    { viewerId: 'me', allowedStatuses: [], viewAll: true },
+    { jsaNumber: 8 },
+    { page: 1, pageSize: 20 },
+    { query: buildPermitsQuery(rows) },
+  );
+  assert.equal(page.totalCount, 1);
+  assert.equal(page.items[0]!.id, 'hot-1');
+});

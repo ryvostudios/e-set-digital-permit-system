@@ -8,7 +8,7 @@ import {
   getIssuedSnapshotForPermit,
   type IssuanceEventMetadata,
 } from './documents.js';
-import { toDisplayNumber } from './numbering.js';
+import { toDisplayNumber, toPermitLabel } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
 import { buildSnapshotSignatureSet, getPermitSignatures, type SnapshotSignatureSet } from './signatures.js';
 
@@ -33,6 +33,21 @@ function permitNumberOf(permit: PermitRow): string {
   return toDisplayNumber(BigInt(permit.permit_sequence));
 }
 
+/**
+ * How a permit is NAMED in prose - "Cold Work Permit 1".
+ *
+ * Each permit type has been numbered in its own series since migration
+ * 0033, so "Permit 1" alone names four different permits and a person
+ * reading a notification cannot tell which one moved. The type goes
+ * beside the number here, in the human-readable text only: the
+ * authoritative Permit No. carried by the record, the PDF, the issued
+ * snapshot and the WhatsApp payload below is still the bare stored
+ * number, unprefixed.
+ */
+function permitLabelOf(permit: PermitRow): string {
+  return toPermitLabel(permit.permit_type, BigInt(permit.permit_sequence));
+}
+
 function jsaNumberOf(jsa: JsaRow): string {
   return toDisplayNumber(BigInt(jsa.jsa_sequence));
 }
@@ -51,13 +66,13 @@ export async function onPermitSubmittedOrResubmitted(
 ): Promise<void> {
   const recipients = await resolveCroRecipients(queryFn);
   if (recipients.length === 0) throw new ResponsibilityRecipientUnavailableError('CRO');
-  const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   await notifyRecipients(queryFn, recipients, {
     permitId: input.permit.id,
     sourceEventId: input.sourceEventId,
     notificationType: input.resubmitted ? 'PERMIT_RESUBMITTED' : 'PERMIT_SUBMITTED',
-    title: `Permit ${permitNumber} ${input.resubmitted ? 'resubmitted' : 'submitted'} for CRO review`,
-    message: `Permit ${permitNumber} is awaiting CRO review.`,
+    title: `${permitLabel} ${input.resubmitted ? 'resubmitted' : 'submitted'} for CRO review`,
+    message: `${permitLabel} is awaiting CRO review.`,
   });
 }
 
@@ -68,13 +83,13 @@ export async function onForwardedToHse(
 ): Promise<void> {
   const recipients = await resolveHseRecipients(queryFn);
   if (recipients.length === 0) throw new ResponsibilityRecipientUnavailableError('HSE');
-  const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   await notifyRecipients(queryFn, recipients, {
     permitId: input.permit.id,
     sourceEventId: input.sourceEventId,
     notificationType: 'PERMIT_FORWARDED_HSE',
-    title: `Permit ${permitNumber} forwarded for HSE review`,
-    message: `Permit ${permitNumber} was forwarded by CRO and is awaiting HSE review.`,
+    title: `${permitLabel} forwarded for HSE review`,
+    message: `${permitLabel} was forwarded by CRO and is awaiting HSE review.`,
   });
 }
 
@@ -85,13 +100,13 @@ export async function onHseSentBackToCro(
 ): Promise<void> {
   const recipients = await resolveCroRecipients(queryFn);
   if (recipients.length === 0) throw new ResponsibilityRecipientUnavailableError('CRO');
-  const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   await notifyRecipients(queryFn, recipients, {
     permitId: input.permit.id,
     sourceEventId: input.sourceEventId,
     notificationType: 'PERMIT_HSE_SENT_BACK',
-    title: `Permit ${permitNumber} sent back by HSE`,
-    message: `Permit ${permitNumber} was sent back by HSE and requires further CRO review.`,
+    title: `${permitLabel} sent back by HSE`,
+    message: `${permitLabel} was sent back by HSE and requires further CRO review.`,
   });
 }
 
@@ -100,14 +115,14 @@ export async function onCroSentBackToApplicant(
   queryFn: QueryFn,
   input: { permit: PermitRow; sourceEventId: string },
 ): Promise<void> {
-  const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   await createNotification(queryFn, {
     recipientUserId: input.permit.created_by,
     permitId: input.permit.id,
     sourceEventId: input.sourceEventId,
     notificationType: 'PERMIT_SENT_BACK_FOR_CORRECTION',
-    title: `Permit ${permitNumber} sent back for correction`,
-    message: `Permit ${permitNumber} was sent back by CRO and needs correction before it can be resubmitted.`,
+    title: `${permitLabel} sent back for correction`,
+    message: `${permitLabel} was sent back by CRO and needs correction before it can be resubmitted.`,
   });
 }
 
@@ -126,6 +141,7 @@ export async function onPermitIssued(
 ): Promise<void> {
   const sourceEventId = input.issuanceEvent.id;
   const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   const jsaNumber = jsaNumberOf(input.jsa);
 
   const croRecipients = await resolveCroRecipients(queryFn);
@@ -133,8 +149,8 @@ export async function onPermitIssued(
     permitId: input.permit.id,
     sourceEventId,
     notificationType: 'PERMIT_ISSUED',
-    title: `Permit ${permitNumber} issued`,
-    message: `Permit ${permitNumber} (JSA ${jsaNumber}) has been issued.`,
+    title: `${permitLabel} issued`,
+    message: `${permitLabel} (JSA ${jsaNumber}) has been issued.`,
   });
 
   // The signatures already recorded against this permit - the applicant's
@@ -168,6 +184,7 @@ export async function onPermitHeld(
   input: { permit: PermitRow; jsa: JsaRow; sourceEventId: string; holdReason: string },
 ): Promise<void> {
   const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   const jsaNumber = jsaNumberOf(input.jsa);
 
   await createNotification(queryFn, {
@@ -175,8 +192,8 @@ export async function onPermitHeld(
     permitId: input.permit.id,
     sourceEventId: input.sourceEventId,
     notificationType: 'PERMIT_HELD',
-    title: `Permit ${permitNumber} placed on hold`,
-    message: `Permit ${permitNumber} (JSA ${jsaNumber}) was placed on hold: ${input.holdReason}`,
+    title: `${permitLabel} placed on hold`,
+    message: `${permitLabel} (JSA ${jsaNumber}) was placed on hold: ${input.holdReason}`,
   });
 
   await enqueueWhatsappMessage(queryFn, {
@@ -199,6 +216,7 @@ export async function onPermitResumed(
   input: { permit: PermitRow; jsa: JsaRow; sourceEventId: string },
 ): Promise<void> {
   const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   const jsaNumber = jsaNumberOf(input.jsa);
 
   await createNotification(queryFn, {
@@ -206,8 +224,8 @@ export async function onPermitResumed(
     permitId: input.permit.id,
     sourceEventId: input.sourceEventId,
     notificationType: 'PERMIT_RESUMED',
-    title: `Permit ${permitNumber} resumed`,
-    message: `Permit ${permitNumber} (JSA ${jsaNumber}) has been resumed and is valid again.`,
+    title: `${permitLabel} resumed`,
+    message: `${permitLabel} (JSA ${jsaNumber}) has been resumed and is valid again.`,
   });
 
   await enqueueWhatsappMessage(queryFn, {
@@ -229,6 +247,7 @@ export async function onPermitCancelled(
   input: { permit: PermitRow; jsa: JsaRow; sourceEventId: string },
 ): Promise<void> {
   const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   const jsaNumber = jsaNumberOf(input.jsa);
 
   await createNotification(queryFn, {
@@ -236,8 +255,8 @@ export async function onPermitCancelled(
     permitId: input.permit.id,
     sourceEventId: input.sourceEventId,
     notificationType: 'PERMIT_CANCELLED',
-    title: `Permit ${permitNumber} cancelled`,
-    message: `Permit ${permitNumber} (JSA ${jsaNumber}) has been cancelled.`,
+    title: `${permitLabel} cancelled`,
+    message: `${permitLabel} (JSA ${jsaNumber}) has been cancelled.`,
   });
 
   await enqueueWhatsappMessage(queryFn, {
@@ -259,6 +278,7 @@ export async function onPermitClosed(
   input: { permit: PermitRow; jsa: JsaRow; sourceEventId: string },
 ): Promise<void> {
   const permitNumber = permitNumberOf(input.permit);
+  const permitLabel = permitLabelOf(input.permit);
   const jsaNumber = jsaNumberOf(input.jsa);
 
   await createNotification(queryFn, {
@@ -266,8 +286,8 @@ export async function onPermitClosed(
     permitId: input.permit.id,
     sourceEventId: input.sourceEventId,
     notificationType: 'PERMIT_CLOSED',
-    title: `Permit ${permitNumber} closed`,
-    message: `Permit ${permitNumber} (JSA ${jsaNumber}) has been closed.`,
+    title: `${permitLabel} closed`,
+    message: `${permitLabel} (JSA ${jsaNumber}) has been closed.`,
   });
 
   await enqueueWhatsappMessage(queryFn, {

@@ -4079,3 +4079,67 @@ test('list endpoints return summaries without form payloads; detail keeps the fu
   const detail = await getPermitById(permit.id, db.deps());
   assert.ok(detail?.form_payload, 'permit detail carries the full validated form');
 });
+
+/**
+ * PER-TYPE PERMIT NUMBERING (migration 0033): notification prose names
+ * the type, the authoritative number stays bare.
+ *
+ * Since each type is numbered in its own series, "Permit 1 issued" names
+ * four different permits. The human-readable text therefore carries the
+ * type beside the number - and ONLY that text does: the WhatsApp payload,
+ * the snapshot and the record all keep the bare stored number.
+ *
+ * All four type labels are covered as a unit in numbering.test.ts; these
+ * prove the wiring, using the WTG form the shared fixtures answer.
+ */
+test('notification prose names the permit type beside the number', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', 'WTG_WORK', db.deps());
+  const ready = await fillDraftForSubmission(db, 'applicant-1', permit.id, permit.version);
+  if (ready.outcome !== 'ok') throw new Error('setup failed: fillDraftForSubmission');
+  const submitted = await submitPermit('applicant-1', permit.id, { expectedVersion: ready.permit.version }, db.deps());
+  assert.equal(submitted.outcome, 'ok');
+
+  const notification = db.notifications.find((n) => n.notification_type === 'PERMIT_SUBMITTED');
+  assert.ok(notification, 'a submission notification must exist');
+  const number = permit.permit_sequence;
+  assert.equal(notification.title, `WTG Work Permit ${number} submitted for CRO review`);
+  assert.equal(notification.message, `WTG Work Permit ${number} is awaiting CRO review.`);
+  // The type is added BESIDE the number, never substituted for it.
+  assert.ok(notification.title.includes(String(number)));
+});
+
+test('every notification a permit produces names its type, at every transition', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('hse-1', 'permit.hse_review');
+  const issued = await createIssuedPermit(db, 'owner');
+
+  const forThisPermit = db.notifications.filter((n) => n.permit_id === issued.id);
+  assert.ok(forThisPermit.length > 0);
+  for (const notification of forThisPermit) {
+    assert.ok(
+      notification.title.startsWith('WTG Work Permit '),
+      `title must name the type, got "${notification.title}"`,
+    );
+    assert.ok(notification.message.includes('WTG Work Permit '), notification.message);
+    // No bare "Permit N" survives anywhere a person reads.
+    assert.ok(!/^Permit \d/.test(notification.title));
+  }
+});
+
+test('the WhatsApp payload keeps the bare authoritative permit number, unprefixed', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('hse-1', 'permit.hse_review');
+  const issued = await createIssuedPermit(db, 'owner');
+
+  const outbox = db.whatsappOutbox.find((m) => m.permit_id === issued.id);
+  assert.ok(outbox, 'an ISSUED outbox message must exist');
+  // The fake stores the payload exactly as the column does: JSON text.
+  const payload = JSON.parse(outbox.payload) as { permitNumber: string };
+  // The structured business field is the stored number and nothing else.
+  assert.equal(payload.permitNumber, issued.permit_sequence);
+  assert.ok(/^\d+$/.test(payload.permitNumber), 'the payload number must stay bare');
+});

@@ -7,6 +7,7 @@ import type {
   PermitForm,
   WtgWorkForm,
 } from './forms.js';
+import { PERMIT_TYPE_LABELS } from './numbering.js';
 import type { SnapshotSignature, SnapshotSignatureSet } from './signatures.js';
 import { buildIssuedDocumentPagesV2, isV2Snapshot, usesAnyV2FormVersion } from './documentLayoutV2.js';
 
@@ -96,12 +97,13 @@ export interface DocumentPage {
   footerNote?: string | null;
 }
 
-const PERMIT_TYPE_TITLES = {
-  WTG_WORK: 'WTG Work Permit',
-  COLD_WORK: 'Cold Work Permit',
-  HOT_WORK: 'Hot Work Permit',
-  CONFINED_SPACE_ENTRY: 'Confined Space Entry Permit',
-} as const;
+/**
+ * The same labels the notification prose uses. One copy, in
+ * `numbering.ts` - the seam that owns how a permit is named to a person -
+ * so a permit cannot be called one thing in a notification and another on
+ * its own document.
+ */
+const PERMIT_TYPE_TITLES = PERMIT_TYPE_LABELS;
 
 function textOrDash(value: string | null | undefined): string {
   return value === null || value === undefined || value === '' ? '-' : value;

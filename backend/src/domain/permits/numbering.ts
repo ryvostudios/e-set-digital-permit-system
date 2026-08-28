@@ -1,3 +1,5 @@
+import type { PermitType } from './forms.js';
+
 /**
  * The human-visible Permit/JSA number FORMAT is not confirmed by the
  * authoritative docs - DECISIONS.md's "CW-1045" example illustrates the
@@ -18,4 +20,35 @@
  */
 export function toDisplayNumber(sequenceValue: bigint): string {
   return sequenceValue.toString();
+}
+
+/**
+ * The permit types, as a person reads them.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM THE NUMBER. Since migration 0033 each
+ * permit type is numbered in its own series, so "Permit 1" now names four
+ * different permits. The AUTHORITATIVE permit number is still the bare
+ * per-type sequence - `permitDisplayNumber`, the PDF's Permit No., the
+ * issued snapshot and the record screen all print exactly what is stored,
+ * and none of them gains a prefix. Only prose meant for a human to read
+ * needs the type beside the number, and this is where that pairing is
+ * made.
+ */
+export const PERMIT_TYPE_LABELS = {
+  WTG_WORK: 'WTG Work Permit',
+  COLD_WORK: 'Cold Work Permit',
+  HOT_WORK: 'Hot Work Permit',
+  CONFINED_SPACE_ENTRY: 'Confined Space Entry Permit',
+} as const;
+
+/**
+ * A permit named for a human: "Cold Work Permit 1".
+ *
+ * FOR PROSE ONLY - notification titles and messages. It is never an
+ * identifier, never stored, and never the authoritative Permit No. A
+ * pre-form permit has no type to name, so it reads "Permit 1" as before.
+ */
+export function toPermitLabel(permitType: PermitType | null, sequenceValue: bigint): string {
+  const number = toDisplayNumber(sequenceValue);
+  return permitType ? `${PERMIT_TYPE_LABELS[permitType]} ${number}` : `Permit ${number}`;
 }

@@ -289,3 +289,48 @@ test('the signature band renders only roles that actually signed', () => {
   assert.ok(entries.some((entry) => entry.caption === 'APPLICANT'));
   assert.ok(entries.every((entry) => entry.name.length > 0), 'no fabricated blank signer');
 });
+
+// ---------------------------------------------------------------------
+// Per-type permit numbering (migration 0033)
+// ---------------------------------------------------------------------
+
+test('two permit types sharing one permit number each render their own stored number', async () => {
+  // Cold Work #1 and Hot Work #1 are two different permits now.
+  const cold = makeV2PdfTestSnapshot('COLD_WORK');
+  const hot = makeV2PdfTestSnapshot('HOT_WORK');
+  (cold as { permitNumber: string }).permitNumber = '1';
+  (hot as { permitNumber: string }).permitNumber = '1';
+  (cold as { jsaNumber: string }).jsaNumber = '7';
+  (hot as { jsaNumber: string }).jsaNumber = '8';
+
+  // The document prints what the snapshot stores - nothing is derived,
+  // uniquified or renumbered at render time.
+  for (const [snapshot, jsaNumber] of [[cold, '7'], [hot, '8']] as const) {
+    for (const page of model(snapshot)) {
+      assert.equal(page.identity![0]!.value, '1');
+      assert.equal(page.identity![3]!.value, jsaNumber);
+    }
+  }
+
+  // Same number, different documents: the permit TYPE is what tells them
+  // apart, and each renders its own.
+  const coldPdf = await generateIssuedPermitPdf(cold, 'PDFKIT_V3');
+  const hotPdf = await generateIssuedPermitPdf(hot, 'PDFKIT_V3');
+  assert.ok(!coldPdf.equals(hotPdf));
+  assert.equal(model(cold)[0]!.masthead!.title, 'COLD WORK PERMIT');
+  assert.equal(model(hot)[0]!.masthead!.title, 'HOT WORK PERMIT');
+  // Still deterministic per snapshot.
+  assert.ok((await generateIssuedPermitPdf(cold, 'PDFKIT_V3')).equals(coldPdf));
+});
+
+test('a renewal prints the renewed number and its predecessor, both as stored', () => {
+  const snapshot = makeV2PdfTestSnapshot('WTG_WORK');
+  // A renewal takes the next number in ITS OWN type, and the snapshot
+  // records where it came from.
+  (snapshot as { permitNumber: string }).permitNumber = '4';
+  (snapshot as { previousPermitNumber: string | null }).previousPermitNumber = '3';
+  assert.equal(model(snapshot)[0]!.identity![0]!.value, '4');
+  const header = model(snapshot)[0]!.sections.find((s) => s.title === 'AUTHORITATIVE PERMIT')!;
+  const rows = (header.blocks[0] as { rows: { label: string; value: string }[] }).rows;
+  assert.equal(rows.find((r) => r.label === 'PERMIT NUMBER')?.value, '4');
+});
