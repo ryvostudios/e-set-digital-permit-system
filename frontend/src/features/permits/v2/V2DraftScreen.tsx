@@ -152,11 +152,21 @@ export function V2DraftScreen({ permit, jsa, applicant, availableActions, histor
           jsaNumber: jsa.jsaDisplayNumber,
           completedBy: applicant.displayName,
         }}
-        onSaveDraft={async ({ version, permit: permitValues, jsa: jsaValues }) => {
-          // One document, one concurrency token: the JSA save uses the
-          // version the permit save returned.
+        onSaveDraft={async ({ version, permit: permitValues, jsa: jsaValues, onVersion }) => {
+          /*
+            One document, one concurrency token: the JSA save uses the
+            version the permit save returned.
+
+            Each version is reported the moment the server issues it, so a
+            failure on the second write cannot leave the editor holding a
+            version the database has already moved past. Without that, a
+            permit saved but a JSA rejected left every later attempt
+            conflicting until the page was reloaded.
+          */
           const afterPermit = await saveV2PermitDraft(permit.id, version, permitValues);
+          onVersion(afterPermit.permit.version);
           const afterJsa = await saveV2JsaDraft(permit.id, afterPermit.permit.version, jsaValues);
+          onVersion(afterJsa.permit.version);
           return afterJsa.permit.version;
         }}
         canSubmit={onward.available}

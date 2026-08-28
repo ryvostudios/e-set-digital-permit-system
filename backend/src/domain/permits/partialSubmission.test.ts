@@ -191,3 +191,83 @@ test('the DATABASE stores a partial permit exactly as entered, blanks included',
     await db.close();
   }
 });
+
+// ---------------------------------------------------------------------
+// An unfilled printed date is not an invalid one
+// ---------------------------------------------------------------------
+
+/**
+ * A `datetime-local` input that nobody touched sends `''`, and every
+ * printed date on these forms is optional. `optionalText` was made to
+ * accept an empty box; the ISO date-times were left strict, so a JSA
+ * whose Date/Time was blank could not be SAVED at all - and because the
+ * permit is written first and the JSA second, that left the permit stored
+ * and the JSA rejected, which is how a partly filled permit ended up
+ * unable to submit.
+ *
+ * An empty box is stored as ABSENT. No date is invented for it.
+ */
+
+test('an empty Date/Time on the JSA is accepted, and stored as absent', () => {
+  const form = blankJsaFormV2() as { page1: { dateTime?: unknown } };
+  form.page1.dateTime = '';
+  const parsed = parseJsaFormV2(form);
+  assert.equal(parsed.ok, true, 'a blank Date/Time must not make the JSA unsaveable');
+  if (!parsed.ok) throw new Error('unreachable');
+  assert.equal(parsed.data.page1.dateTime, undefined, 'no date may be fabricated for an empty box');
+});
+
+test('empty WTG permit dates are accepted, and stored as absent', () => {
+  const form = blankPermitV2('WTG_WORK') as { permitIssue: Record<string, unknown> };
+  form.permitIssue.permitStartAt = '';
+  form.permitIssue.permitExpiryAt = '';
+  const parsed = parsePermitFormV2('WTG_WORK', form);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) throw new Error('unreachable');
+  const issue = (parsed.data as { permitIssue: Record<string, unknown> }).permitIssue;
+  assert.equal(issue.permitStartAt, undefined);
+  assert.equal(issue.permitExpiryAt, undefined);
+});
+
+test('a blank date is not content - it cannot make an empty submission meaningful', () => {
+  const permitForm = blankPermitV2('WTG_WORK') as { permitIssue: Record<string, unknown> };
+  permitForm.permitIssue.permitStartAt = '';
+  const jsaForm = blankJsaFormV2() as { page1: { dateTime?: unknown } };
+  jsaForm.page1.dateTime = '';
+  assert.equal(hasMeaningfulSubmissionContent(permitForm, jsaForm), false);
+});
+
+test('a real date is still validated exactly as strictly, and still counts as content', () => {
+  const form = blankPermitV2('WTG_WORK') as { permitIssue: Record<string, unknown> };
+  form.permitIssue.permitStartAt = '2026-01-01T08:00:00.000Z';
+  const parsed = parsePermitFormV2('WTG_WORK', form);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) throw new Error('unreachable');
+  assert.equal(
+    (parsed.data as { permitIssue: Record<string, unknown> }).permitIssue.permitStartAt,
+    '2026-01-01T08:00:00.000Z',
+  );
+  assert.equal(hasMeaningfulSubmissionContent(parsed.data, blankJsaFormV2()), true);
+});
+
+test('a malformed date is still rejected - the field did not become a free-text box', () => {
+  for (const bad of ['not-a-date', '2026-13-45T99:99Z', '01/01/2026', '2026-01-01']) {
+    const form = blankPermitV2('WTG_WORK') as { permitIssue: Record<string, unknown> };
+    form.permitIssue.permitStartAt = bad;
+    assert.equal(parsePermitFormV2('WTG_WORK', form).ok, false, `${bad} must still be refused`);
+  }
+  const jsaForm = blankJsaFormV2() as { page1: { dateTime?: unknown } };
+  jsaForm.page1.dateTime = 'yesterday';
+  assert.equal(parseJsaFormV2(jsaForm).ok, false);
+});
+
+test('a blank document of every type still saves with its date boxes empty', () => {
+  for (const type of TYPES) {
+    const form = blankPermitV2(type) as Record<string, Record<string, unknown>>;
+    if (form.permitIssue) {
+      form.permitIssue.permitStartAt = '';
+      form.permitIssue.permitExpiryAt = '';
+    }
+    assert.equal(parsePermitFormV2(type, form).ok, true, `${type} must save with empty dates`);
+  }
+});

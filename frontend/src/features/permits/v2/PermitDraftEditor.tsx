@@ -41,8 +41,26 @@ export interface DraftEditorProps {
     jsaNumber?: string;
     completedBy?: string;
   };
-  /** Saves both documents. Resolves with the permit's NEW version. */
-  onSaveDraft: (input: { version: number; permit: PermitValuesV2; jsa: JsaValuesV2 }) => Promise<number>;
+  /**
+   * Saves both documents. Resolves with the permit's NEW version.
+   *
+   * `onVersion` MUST be called after every successful write, not only at
+   * the end. Saving is two requests - the permit, then its JSA - and each
+   * advances the permit's version. If the second one fails and the first
+   * has already been applied, the server has moved on and this screen has
+   * not; every later save or submit then carries a version the server has
+   * left behind and is refused as a conflict, permanently, until the page
+   * is reloaded. Reporting each version as it is issued is what keeps the
+   * two in step through a partial failure, WITHOUT weakening the check:
+   * the value always comes from a server response, and is never guessed,
+   * incremented locally, or retried blindly.
+   */
+  onSaveDraft: (input: {
+    version: number;
+    permit: PermitValuesV2;
+    jsa: JsaValuesV2;
+    onVersion: (version: number) => void;
+  }) => Promise<number>;
   onSubmit: (input: { version: number }) => Promise<void>;
   onSubmitted?: () => void;
   /**
@@ -135,7 +153,7 @@ export function PermitDraftEditor({
     setSave({ kind: 'saving' });
     setSubmitError(null);
     try {
-      const nextVersion = await onSaveDraft({ version, permit: permitValues, jsa: jsaValues });
+      const nextVersion = await onSaveDraft({ version, permit: permitValues, jsa: jsaValues, onVersion: setVersion });
       setVersion(nextVersion);
       setDirty(false);
       setSave({ kind: 'saved', at: Date.now() });
@@ -178,7 +196,12 @@ export function PermitDraftEditor({
     setSubmitError(null);
     setUnanswered([]);
     try {
-      const submittedVersion = await onSaveDraft({ version, permit: permitValues, jsa: jsaValues });
+      const submittedVersion = await onSaveDraft({
+        version,
+        permit: permitValues,
+        jsa: jsaValues,
+        onVersion: setVersion,
+      });
       setVersion(submittedVersion);
       setDirty(false);
       setSave({ kind: 'saved', at: Date.now() });

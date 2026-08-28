@@ -82,6 +82,26 @@ const isoDateTime = z
   .refine((value) => Number.isFinite(Date.parse(value)), { message: 'must be a real date-time' })
   .transform((value) => new Date(value).toISOString());
 
+/**
+ * An optional printed date-time, on the same terms as `optionalText`
+ * above: PRESENT-AND-EMPTY IS ALLOWED.
+ *
+ * An untouched `datetime-local` input sends `''`, and `isoDateTime`
+ * rejects that - so a form whose date boxes nobody filled in could not be
+ * saved at all, which is the same defect this contract already fixed for
+ * text and missed here. Every printed date on these forms is optional, so
+ * an unfilled one has to round-trip.
+ *
+ * AN EMPTY BOX IS STORED AS ABSENT, NEVER AS A DATE. Nothing is defaulted
+ * to today, to the permit's creation time, or to anything else; a date
+ * nobody entered does not appear on a safety document. A value that IS
+ * given is validated exactly as strictly as before.
+ */
+const optionalIsoDateTime = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  isoDateTime.optional(),
+);
+
 // =====================================================================
 // Builders - the only place a catalogue section becomes a schema
 // =====================================================================
@@ -181,8 +201,8 @@ export const wtgWorkFormV2Schema = z
         windFarmName: optionalText(200),
         wtgNumber: optionalText(100),
         descriptionOfWork: optionalText(4000),
-        permitStartAt: isoDateTime.optional(),
-        permitExpiryAt: isoDateTime.optional(),
+        permitStartAt: optionalIsoDateTime,
+        permitExpiryAt: optionalIsoDateTime,
       })
       .strict(),
     sections: checklistSectionsSchema(WTG_WORK_CHECKLIST_SECTIONS),
@@ -317,7 +337,7 @@ const jsaPage1Schema = z
   .object({
     siteOrWtg: optionalText(200),
     /** The printed "Date/Time" header cell. */
-    dateTime: isoDateTime.optional(),
+    dateTime: optionalIsoDateTime,
     /** The printed "S. No." header cell. */
     serialNo: optionalText(60),
     jobOrWork: optionalText(2000),
