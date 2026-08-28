@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
-import type { ChecklistItem, DescriptionRow, SelectionOption } from '../../api/types';
+import type { ChecklistItem, DescriptionRow, PermitSignature, SelectionOption } from '../../api/types';
+import { formatDateTime } from '../../lib/format';
+import { SIGNATURE_ROLE_LABELS } from './labels';
 import './paper.css';
 
 /**
@@ -161,5 +163,41 @@ export function DescriptionTable({ caption, rows }: { caption: string; rows: Des
         ))}
       </tbody>
     </table>
+  );
+}
+
+/**
+ * The authorizations recorded against a permit.
+ *
+ * GENERATION-NEUTRAL ON PURPOSE. These are `permit_signatures` rows -
+ * server data frozen at the moment of each authenticated action - not
+ * form content, so a V1 record and a V2 record show them identically and
+ * neither renderer owns them.
+ */
+export function SignatureBlock({ signatures }: { signatures: PermitSignature[] }) {
+  if (signatures.length === 0) {
+    return <p className="muted text-sm">No authorizations have been recorded yet.</p>;
+  }
+  return (
+    <div className="doc__signatures">
+      {signatures.map((signature) => (
+        <div key={signature.id} className="doc__signature">
+          <p className="doc__signature-role">
+            {SIGNATURE_ROLE_LABELS[signature.signature_role] ?? signature.signature_role}
+          </p>
+          <p className="doc__signature-name">{signature.signer_display_name}</p>
+          {/*
+            A privileged signer has no Team or Position - the backend
+            returns null for both, and none is invented here.
+          */}
+          {signature.signer_team_name && signature.signer_position_name ? (
+            <p className="doc__signature-meta">
+              {signature.signer_position_name} · {signature.signer_team_name}
+            </p>
+          ) : null}
+          <p className="doc__signature-mark">Signed digitally {formatDateTime(signature.signed_at)}</p>
+        </div>
+      ))}
+    </div>
   );
 }

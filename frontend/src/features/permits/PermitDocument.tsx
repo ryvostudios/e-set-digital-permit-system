@@ -17,9 +17,10 @@ import {
   DocumentField,
   DocumentSection,
   FieldGrid,
+  SignatureBlock,
   TickList,
 } from './DocumentParts';
-import { PERMIT_TYPE_LABELS, SIGNATURE_ROLE_LABELS } from './labels';
+import { PERMIT_TYPE_LABELS } from './labels';
 import './paper.css';
 
 /**
@@ -244,34 +245,6 @@ function ConfinedSpaceBody({ form }: { form: ConfinedSpaceEntryForm }) {
         </FieldGrid>
       </DocumentSection>
     </>
-  );
-}
-
-function SignatureBlock({ signatures }: { signatures: PermitSignature[] }) {
-  if (signatures.length === 0) {
-    return <p className="muted text-sm">No authorizations have been recorded yet.</p>;
-  }
-  return (
-    <div className="doc__signatures">
-      {signatures.map((signature) => (
-        <div key={signature.id} className="doc__signature">
-          <p className="doc__signature-role">
-            {SIGNATURE_ROLE_LABELS[signature.signature_role] ?? signature.signature_role}
-          </p>
-          <p className="doc__signature-name">{signature.signer_display_name}</p>
-          {/*
-            A privileged signer has no Team or Position - the backend
-            returns null for both, and none is invented here.
-          */}
-          {signature.signer_team_name && signature.signer_position_name ? (
-            <p className="doc__signature-meta">
-              {signature.signer_position_name} · {signature.signer_team_name}
-            </p>
-          ) : null}
-          <p className="doc__signature-mark">Signed digitally {formatDateTime(signature.signed_at)}</p>
-        </div>
-      ))}
-    </div>
   );
 }
 

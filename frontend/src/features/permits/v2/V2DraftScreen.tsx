@@ -1,14 +1,15 @@
 import { useNavigate } from 'react-router-dom';
 import { getFormCatalogue, type FormCatalogue, type PermitTypeKey } from '../../../api/catalogue';
-import { saveV2JsaDraft, saveV2PermitDraft, submitPermit } from '../../../api/endpoints';
+import { resubmitPermit, saveV2JsaDraft, saveV2PermitDraft, submitPermit } from '../../../api/endpoints';
 import type { ApplicantIdentity } from '../../../auth/applicantIdentity';
-import type { Jsa, Permit } from '../../../api/types';
+import type { AvailableAction, Jsa, LifecycleEvent, Permit } from '../../../api/types';
 import { ROUTES } from '../../../app/routes';
 import { useApiResource } from '../../../lib/useApiResource';
-import { ErrorState, LoadingState } from '../../../ui/Feedback';
+import { Alert, ErrorState, LoadingState } from '../../../ui/Feedback';
 import { PageHeader, StatusBadge } from '../../../ui/Layout';
 import { useToast } from '../../../ui/Toast';
 import { permitTypeLabel } from '../labels';
+import { PermitHistory } from '../PermitHistory';
 import { PermitDraftEditor } from './PermitDraftEditor';
 import { hydrateJsaValuesV2, hydratePermitValuesV2 } from './values';
 
@@ -23,6 +24,17 @@ import { hydrateJsaValuesV2, hydratePermitValuesV2 } from './values';
  * Stored content is used where it exists and a blank, structurally
  * complete document is used where it does not, so a permit created a
  * moment ago and one saved last week open the same way.
+ *
+ * IT SERVES BOTH EDITABLE STATUSES, because the backend has exactly two
+ * (`EDITABLE_STATUSES` in its permits service): DRAFT, and the
+ * PENDING_CORRECTION a CRO sent back. They are the same document and the
+ * same controls; what differs is the onward action, which is `submit`
+ * for one and `resubmit` for the other - a different endpoint and a
+ * different event in the permit's history.
+ *
+ * WHICH ACTIONS EXIST IS THE SERVER'S ANSWER. Nothing here infers
+ * authority from a status or a role: the buttons follow the record's
+ * `availableActions`, exactly as the rest of the application does.
  */
 
 interface Props {
@@ -34,9 +46,19 @@ interface Props {
    * because it genuinely has neither - see auth/applicantIdentity.ts.
    */
   applicant: ApplicantIdentity;
+  /** The record's own action hints. The ONLY source of what may be done here. */
+  availableActions: AvailableAction[];
+  /**
+   * The permit's history. Shown when it was sent back, because the
+   * reason a CRO gave is the whole point of a correction and this screen
+   * replaces the record view that would otherwise carry it.
+   */
+  history: LifecycleEvent[];
+  /** Re-reads the record after an action that leaves it editable. */
+  onCompleted: () => void;
 }
 
-export function V2DraftScreen({ permit, jsa, applicant }: Props) {
+export function V2DraftScreen({ permit, jsa, applicant, availableActions, history, onCompleted }: Props) {
   const catalogue = useApiResource<FormCatalogue>((signal) => getFormCatalogue(signal), []);
   const navigate = useNavigate();
   const toast = useToast();
@@ -60,6 +82,18 @@ export function V2DraftScreen({ permit, jsa, applicant }: Props) {
   */
   const initialPermit = hydratePermitValuesV2(permitType, definition, permit.form_payload);
   const initialJsa = hydrateJsaValuesV2(catalogue.data, jsa.form_payload);
+
+  /*
+    THE ONWARD ACTION, taken from the server's hints rather than from the
+    status. A permit the CRO sent back is RESUBMITTED - its own endpoint,
+    its own lifecycle event - and calling the initial-submission endpoint
+    for it would be the wrong transition entirely. Both carry the permit's
+    version, so a record that moved while it was open is refused.
+  */
+  const correcting = permit.status === 'PENDING_CORRECTION';
+  const onward = correcting
+    ? { available: availableActions.includes('resubmit'), label: 'Resubmit', toast: 'Permit resubmitted for CRO review.' }
+    : { available: availableActions.includes('submit'), label: 'Submit', toast: 'Permit submitted for CRO review.' };
 
   return (
     <>
@@ -89,6 +123,22 @@ export function V2DraftScreen({ permit, jsa, applicant }: Props) {
         }
       />
 
+      {correcting ? (
+        <div className="stack" style={{ marginBottom: 'var(--space-4)' }} data-testid="correction-context">
+          <Alert tone="warning" title="Returned for correction">
+            A Control Room Operator has returned this permit. Correct it below and resubmit it.
+          </Alert>
+          {/*
+            The reason the CRO gave. This screen replaces the tabbed
+            record view, so without the history here the applicant would
+            be asked to correct a permit without being told what for.
+          */}
+          <div className="card">
+            <PermitHistory events={history} />
+          </div>
+        </div>
+      ) : null}
+
       <PermitDraftEditor
         permitType={permitType}
         catalogue={catalogue.data}
@@ -109,11 +159,17 @@ export function V2DraftScreen({ permit, jsa, applicant }: Props) {
           const afterJsa = await saveV2JsaDraft(permit.id, afterPermit.permit.version, jsaValues);
           return afterJsa.permit.version;
         }}
+        canSubmit={onward.available}
+        submitLabel={onward.label}
         onSubmit={async ({ version }) => {
-          await submitPermit(permit.id, version);
+          if (correcting) await resubmitPermit(permit.id, version);
+          else await submitPermit(permit.id, version);
         }}
         onSubmitted={() => {
-          toast.show('Permit submitted for CRO review.');
+          toast.show(onward.toast);
+          // The record is no longer editable, so the editor must not stay
+          // on screen behind it. Same destination as a first submission.
+          onCompleted();
           navigate(ROUTES.records);
         }}
       />

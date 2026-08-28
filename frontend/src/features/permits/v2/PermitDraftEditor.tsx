@@ -45,6 +45,18 @@ export interface DraftEditorProps {
   onSaveDraft: (input: { version: number; permit: PermitValuesV2; jsa: JsaValuesV2 }) => Promise<number>;
   onSubmit: (input: { version: number }) => Promise<void>;
   onSubmitted?: () => void;
+  /**
+   * WHETHER THE SERVER OFFERS THE ONWARD ACTION AT ALL. Taken from the
+   * record's `availableActions`, never decided here: a person who may
+   * edit a document is not necessarily the person who may send it on.
+   */
+  canSubmit?: boolean;
+  /**
+   * What that action is called on this record. A permit a CRO sent back
+   * is RESUBMITTED, which is a different endpoint and a different event
+   * in the permit's history - so it must not read "Submit".
+   */
+  submitLabel?: string;
 }
 
 type SaveState =
@@ -63,6 +75,8 @@ export function PermitDraftEditor({
   onSaveDraft,
   onSubmit,
   onSubmitted,
+  canSubmit = true,
+  submitLabel = 'Submit',
 }: DraftEditorProps) {
   const [permitValues, setPermitValues] = useState<PermitValuesV2>(initialPermit);
   const [jsaValues, setJsaValues] = useState<JsaValuesV2>(initialJsa);
@@ -236,9 +250,11 @@ export function PermitDraftEditor({
         <Button variant="secondary" loading={save.kind === 'saving'} onClick={() => void handleSaveDraft()}>
           Save Draft
         </Button>
-        <Button variant="primary" loading={submitting} onClick={() => void handleSubmit()}>
-          Submit
-        </Button>
+        {canSubmit ? (
+          <Button variant="primary" loading={submitting} onClick={() => void handleSubmit()}>
+            {submitLabel}
+          </Button>
+        ) : null}
       </div>
     </div>
   );
