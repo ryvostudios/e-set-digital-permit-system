@@ -303,6 +303,7 @@ describe('history', () => {
             from_status: 'PENDING_HSE',
             to_status: 'ISSUED',
             reason: null,
+            actor: null,
             occurred_at: '2026-08-20T10:00:00.000Z',
           },
         ],

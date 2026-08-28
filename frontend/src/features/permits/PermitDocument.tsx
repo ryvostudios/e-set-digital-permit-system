@@ -1,4 +1,5 @@
 import type {
+  PermitClosure as PermitClosureRecord,
   ColdWorkForm,
   ConfinedSpaceEntryForm,
   HotWorkForm,
@@ -20,6 +21,7 @@ import {
   SignatureBlock,
   TickList,
 } from './DocumentParts';
+import { PermitClosure } from './PermitClosure';
 import { PERMIT_TYPE_LABELS } from './labels';
 import './paper.css';
 
@@ -252,10 +254,13 @@ export function PermitDocument({
   permit,
   validity,
   signatures,
+  closure,
 }: {
   permit: Permit;
   validity: PermitValidity | null;
   signatures: PermitSignature[];
+  /** Present only for a CLOSED permit - who actually closed it. */
+  closure?: PermitClosureRecord | null;
 }) {
   const applicant = describePermitApplicant(permit);
 
@@ -322,13 +327,22 @@ export function PermitDocument({
             {permit.hold_reason ? <DocumentField label="Hold reason" value={permit.hold_reason} full /> : null}
             {permit.cancelled_at ? <DocumentField label="Cancelled" value={formatDateTime(permit.cancelled_at)} /> : null}
             {permit.cancel_reason ? <DocumentField label="Cancellation reason" value={permit.cancel_reason} full /> : null}
-            {permit.closed_at ? <DocumentField label="Closed" value={formatDateTime(permit.closed_at)} /> : null}
-            {permit.closure_remarks ? (
+            {/*
+              Closure gets its own section below, because WHO closed the
+              permit is a fact in its own right - not a footnote to the
+              hold/cancel band.
+            */}
+            {permit.closed_at && !closure ? (
+              <DocumentField label="Closed" value={formatDateTime(permit.closed_at)} />
+            ) : null}
+            {permit.closure_remarks && !closure ? (
               <DocumentField label="Closure remarks" value={permit.closure_remarks} full />
             ) : null}
           </FieldGrid>
         </DocumentSection>
       ) : null}
+
+      {closure ? <PermitClosure closure={closure} /> : null}
     </article>
   );
 }

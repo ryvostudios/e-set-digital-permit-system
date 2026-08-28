@@ -4389,3 +4389,158 @@ test('a stale replay of the losing approval cannot issue a second time', async (
   assert.equal(db.documentSnapshots.length, 1, 'still exactly one issuance');
   assert.equal(db.documentJobs.length, 1, 'and one document job');
 });
+
+// ---------------------------------------------------------------------
+// Closure: a different CRO, and an untouched issued document
+// ---------------------------------------------------------------------
+
+/**
+ * THE CLOSING CRO IS NOT THE REVIEWING CRO, AND NEED NOT BE.
+ *
+ * The work runs for hours; the CRO who forwarded it goes off duty and
+ * somebody else closes it. Both facts are recorded separately, and the
+ * frozen authorization on the issued document is never rewritten to match
+ * whoever happened to close it.
+ *
+ * And CLOSING IS NOT ISSUING. The issued PDF is the document as it was
+ * frozen at issuance; closure adds a fact to the record and must leave
+ * the snapshot, the document job, the hash and the storage path exactly
+ * as they were.
+ */
+
+test('a DIFFERENT authorized CRO can close a permit the original CRO forwarded', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('hse-1', 'permit.hse_review');
+  // `createIssuedPermit` forwards as cro-1 and approves as hse-1.
+  const issued = await createIssuedPermit(db, 'owner');
+
+  const closed = await closePermit(
+    'cro-b-on-the-next-shift',
+    issued.id,
+    { expectedVersion: issued.version, closureRemarks: 'Work completed and area restored.' },
+    db.deps(),
+  );
+
+  assert.equal(closed.outcome, 'ok', 'any authorized CRO may close - not only the one who forwarded');
+  if (closed.outcome !== 'ok') return;
+  assert.equal(closed.permit.status, 'CLOSED');
+  // The ACTUAL actor is stored, not the original reviewer.
+  assert.equal(closed.permit.closed_by, 'cro-b-on-the-next-shift');
+  assert.notEqual(closed.permit.closed_by, 'cro-1');
+  assert.equal(closed.permit.closed_at, db.now.toISOString(), 'the database clock, not the caller’s');
+  assert.equal(closed.permit.closure_remarks, 'Work completed and area restored.');
+});
+
+test('closing leaves every existing signature exactly as it was', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('hse-1', 'permit.hse_review');
+  const issued = await createIssuedPermit(db, 'owner');
+  const before = JSON.parse(JSON.stringify(db.permitSignatures)) as unknown[];
+
+  await closePermit('cro-b', issued.id, { expectedVersion: issued.version }, db.deps());
+
+  // No closure signature is invented, and no authorization is rewritten:
+  // closure is a workflow fact, not an authorization.
+  assert.deepEqual(db.permitSignatures, before, 'the frozen authorizations are untouched');
+  assert.ok(db.permitSignatures.some((row) => row.signature_role === 'CRO'), 'the original CRO authorization remains');
+  assert.ok(db.permitSignatures.some((row) => row.signature_role === 'HSE'), 'the HSE approval remains');
+});
+
+test('the lifecycle event records the ACTUAL closer, the transition and the remarks', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('hse-1', 'permit.hse_review');
+  const issued = await createIssuedPermit(db, 'owner');
+
+  await closePermit(
+    'cro-b',
+    issued.id,
+    { expectedVersion: issued.version, closureRemarks: 'Area restored.' },
+    db.deps(),
+  );
+
+  const events = db.queries.filter((q) => q.sql.startsWith('INSERT INTO permit_lifecycle_events'));
+  const closure = events.at(-1)!;
+  assert.equal(closure.params?.[2], 'cro-b', 'the actor who actually closed it');
+  assert.equal(closure.params?.[3], 'ISSUED', 'from');
+  assert.equal(closure.params?.[4], 'CLOSED', 'to');
+  assert.equal(closure.params?.[5], 'Area restored.', 'the remarks are preserved on the event');
+
+  // Earlier history is intact and unrewritten.
+  const types = events.map((event) => event.params?.[1]);
+  assert.ok(types.includes('CRO_FORWARDED_HSE'), 'the original forward is still there');
+  assert.ok(types.includes('HSE_APPROVED'), 'the HSE approval is still there');
+});
+
+test('closing does NOT create a second issued snapshot or document job', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('hse-1', 'permit.hse_review');
+  const issued = await createIssuedPermit(db, 'owner');
+
+  // The issued document as it stands after issuance.
+  assert.equal(db.documentSnapshots.length, 1);
+  assert.equal(db.documentJobs.length, 1);
+  const snapshotBefore = JSON.parse(JSON.stringify(db.documentSnapshots[0])) as Record<string, unknown>;
+  const jobBefore = JSON.parse(JSON.stringify(db.documentJobs[0])) as Record<string, unknown>;
+
+  await closePermit('cro-b', issued.id, { expectedVersion: issued.version }, db.deps());
+
+  assert.equal(db.documentSnapshots.length, 1, 'closure must not create another snapshot');
+  assert.equal(db.documentJobs.length, 1, 'closure must not create another document job');
+  // Byte-for-byte the same rows: same id, same hash, same renderer, same
+  // storage path. The PDF is the document frozen at issuance.
+  assert.deepEqual(db.documentSnapshots[0], snapshotBefore);
+  assert.deepEqual(db.documentJobs[0], jobBefore);
+});
+
+test('a stale or replayed close cannot create a second closure', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('hse-1', 'permit.hse_review');
+  const issued = await createIssuedPermit(db, 'owner');
+
+  const first = await closePermit('cro-b', issued.id, { expectedVersion: issued.version }, db.deps());
+  assert.equal(first.outcome, 'ok');
+  if (first.outcome !== 'ok') return;
+  const closedAt = first.permit.closed_at;
+  const eventsAfterFirst = db.queries.filter((q) =>
+    q.sql.startsWith('INSERT INTO permit_lifecycle_events'),
+  ).length;
+
+  // The same request replayed: the version is stale AND the permit is no
+  // longer closable. Either alone is enough.
+  for (let replay = 0; replay < 3; replay += 1) {
+    const again = await closePermit(
+      'cro-c',
+      issued.id,
+      { expectedVersion: issued.version, closureRemarks: 'a different story' },
+      db.deps(),
+    );
+    assert.notEqual(again.outcome, 'ok', 'a replay must never close again');
+  }
+
+  const eventsNow = db.queries.filter((q) => q.sql.startsWith('INSERT INTO permit_lifecycle_events')).length;
+  assert.equal(eventsNow, eventsAfterFirst, 'no second closure event');
+  // And the first closer, time and remarks are untouched by the replays.
+  const stored = db.permits.get(issued.id)!;
+  assert.equal(stored.closed_by, 'cro-b');
+  assert.equal(stored.closed_at, closedAt);
+});
+
+test('closing does not touch the permit number, the JSA, or the issued timestamp', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  db.grantCapability('hse-1', 'permit.hse_review');
+  const issued = await createIssuedPermit(db, 'owner');
+
+  const closed = await closePermit('cro-b', issued.id, { expectedVersion: issued.version }, db.deps());
+  assert.equal(closed.outcome, 'ok');
+  if (closed.outcome !== 'ok') return;
+
+  assert.equal(closed.permit.permit_sequence, issued.permit_sequence, 'the permit number is permanent');
+  assert.equal(closed.permit.jsa_id, issued.jsa_id);
+  assert.equal(closed.permit.issued_at, issued.issued_at, 'issuance is not re-dated by closure');
+});

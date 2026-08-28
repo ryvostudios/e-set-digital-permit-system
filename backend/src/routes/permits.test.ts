@@ -39,6 +39,10 @@ let mockPermitDetailRow: Record<string, unknown> | null = null;
 let mockHistoryEventRows: Record<string, unknown>[] = [];
 let mockSearchPermitRows: Record<string, unknown>[] = [];
 let mockDocumentLookupRow: Record<string, unknown> | null = null;
+// The two account lookups the shared actor resolver makes when naming
+// the people behind a permit's lifecycle actors and its closer.
+let mockPrivilegedIdentityRows: Record<string, unknown>[] = [];
+let mockWorkforceIdentityRows: Record<string, unknown>[] = [];
 // Every query issued through the `Pool.prototype.query` stub, in order -
 // lets a test assert *what was actually asked for* (e.g. which user id a
 // query was scoped by), not just the canned response.
@@ -99,6 +103,18 @@ before(() => {
     }
     if (sql.startsWith('SELECT DISTINCT c.name')) {
       return { rows: grantedCapabilities.map((name) => ({ name })) };
+    }
+    if (sql.includes('FROM privileged_identities')) {
+      // resolvePermitActorIdentities - privileged actors. Checked before
+      // the capability lookup below because this query reads the grant
+      // log through a lateral join and would otherwise match it.
+      const ids = new Set(((params as unknown[])[0] as string[]) ?? []);
+      return { rows: mockPrivilegedIdentityRows.filter((row) => ids.has(row.user_id as string)) };
+    }
+    if (sql.includes('FROM workforce_profiles')) {
+      // resolvePermitActorIdentities - ordinary employees.
+      const ids = new Set(((params as unknown[])[0] as string[]) ?? []);
+      return { rows: mockWorkforceIdentityRows.filter((row) => ids.has(row.user_id as string)) };
     }
     if (sql.includes('FROM privileged_access_events')) {
       return { rows: privilegedRoles.map((role) => ({ role, action: 'GRANTED' })) };
@@ -200,6 +216,8 @@ beforeEach(() => {
   mockHistoryEventRows = [];
   mockSearchPermitRows = [];
   mockDocumentLookupRow = null;
+  mockPrivilegedIdentityRows = [];
+  mockWorkforceIdentityRows = [];
   setDocumentStorageAdapterForTests(null);
   capturedQueries = [];
 });
@@ -1166,6 +1184,126 @@ test('GET /permits/:id: an ISSUED permit exposes hold/cancel/close together when
   }
 });
 
+/**
+ * WHO CLOSED IT, END TO END.
+ *
+ * CRO A forwards the permit; CRO B closes it hours later. The detail
+ * response has to name B as the closer - in the Closure record AND on
+ * the closing lifecycle event - while A's own event stays A's, and
+ * neither identity is read off a signature.
+ */
+test('GET /permits/:id names the ACTUAL closer, on both the closure and its history event', async () => {
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'CLOSED',
+    created_by: AUTHENTICATED_USER_ID,
+    issued_at: '2026-01-01T09:00:00.000Z',
+    closed_by: 'cro-b',
+    closed_at: '2026-01-01T17:00:00.000Z',
+    closure_remarks: 'Work completed and area restored.',
+  });
+  mockHistoryEventRows = [
+    { id: 'e1', ordinal: '1', permit_id: SOME_PERMIT_ID, event_type: 'CRO_FORWARDED_HSE', actor_user_id: 'cro-a', from_status: 'PENDING_CRO', to_status: 'PENDING_HSE', reason: null, occurred_at: '2026-01-01T08:00:00.000Z' },
+    { id: 'e2', ordinal: '2', permit_id: SOME_PERMIT_ID, event_type: 'PERMIT_CLOSED', actor_user_id: 'cro-b', from_status: 'ISSUED', to_status: 'CLOSED', reason: 'Work completed and area restored.', occurred_at: '2026-01-01T17:00:00.000Z' },
+  ];
+  mockWorkforceIdentityRows = [
+    { user_id: 'cro-a', display_name: 'Hamza Tariq', company_name: 'E-SET', team_name: 'E-BOP', position_name: 'CRO' },
+    { user_id: 'cro-b', display_name: 'Osama', company_name: 'E-SET', team_name: 'E-BOP', position_name: 'CRO' },
+  ];
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      closure: { closedAt: string; remarks: string; closedBy: { displayName: string; positionName: string } };
+      history: Array<{ event_type: string; actor: { displayName: string } | null }>;
+    };
+
+    assert.equal(body.closure.closedBy.displayName, 'Osama', 'the actor recorded on the permit');
+    assert.equal(body.closure.closedBy.positionName, 'CRO');
+    assert.equal(body.closure.remarks, 'Work completed and area restored.');
+
+    const closed = body.history.find((event) => event.event_type === 'PERMIT_CLOSED')!;
+    assert.equal(closed.actor?.displayName, 'Osama', 'the history names the same actual closer');
+    const forwarded = body.history.find((event) => event.event_type === 'CRO_FORWARDED_HSE')!;
+    assert.equal(forwarded.actor?.displayName, 'Hamza Tariq', 'and the earlier event stays its own actor');
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id names a PRIVILEGED closer rather than reporting them unknown', async () => {
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'CLOSED',
+    created_by: AUTHENTICATED_USER_ID,
+    issued_at: '2026-01-01T09:00:00.000Z',
+    closed_by: 'ceo-1',
+    closed_at: '2026-01-01T17:00:00.000Z',
+    closure_remarks: null,
+  });
+  mockHistoryEventRows = [
+    { id: 'e2', ordinal: '2', permit_id: SOME_PERMIT_ID, event_type: 'PERMIT_CLOSED', actor_user_id: 'ceo-1', from_status: 'ISSUED', to_status: 'CLOSED', reason: null, occurred_at: '2026-01-01T17:00:00.000Z' },
+  ];
+  mockPrivilegedIdentityRows = [{ user_id: 'ceo-1', display_name: 'Ayesha Khan', role: 'CEO' }];
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+    const body = (await res.json()) as {
+      closure: { closedBy: { displayName: string; kind: string; privilegedRole: string; teamName: null } };
+      history: Array<{ actor: { displayName: string } | null }>;
+    };
+    assert.equal(body.closure.closedBy.displayName, 'Ayesha Khan');
+    assert.equal(body.closure.closedBy.kind, 'PRIVILEGED');
+    assert.equal(body.closure.closedBy.privilegedRole, 'CEO');
+    assert.equal(body.closure.closedBy.teamName, null, 'no team is invented for a privileged account');
+    assert.equal(body.history[0]?.actor?.displayName, 'Ayesha Khan');
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id reports an unresolvable closer as null, and never falls back to a signature', async () => {
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'CLOSED',
+    created_by: AUTHENTICATED_USER_ID,
+    issued_at: '2026-01-01T09:00:00.000Z',
+    closed_by: 'ghost',
+    closed_at: '2026-01-01T17:00:00.000Z',
+    closure_remarks: 'Closed out.',
+  });
+  mockHistoryEventRows = [
+    { id: 'e2', ordinal: '2', permit_id: SOME_PERMIT_ID, event_type: 'PERMIT_CLOSED', actor_user_id: 'ghost', from_status: 'ISSUED', to_status: 'CLOSED', reason: 'Closed out.', occurred_at: '2026-01-01T17:00:00.000Z' },
+  ];
+  // Nobody matches 'ghost' in either account table.
+  mockWorkforceIdentityRows = [
+    { user_id: 'cro-a', display_name: 'Hamza Tariq', company_name: 'E-SET', team_name: 'E-BOP', position_name: 'CRO' },
+  ];
+  grantedCapabilities = [];
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+    const body = (await res.json()) as {
+      closure: { closedBy: unknown; remarks: string };
+      history: Array<{ actor: unknown }>;
+    };
+    assert.equal(body.closure.closedBy, null, 'unknown stays unknown');
+    assert.equal(body.closure.remarks, 'Closed out.', 'the closure is still a fact');
+    assert.equal(body.history[0]?.actor, null);
+    // The identity lookups - the batched ones, taking a list of user ids -
+    // must never have consulted the signature table. Who signed is a
+    // different fact from who acted.
+    const identityLookups = capturedQueries.filter((entry) => Array.isArray(entry.params[0]));
+    assert.ok(identityLookups.length > 0, 'the actor lookups actually ran');
+    assert.ok(
+      identityLookups.every((entry) => !/permit_signatures/.test(entry.sql)),
+      'no actor identity may be resolved from a signature',
+    );
+  } finally {
+    await close();
+  }
+});
+
 // --- GET /permits/:id/history ---
 
 test('GET /permits/:id/history denies an unauthenticated request (401)', async () => {
@@ -1198,8 +1336,12 @@ test('GET /permits/:id/history returns events for an authorized caller', async (
   try {
     const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/history`, VALID_TOKEN);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { events: unknown[] };
+    const body = (await res.json()) as { events: Array<{ actor: unknown }> };
     assert.equal(body.events.length, 1);
+    // The history endpoint answers "who did this" the same way the
+    // permit detail does - an unresolvable actor as an explicit null.
+    assert.ok('actor' in body.events[0]!, 'each event carries its actor identity');
+    assert.equal(body.events[0]!.actor, null);
   } finally {
     await close();
   }

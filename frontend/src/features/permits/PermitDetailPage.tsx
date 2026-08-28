@@ -144,7 +144,7 @@ export function PermitDetailPage() {
   if (resource.error) return <ErrorState error={resource.error} onRetry={resource.reload} />;
   if (!detail) return <ErrorState error={{ code: 'not_found' }} />;
 
-  const { permit, jsa, validity, availableActions, history, signatures, document, serverTime } = detail;
+  const { permit, jsa, validity, availableActions, history, signatures, document, serverTime, closure } = detail;
   const canEdit = availableActions.includes('update');
 
   /**
@@ -291,7 +291,7 @@ export function PermitDetailPage() {
             </article>
           ) : (
             <>
-              <PermitDocument permit={permit} validity={validity} signatures={signatures} />
+              <PermitDocument permit={permit} validity={validity} signatures={signatures} closure={closure} />
               <div style={{ marginTop: 'var(--space-4)' }}>
                 <PermitPdfButton permit={permit} document={document} />
               </div>

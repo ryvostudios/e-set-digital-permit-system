@@ -2,6 +2,8 @@ import type {
   CurrentUser,
   EmployeeDetail,
   Jsa,
+  LifecycleEvent,
+  PermitActorIdentity,
   Permit,
   PermitDetailResponse,
   PermitStatus,
@@ -195,6 +197,49 @@ export function jsa(overrides: Partial<Jsa> = {}): Jsa {
   };
 }
 
+/** A resolved actor identity: an ordinary employee unless overridden. */
+export function actorIdentity(overrides: Partial<PermitActorIdentity> = {}): PermitActorIdentity {
+  return {
+    userId: 'user-1',
+    kind: 'NORMAL',
+    displayName: 'Osama',
+    companyName: 'E-SET',
+    teamName: 'E-BOP',
+    positionName: 'CRO',
+    privilegedRole: null,
+    ...overrides,
+  };
+}
+
+/** A privileged actor: no team or position, a role label instead of a job title. */
+export function privilegedActorIdentity(overrides: Partial<PermitActorIdentity> = {}): PermitActorIdentity {
+  return actorIdentity({
+    userId: 'ceo-1',
+    kind: 'PRIVILEGED',
+    displayName: 'Ayesha Khan',
+    teamName: null,
+    positionName: null,
+    privilegedRole: 'CEO',
+    ...overrides,
+  });
+}
+
+export function lifecycleEvent(overrides: Partial<LifecycleEvent> = {}): LifecycleEvent {
+  return {
+    id: 'event-1',
+    ordinal: '1',
+    permit_id: 'permit-1',
+    event_type: 'PERMIT_SUBMITTED',
+    actor_user_id: 'user-1',
+    from_status: 'DRAFT',
+    to_status: 'PENDING_CRO',
+    reason: null,
+    occurred_at: '2026-08-20T08:00:00.000Z',
+    actor: null,
+    ...overrides,
+  };
+}
+
 export function permitDetail(overrides: Partial<PermitDetailResponse> = {}): PermitDetailResponse {
   return {
     permit: permit(),
@@ -204,6 +249,7 @@ export function permitDetail(overrides: Partial<PermitDetailResponse> = {}): Per
     history: [],
     signatures: [],
     document: null,
+    closure: null,
     serverTime: '2026-08-20T08:00:00.000Z',
     ...overrides,
   };

@@ -152,6 +152,27 @@ export interface PermitValidity {
   expiresAt: string;
 }
 
+/**
+ * Who performed an action on a permit - backend/src/domain/permits/actorIdentity.ts
+ *
+ * PRIVILEGED accounts (CEO / System Site Manager) hold no team or
+ * position; their `privilegedRole` stands in for a job title. NORMAL
+ * employees carry their real workforce assignment and no privileged
+ * role. Resolved at read time from current account records, so a name
+ * shown beside an old event is that person's name today; the
+ * authoritative fact - the user id on the immutable event - never
+ * changes.
+ */
+export interface PermitActorIdentity {
+  userId: string;
+  kind: 'NORMAL' | 'PRIVILEGED';
+  displayName: string;
+  companyName: string | null;
+  teamName: string | null;
+  positionName: string | null;
+  privilegedRole: string | null;
+}
+
 export interface LifecycleEvent {
   id: string;
   ordinal: string;
@@ -162,6 +183,12 @@ export interface LifecycleEvent {
   to_status: string;
   reason: string | null;
   occurred_at: string;
+  /**
+   * The identity behind `actor_user_id`, or null when it cannot be
+   * resolved. Never inferred from a signature or from anything else on
+   * the record.
+   */
+  actor: PermitActorIdentity | null;
 }
 
 export type SignatureRole = 'APPLICANT' | 'CRO' | 'HSE' | 'CRO_FALLBACK' | 'RENEWAL';
@@ -206,6 +233,16 @@ export interface PermitListResponse {
   pagination: Pagination;
 }
 
+/** The closer is an actor like any other. */
+export type PermitCloserIdentity = PermitActorIdentity;
+
+export interface PermitClosure {
+  closedAt: string;
+  remarks: string | null;
+  /** Null when the closer has no resolvable identity. Never invented. */
+  closedBy: PermitCloserIdentity | null;
+}
+
 export interface PermitDetailResponse {
   permit: Permit;
   jsa: Jsa;
@@ -214,6 +251,15 @@ export interface PermitDetailResponse {
   history: LifecycleEvent[];
   signatures: PermitSignature[];
   document: PermitDocumentStatus | null;
+  /**
+   * Who actually closed the permit, and when. Null unless CLOSED.
+   *
+   * The closing CRO is very often NOT the CRO who reviewed or forwarded
+   * it - shifts change while the work runs - so this is a separate fact
+   * from the frozen CRO authorization on the issued document, and is
+   * never inferred from it.
+   */
+  closure: PermitClosure | null;
   /**
    * The server's clock when this record was read.
    *

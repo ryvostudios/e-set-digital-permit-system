@@ -9,6 +9,8 @@ import {
   computeViewableStatuses,
   STATUS_VIEW_CAPABILITIES,
 } from '../domain/permits/access.js';
+import { buildPermitClosure } from '../domain/permits/closure.js';
+import { resolvePermitActorIdentities } from '../domain/permits/actorIdentity.js';
 import { getDocumentForPermit, hasExpectedFileHash, resolveDocumentStorageAdapter } from '../domain/permits/documents.js';
 import { toDisplayNumber, toPermitNumber } from '../domain/permits/numbering.js';
 import { searchPermitLifecycleEvents, searchPermits } from '../domain/permits/search.js';
@@ -389,13 +391,40 @@ permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Respons
   const history: LifecycleEventRow[] = await getPermitLifecycleEvents(permit.id);
   const signatures = await getPermitSignatures(query, permit.id);
   const document = permit.issued_at ? await getDocumentForPermit(permit.id) : null;
+  /*
+    WHO CLOSED IT, separately from who authorized it.
+
+    The CRO who closes a permit is often not the CRO who reviewed it -
+    shifts change while the work runs. `closed_by` already holds the
+    authenticated actor who actually performed the close; this resolves
+    that id to a name and team so the record can show it. The frozen CRO
+    authorization on the issued document is a different fact and is
+    untouched.
+  */
+  /*
+    WHO DID EACH THING, resolved once for the whole record.
+
+    Every lifecycle event stores the authenticated actor that performed
+    it, and `closed_by` stores the authenticated actor that closed the
+    permit. Both are raw user ids, so both are resolved here - through
+    the same resolver, in one batch - rather than each growing a lookup
+    of its own. An id that cannot be resolved is reported as null; no
+    identity is ever inferred from a signature.
+  */
+  const actorIds = history.map((event) => event.actor_user_id);
+  if (permit.closed_by) actorIds.push(permit.closed_by);
+  const actors = await resolvePermitActorIdentities(query, actorIds);
+  const closure = buildPermitClosure(permit, actors);
 
   res.status(200).json({
     permit: serializePermit(permit),
     jsa: serializeJsa(jsa),
     validity,
     availableActions,
-    history,
+    // Each event carries the identity of the actor who performed it, so
+    // the history can say who closed the permit without any screen
+    // having to guess, or read it off the Closure section.
+    history: history.map((event) => ({ ...event, actor: actors.get(event.actor_user_id) ?? null })),
     /*
       THE SERVER'S OWN CLOCK, so a countdown can be drawn without trusting
       the device's.
@@ -415,6 +444,8 @@ permitsRouter.get('/permits/:id', requireAuth, async (req: Request, res: Respons
     // The frozen signature identities, never re-resolved from a live
     // profile - the same values the immutable snapshot and PDF carry.
     signatures,
+    // Null unless the permit is CLOSED.
+    closure,
     // Status only: the PDF bytes are served solely by GET /permits/:id/pdf.
     document: document
       ? {
@@ -475,10 +506,23 @@ permitsRouter.get('/permits/:id/history', requireAuth, async (req: Request, res:
     return;
   }
 
+  /*
+    The same actor resolution as the permit detail above, so a history
+    read through this endpoint answers "who did this" identically. It is
+    one batched lookup for the events actually being returned.
+  */
+  const withActors = async (events: LifecycleEventRow[]) => {
+    const actors = await resolvePermitActorIdentities(
+      query,
+      events.map((event) => event.actor_user_id),
+    );
+    return events.map((event) => ({ ...event, actor: actors.get(event.actor_user_id) ?? null }));
+  };
+
   const hasFilters = Object.keys(filterQuery.data).length > 0;
   if (!hasFilters) {
     const events: LifecycleEventRow[] = await getPermitLifecycleEvents(params.data.id);
-    res.status(200).json({ events });
+    res.status(200).json({ events: await withActors(events) });
     return;
   }
 
@@ -494,7 +538,7 @@ permitsRouter.get('/permits/:id/history', requireAuth, async (req: Request, res:
     },
     { page: filterQuery.data.page ?? 1, pageSize: filterQuery.data.pageSize ?? 20 },
   );
-  res.status(200).json({ events: page.items, pagination: serializePagination(page) });
+  res.status(200).json({ events: await withActors(page.items), pagination: serializePagination(page) });
 });
 
 /**
