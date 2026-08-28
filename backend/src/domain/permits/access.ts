@@ -73,17 +73,43 @@ export const STATUS_VIEW_CAPABILITIES: Readonly<Record<PermitStatus, readonly st
   // above; the applicant already sees it unconditionally as the creator
   // (`canViewPermit`'s ownership check, below), independent of this list.
   PENDING_CORRECTION: ['permit.send_back'],
-  ISSUED: ['permit.close'],
+  /*
+    THE APPROVER KEEPS READING WHAT THEY APPROVED.
+
+    `permit.hse_review` appears in all four post-issuance states, and the
+    reason is a bug it caused: an HSE reviewer would approve a permit,
+    the status would move PENDING_HSE -> ISSUED, and the very next read
+    of the record they had just issued came back 404. Their read access
+    was keyed to the queue they act from, so it ended at the instant they
+    acted. The screen they were standing on said "That record is not
+    available" about a permit they had personally issued.
+
+    Everywhere else this table follows "the capability that gates the
+    primary mutation available from this status", and for these four
+    states that is CRO's - hold, resume, cancel, close. HSE holds none of
+    them and must not: nothing below grants an ACTION. Reading is simply
+    not the same question as acting, and an authority that signs a permit
+    is entitled to see what became of it.
+
+    THIS ADDS NO PERMIT TO HSE'S VIEW. Every one of these states is
+    reachable only through PENDING_HSE - ISSUED comes from an HSE
+    approval or a CRO fallback approval, HELD and CLOSED only from
+    ISSUED, and CANCELLED only from ISSUED or HELD. So a permit HSE can
+    now read after issuance is, without exception, one they could already
+    read while it sat in their own queue. The scope is the same permits,
+    for longer - not more permits.
+  */
+  ISSUED: ['permit.close', 'permit.hse_review'],
   // Any capability that can act on a HELD permit (resume, cancel, or
   // close it) also grants a non-owner CRO visibility into it - the same
   // "capability that gates the primary available mutation" pattern as
   // every other entry here.
-  HELD: ['permit.resume', 'permit.cancel', 'permit.close'],
+  HELD: ['permit.resume', 'permit.cancel', 'permit.close', 'permit.hse_review'],
   // Terminal state; `permit.cancel` (the capability that caused it)
   // continues to grant read/audit visibility, matching CLOSED's
   // equivalent choice of `permit.close` below.
-  CANCELLED: ['permit.cancel'],
-  CLOSED: ['permit.close'],
+  CANCELLED: ['permit.cancel', 'permit.hse_review'],
+  CLOSED: ['permit.close', 'permit.hse_review'],
 };
 
 /**

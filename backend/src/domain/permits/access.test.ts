@@ -57,11 +57,55 @@ test('canViewPermit denies a non-creator holding an unrelated capability (no cro
     false,
     'forward_hse should not grant view access to a PENDING_HSE permit',
   );
-  assert.equal(
-    canViewPermit(basePermit({ status: 'ISSUED' }), 'hse-1', new Set(['permit.hse_review'])),
-    false,
-    'hse_review should not grant view access to an ISSUED permit',
-  );
+  // HSE's read runs FORWARD from their own queue, never backward into
+  // the states before it: a permit being drafted, reviewed by CRO, or
+  // returned for correction is none of HSE's business and stays unseen.
+  for (const status of ['DRAFT', 'PENDING_CRO', 'PENDING_CORRECTION'] as const) {
+    assert.equal(
+      canViewPermit(basePermit({ status }), 'hse-1', new Set(['permit.hse_review'])),
+      false,
+      `hse_review must not grant view access to a ${status} permit`,
+    );
+  }
+});
+
+/**
+ * THE BUG THIS ENCODES.
+ *
+ * `permit.hse_review` used to grant PENDING_HSE and nothing else, so the
+ * moment an HSE reviewer approved a permit it vanished from under them:
+ * the record they had just issued answered 404, and their screen said
+ * "That record is not available" about their own approval.
+ *
+ * Reading is not acting. The states below are reachable only THROUGH
+ * PENDING_HSE, so this lets HSE keep reading the same permits they could
+ * already read - for longer, not more of them - and grants no action
+ * anywhere (asserted separately).
+ */
+test('canViewPermit lets the HSE approver keep reading a permit after it is issued', () => {
+  for (const status of ['ISSUED', 'HELD', 'CANCELLED', 'CLOSED'] as const) {
+    assert.equal(
+      canViewPermit(basePermit({ status }), 'hse-1', new Set(['permit.hse_review'])),
+      true,
+      `hse_review must grant view access to a ${status} permit`,
+    );
+  }
+});
+
+test('reading after issuance grants the HSE reviewer no action on it', () => {
+  const capabilities = new Set(['permit.hse_review']);
+  for (const status of ['ISSUED', 'HELD', 'CANCELLED', 'CLOSED'] as const) {
+    assert.deepEqual(
+      computeAvailableActions(
+        { status, created_by: 'owner', hse_review_deadline_at: null, issued_at: '2026-01-01T09:00:00.000Z', site_timezone: 'UTC' },
+        'hse-1',
+        capabilities,
+        Date.parse('2026-01-01T10:00:00.000Z'),
+      ),
+      [],
+      `${status} must offer the HSE reviewer nothing to do`,
+    );
+  }
 });
 
 test('permit.view_all grants every status, including another applicant\'s draft, while ownership survives revoke', () => {

@@ -1980,3 +1980,122 @@ test('POST /permits/:id/fallback-approve lets a capable CRO reach the handler/se
     await close();
   }
 });
+
+/*
+  THE PERMIT DID NOT DISAPPEAR WHEN HSE APPROVED IT.
+
+  Reported from UAT: HSE opens a PENDING_HSE permit, presses "Approve and
+  issue", the backend issues it correctly - the PDF is generated, the
+  applicant and the CRO can both see it - and the HSE browser, still on
+  the same URL, renders "That record is not available".
+
+  The cause was here, in the read path, not in the workflow: HSE's read
+  access was keyed to the queue they act from, so it ended at the instant
+  they acted. `STATUS_VIEW_CAPABILITIES.ISSUED` listed `permit.close`,
+  which is CRO's, and the reviewer who had just issued the permit was a
+  stranger to it one request later.
+
+  These exercise the REAL route with the REAL authorization, over HTTP,
+  in the exact order the browser performs it.
+*/
+
+const HSE_ONLY = ['permit.hse_review'];
+
+test('GET /permits/:id: an HSE reviewer can still read the permit they just issued', async () => {
+  // The record as it stands immediately after the approval succeeded.
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'ISSUED',
+    created_by: 'someone-else',
+    issued_at: '2026-01-01T09:00:00.000Z',
+  });
+  grantedCapabilities = HSE_ONLY;
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+
+    assert.equal(res.status, 200, 'the reviewer who issued it must not be told it does not exist');
+    const body = (await res.json()) as { permit: { id: string; status: string }; availableActions: string[] };
+    assert.equal(body.permit.id, SOME_PERMIT_ID);
+    assert.equal(body.permit.status, 'ISSUED');
+    // Read-only: issuing it was the last thing HSE may do to it.
+    assert.deepEqual(body.availableActions, [], 'no approval or edit action survives issuance');
+  } finally {
+    await close();
+  }
+});
+
+test('GET /permits/:id: HSE keeps reading the permit through hold, cancellation and closure', async () => {
+  for (const status of ['HELD', 'CANCELLED', 'CLOSED'] as const) {
+    mockPermitDetailRow = makePermitDetailRow({
+      status,
+      created_by: 'someone-else',
+      issued_at: '2026-01-01T09:00:00.000Z',
+      ...(status === 'CLOSED'
+        ? { closed_by: 'cro-b', closed_at: '2026-01-01T17:00:00.000Z' }
+        : {}),
+    });
+    grantedCapabilities = HSE_ONLY;
+    const { url, close } = await startServer();
+    try {
+      const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+      assert.equal(res.status, 200, `${status} must remain readable by the approver`);
+      const body = (await res.json()) as { availableActions: string[] };
+      assert.deepEqual(body.availableActions, [], `${status} must offer HSE nothing to do`);
+    } finally {
+      await close();
+    }
+  }
+});
+
+test('GET /permits/:id: HSE still cannot read a permit that has not reached them (404, IDOR-safe)', async () => {
+  // The states BEFORE their queue are none of their business, and the
+  // fix above must not have quietly opened them.
+  for (const status of ['DRAFT', 'PENDING_CRO', 'PENDING_CORRECTION'] as const) {
+    mockPermitDetailRow = makePermitDetailRow({ status, created_by: 'someone-else' });
+    grantedCapabilities = HSE_ONLY;
+    const { url, close } = await startServer();
+    try {
+      const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}`, VALID_TOKEN);
+      assert.equal(res.status, 404, `${status} must stay invisible to HSE`);
+    } finally {
+      await close();
+    }
+  }
+});
+
+test('GET /permits/:id/history: the approver can still read the history of what they issued', async () => {
+  mockPermitDetailRow = makePermitDetailRow({
+    status: 'ISSUED',
+    created_by: 'someone-else',
+    issued_at: '2026-01-01T09:00:00.000Z',
+  });
+  mockHistoryEventRows = [
+    { id: 'e1', ordinal: '1', permit_id: SOME_PERMIT_ID, event_type: 'HSE_APPROVED', actor_user_id: AUTHENTICATED_USER_ID, from_status: 'PENDING_HSE', to_status: 'ISSUED', reason: null, occurred_at: '2026-01-01T09:00:00.000Z' },
+  ];
+  grantedCapabilities = HSE_ONLY;
+  const { url, close } = await startServer();
+  try {
+    const res = await getRequest(url, `/permits/${SOME_PERMIT_ID}/history`, VALID_TOKEN);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { events: unknown[] };
+    assert.equal(body.events.length, 1);
+  } finally {
+    await close();
+  }
+});
+
+test('POST /permits/:id/hse-approve: reading after issuance does not let HSE approve again', async () => {
+  // The read fix is a read fix. The mutation still refuses, on the
+  // capability AND on the row-locked status behind it.
+  mockPermitDetailRow = makePermitDetailRow({ status: 'ISSUED', created_by: 'someone-else' });
+  grantedCapabilities = ['permit.close']; // a CRO: may read and close, may NOT approve
+  const { url, close } = await startServer();
+  try {
+    const res = await postRequest(url, `/permits/${SOME_PERMIT_ID}/hse-approve`, VALID_TOKEN, {
+      expectedVersion: 1,
+    });
+    assert.equal(res.status, 403, 'approval remains gated by permit.hse_review');
+  } finally {
+    await close();
+  }
+});
