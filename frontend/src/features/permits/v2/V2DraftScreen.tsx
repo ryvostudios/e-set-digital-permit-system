@@ -10,7 +10,7 @@ import { PageHeader, StatusBadge } from '../../../ui/Layout';
 import { useToast } from '../../../ui/Toast';
 import { permitTypeLabel } from '../labels';
 import { PermitDraftEditor } from './PermitDraftEditor';
-import { emptyJsaValues, emptyPermitValues, type JsaValuesV2, type PermitValuesV2 } from './values';
+import { hydrateJsaValuesV2, hydratePermitValuesV2 } from './values';
 
 /**
  * The applicant's screen for an authoritative (V2) DRAFT.
@@ -49,9 +49,17 @@ export function V2DraftScreen({ permit, jsa, applicant }: Props) {
   const definition = catalogue.data.permits[permitType];
   if (!definition) return <ErrorState error={{ code: 'not_found' }} />;
 
-  // Stored content when there is some, a blank document when there is not.
-  const initialPermit = (permit.form_payload as PermitValuesV2 | null) ?? emptyPermitValues(permitType, definition);
-  const initialJsa = (jsa.form_payload as JsaValuesV2 | null) ?? emptyJsaValues(catalogue.data);
+  /*
+    Stored content where there is some, a blank document where there is
+    not - and, crucially, at every level rather than only the top one.
+    A partly completed draft is a legitimate thing to save now, so a
+    stored payload routinely carries only the parts someone filled in;
+    hydration merges it onto the blank form so the documents below can
+    rely on the structure the catalogue describes. It supplies containers
+    only - no answer is ever invented. See values.ts.
+  */
+  const initialPermit = hydratePermitValuesV2(permitType, definition, permit.form_payload);
+  const initialJsa = hydrateJsaValuesV2(catalogue.data, jsa.form_payload);
 
   return (
     <>

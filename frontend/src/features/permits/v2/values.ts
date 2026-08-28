@@ -154,3 +154,116 @@ export function emptyJsaValues(catalogue: FormCatalogue): JsaValuesV2 {
     },
   };
 }
+
+// =====================================================================
+// HYDRATION - the single boundary between a STORED payload and a
+// RENDERABLE one
+// =====================================================================
+
+/**
+ * WHY THIS EXISTS.
+ *
+ * `emptyPermitValues`/`emptyJsaValues` above are structurally complete:
+ * every collection the renderers walk is present. A STORED payload is
+ * not. The V2 contract makes most printed fields optional (a blank draft
+ * has to be saveable), so the server stores exactly what the applicant
+ * had - and a key nobody touched is simply absent. Now that a partly
+ * completed permit is a legitimate, saveable, submittable thing, those
+ * gaps reach the browser routinely.
+ *
+ * Using `stored ?? empty...` therefore picks the WHOLE stored payload the
+ * moment it is non-null, gaps and all, and the first renderer to reach
+ * for a collection that is not there crashes the screen to blank.
+ *
+ * So the payload is hydrated ONCE, here, on the way in. Every renderer
+ * downstream can then assume the structure the catalogue describes, and
+ * no component needs its own `?? []` - a scattered fallback is a second
+ * copy of the empty-form shape, and copies drift.
+ *
+ * WHAT HYDRATION MUST NEVER DO IS INVENT AN ANSWER. It supplies
+ * STRUCTURE - the containers a form has - and never CONTENT. An
+ * unanswered question stays null, a stored 'NO' stays 'NO', a stored
+ * 'NA' stays 'NA', an empty string stays empty, and a collection the
+ * applicant deliberately emptied stays empty. The completeness rule is
+ * still entirely the server's.
+ */
+
+type PlainObject = Record<string, unknown>;
+
+function isPlainObject(value: unknown): value is PlainObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** A defensive deep copy, so nothing rendered aliases the stored payload. */
+function cloneValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(cloneValue);
+  if (isPlainObject(value)) {
+    const copy: PlainObject = {};
+    for (const key of Object.keys(value)) copy[key] = cloneValue(value[key]);
+    return copy;
+  }
+  return value;
+}
+
+/**
+ * Merges one stored value onto its default.
+ *
+ * - `undefined` (the key was never stored) takes the default.
+ * - Plain objects merge RECURSIVELY, key by key, so a partly stored
+ *   section keeps what it has and gains only the containers it lacks.
+ * - A stored array REPLACES the default array outright - including an
+ *   explicitly empty one, which stays empty. Its entries are shaped
+ *   against the default's first entry where there is one, so a
+ *   half-written task-analysis row gains its missing `energySources`
+ *   list rather than crashing the table that reads it.
+ * - Anything else is a LEAF and is taken from storage exactly as it is:
+ *   `null` (unanswered), `''`, `false`, 'YES'/'NO'/'NA', a number.
+ * - Where storage holds a structure and the default holds a leaf-shaped
+ *   value of a different kind, the DEFAULT's structure wins - that is
+ *   the only case a stored value is dropped, and it is the case where
+ *   keeping it would crash the renderer.
+ */
+function hydrateValue(defaults: unknown, stored: unknown): unknown {
+  if (stored === undefined) return cloneValue(defaults);
+
+  if (Array.isArray(defaults)) {
+    if (!Array.isArray(stored)) return cloneValue(defaults);
+    // The default's first entry is the row template; a default of `[]`
+    // (participants) has none, so stored rows are taken as they are.
+    const template = defaults.length > 0 ? defaults[0] : undefined;
+    return stored.map((entry) => (template === undefined ? cloneValue(entry) : hydrateValue(template, entry)));
+  }
+
+  if (isPlainObject(defaults)) {
+    if (!isPlainObject(stored)) return cloneValue(defaults);
+    const merged: PlainObject = {};
+    for (const key of Object.keys(defaults)) merged[key] = hydrateValue(defaults[key], stored[key]);
+    // Keys the stored payload carries and the blank form does not - a
+    // remark beside an answer, an `other` line, a question this build's
+    // catalogue no longer lists. Kept: dropping them would silently
+    // discard something a person wrote.
+    for (const key of Object.keys(stored)) {
+      if (!(key in defaults)) merged[key] = cloneValue(stored[key]);
+    }
+    return merged;
+  }
+
+  return cloneValue(stored);
+}
+
+/**
+ * A stored permit payload, made renderable. `null` (never saved) and a
+ * partial payload both come back structurally complete.
+ */
+export function hydratePermitValuesV2(
+  permitType: PermitTypeKey,
+  definition: PermitDefinition,
+  stored: unknown,
+): PermitValuesV2 {
+  return hydrateValue(emptyPermitValues(permitType, definition), stored ?? undefined) as PermitValuesV2;
+}
+
+/** The same, for the two-page JSA. */
+export function hydrateJsaValuesV2(catalogue: FormCatalogue, stored: unknown): JsaValuesV2 {
+  return hydrateValue(emptyJsaValues(catalogue), stored ?? undefined) as JsaValuesV2;
+}
