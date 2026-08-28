@@ -31,7 +31,7 @@ import {
   type Company,
   type PermitsServiceDeps,
 } from './service.js';
-import { PERMIT_TYPES } from './forms.js';
+import { PERMIT_TYPES, type PermitType } from './forms.js';
 import {
   makeHotWorkForm,
   makeJsaFormColumns,
@@ -39,6 +39,7 @@ import {
 } from './formFixtures.test.js';
 import { answeredJsaV2, answeredWtgPermitV2, blankJsaFormV2, blankPermitV2, partialPermitV2 } from '../../test/v2Forms.js';
 import { ACTIVE_FORM_GENERATION, jsaFormVersionFor, permitFormVersionFor } from './formGeneration.js';
+import type { SubmitOutcome } from './service.js';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 
@@ -4142,4 +4143,109 @@ test('the WhatsApp payload keeps the bare authoritative permit number, unprefixe
   // The structured business field is the stored number and nothing else.
   assert.equal(payload.permitNumber, issued.permit_sequence);
   assert.ok(/^\d+$/.test(payload.permitNumber), 'the payload number must stay bare');
+});
+
+/**
+ * SUBMITTING END TO END, FOR EVERY PERMIT TYPE.
+ *
+ * `partialSubmission.test.ts` pins the RULE
+ * (`hasMeaningfulSubmissionContent`). These pin what `submitPermit`
+ * actually does with it, because the hosted regression was not in the
+ * rule at all - the screen submitted before saving, so the server was
+ * asked to judge a permit it had never been sent and refused it as
+ * `missing_required_fields`. Once the document is stored, a partly
+ * completed one of ANY type must reach PENDING_CRO, and only a document
+ * with nothing in it comes back as `empty_submission`.
+ */
+async function storeAndSubmit(
+  db: FakeDb,
+  permitType: PermitType,
+  permitForm: unknown,
+  jsaForm: unknown,
+): Promise<SubmitOutcome> {
+  const { permit } = await createDraftPermit('applicant-1', 'UTC', permitType, db.deps());
+  const savedPermit = await updateDraftPermit(
+    'applicant-1',
+    permit.id,
+    { expectedVersion: permit.version, company: 'ESET', form: permitForm },
+    db.deps(),
+  );
+  if (savedPermit.outcome !== 'ok') throw new Error(`setup failed: permit save (${savedPermit.outcome})`);
+  const savedJsa = await updateLinkedJsa(
+    'applicant-1',
+    permit.id,
+    { expectedVersion: savedPermit.permit.version, form: jsaForm },
+    db.deps(),
+  );
+  if (savedJsa.outcome !== 'ok') throw new Error('setup failed: jsa save');
+  return submitPermit('applicant-1', permit.id, { expectedVersion: savedJsa.permit.version }, db.deps());
+}
+
+for (const permitType of ['WTG_WORK', 'COLD_WORK', 'HOT_WORK', 'CONFINED_SPACE_ENTRY'] as const) {
+  test(`${permitType}: a partly completed permit submits to PENDING_CRO`, async () => {
+    const db = new FakeDb();
+    db.grantCapability('cro-a', 'permit.cro_review');
+    const result = await storeAndSubmit(db, permitType, partialPermitV2(permitType), blankJsaFormV2());
+
+    assert.equal(result.outcome, 'ok', `${permitType} must be submittable partly completed`);
+    if (result.outcome !== 'ok') throw new Error('unreachable');
+    assert.equal(result.permit.status, 'PENDING_CRO');
+  });
+
+  test(`${permitType}: a partly completed permit is never refused as missing_required_fields`, async () => {
+    const db = new FakeDb();
+    db.grantCapability('cro-a', 'permit.cro_review');
+    const result = await storeAndSubmit(db, permitType, partialPermitV2(permitType), blankJsaFormV2());
+    assert.notDeepEqual(result, { outcome: 'invalid', reason: 'missing_required_fields' });
+  });
+
+  test(`${permitType}: a completely blank permit and JSA is refused as empty_submission`, async () => {
+    const db = new FakeDb();
+    db.grantCapability('cro-a', 'permit.cro_review');
+    const result = await storeAndSubmit(db, permitType, blankPermitV2(permitType), blankJsaFormV2());
+    // The accurate refusal, and specifically NOT the missing-fields one.
+    assert.deepEqual(result, { outcome: 'invalid', reason: 'empty_submission' });
+  });
+
+  test(`${permitType}: a blank permit still submits when the JSA carries the content`, async () => {
+    const db = new FakeDb();
+    db.grantCapability('cro-a', 'permit.cro_review');
+    const result = await storeAndSubmit(db, permitType, blankPermitV2(permitType), answeredJsaV2());
+    assert.equal(result.outcome, 'ok', 'content anywhere in the document is enough');
+  });
+}
+
+test('an unanswered question stays null through submission - nothing is defaulted', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  const result = await storeAndSubmit(db, 'WTG_WORK', partialPermitV2('WTG_WORK'), blankJsaFormV2());
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') throw new Error('unreachable');
+
+  const stored = result.permit.form_payload as unknown as { sections: Record<string, Record<string, { response: unknown }>> };
+  const responses = Object.values(stored.sections).flatMap((band) =>
+    Object.values(band).map((item) => item.response),
+  );
+  assert.ok(responses.length > 0);
+  // Whatever the fixture answered is kept; everything else is still null,
+  // never turned into NO or NA on the way past.
+  assert.ok(responses.every((response) => response === null || response === 'YES' || response === 'NO' || response === 'NA'));
+  assert.ok(responses.some((response) => response === null), 'blank questions must remain blank');
+});
+
+test('an N/A answer alone is enough to submit, because choosing it is a judgement', async () => {
+  const db = new FakeDb();
+  db.grantCapability('cro-a', 'permit.cro_review');
+  // WTG, not Cold Work: the 008 forms print no N/A column at all, and the
+  // schema is right to refuse one there.
+  const blank = blankPermitV2('WTG_WORK') as { sections: Record<string, Record<string, { response: unknown }>> };
+  const sectionId = Object.keys(blank.sections)[0]!;
+  const itemId = Object.keys(blank.sections[sectionId]!)[0]!;
+  blank.sections[sectionId]![itemId]!.response = 'NA';
+
+  const result = await storeAndSubmit(db, 'WTG_WORK', blank, blankJsaFormV2());
+  assert.equal(result.outcome, 'ok');
+  if (result.outcome !== 'ok') throw new Error('unreachable');
+  const stored = result.permit.form_payload as unknown as { sections: Record<string, Record<string, { response: unknown }>> };
+  assert.equal(stored.sections[sectionId]![itemId]!.response, 'NA', 'NA must survive exactly');
 });

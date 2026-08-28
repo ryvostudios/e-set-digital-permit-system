@@ -200,8 +200,19 @@ describe('a V2 permit returned for correction', () => {
 
     const posted = calls.filter((call) => call.method === 'POST');
     expect(posted.map((call) => call.url)).toEqual(['/api/v1/permits/permit-1/resubmit']);
-    expect(posted[0]!.body).toEqual({ version: 7 });
     expect(calls.some((call) => call.url.endsWith('/submit'))).toBe(false);
+
+    // Resubmitting sends the corrected document before asking for the
+    // decision on it - the same rule as a first submission - so the
+    // version posted is the one those saves returned (7 -> 8 -> 9).
+    expect(
+      calls.filter((call) => call.method !== 'GET').map((call) => `${call.method} ${call.url}`),
+    ).toEqual([
+      'PATCH /api/v1/permits/permit-1',
+      'PATCH /api/v1/permits/permit-1/jsa',
+      'POST /api/v1/permits/permit-1/resubmit',
+    ]);
+    expect(posted[0]!.body).toEqual({ version: 9 });
   });
 
   it('leaves the correction screen once the resubmission succeeds', async () => {

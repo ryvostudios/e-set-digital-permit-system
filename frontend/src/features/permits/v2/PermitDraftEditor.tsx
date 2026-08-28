@@ -150,12 +150,39 @@ export function PermitDraftEditor({
     }
   }
 
+  /**
+   * SUBMITTING MEANS SUBMITTING WHAT IS ON SCREEN.
+   *
+   * Everything typed into this document lives in React state until it is
+   * saved. Submitting without saving first therefore asked the server to
+   * judge a document it had never been sent: a permit filled in and
+   * submitted in one sitting still had `form_payload = NULL` in the
+   * database, so the submission was refused as "missing required fields"
+   * - a message about the empty record on the server, not about the
+   * completed form in front of the applicant, and no amount of filling it
+   * in could clear it.
+   *
+   * So the document is saved first, and the version that save returns is
+   * the one submitted. That also puts the SERVER in a position to apply
+   * the real rule: a partly completed permit goes through, and a document
+   * with nothing in it at all comes back as `empty_submission` - "Enter
+   * at least one detail before submitting this permit" - which is the
+   * accurate thing to say and the only refusal there is.
+   *
+   * Nothing is validated here. This component still decides nothing about
+   * completeness; it makes sure the server is looking at the right
+   * document before it decides.
+   */
   async function handleSubmit(): Promise<void> {
     setSubmitting(true);
     setSubmitError(null);
     setUnanswered([]);
     try {
-      await onSubmit({ version });
+      const submittedVersion = await onSaveDraft({ version, permit: permitValues, jsa: jsaValues });
+      setVersion(submittedVersion);
+      setDirty(false);
+      setSave({ kind: 'saved', at: Date.now() });
+      await onSubmit({ version: submittedVersion });
       setDirty(false);
       onSubmitted?.();
     } catch (caught) {
