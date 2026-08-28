@@ -71,8 +71,19 @@ const dash = (value: string | null | undefined): string => value?.trim() || '-';
 const response = (answer: { response: string; remarks?: string }): { response: string; remarks: string | null } =>
   ({ response: answer.response, remarks: answer.remarks ?? null });
 
-function fields(rows: Array<[string, string | null | undefined]>): DocumentBlock {
-  return { kind: 'fields', rows: rows.map(([label, value]) => ({ label, value: dash(value) })) };
+type FieldHint = { format?: 'timestamp'; technical?: boolean };
+
+/**
+ * A field band. The optional third element carries a PRESENTATION hint
+ * for PDFKIT_V3 - how to print the value, or that it is internal
+ * metadata. It changes no stored value and the older renderers ignore it,
+ * so their output is byte-identical.
+ */
+function fields(rows: Array<[string, string | null | undefined] | [string, string | null | undefined, FieldHint]>): DocumentBlock {
+  return {
+    kind: 'fields',
+    rows: rows.map(([label, value, hint]) => ({ label, value: dash(value), ...(hint ?? {}) })),
+  };
 }
 
 /**
@@ -147,7 +158,11 @@ function permitHeader(snapshot: IssuedPermitSnapshotV2, title: string, reference
   return [{ title: 'AUTHORITATIVE PERMIT', blocks: [fields([
     ['FORM', reference ? `${reference} Rev 0` : title], ['PERMIT NUMBER', snapshot.permitNumber], ['JSA NUMBER', snapshot.jsaNumber],
     ['APPLICANT', applicant], ['APPLICANT COMPANY', snapshot.applicantIdentity?.companyName ?? snapshot.company],
-    ['ISSUED AT', snapshot.issuedAt], ['VALID UNTIL', snapshot.expiresAt], ['SITE TIMEZONE', snapshot.siteTimezone],
+    ['ISSUED AT', snapshot.issuedAt, { format: 'timestamp' }],
+    ['VALID UNTIL', snapshot.expiresAt, { format: 'timestamp' }],
+    // The IANA zone is a configuration value, not something a person
+    // holding the permit reads. V3 prints the zone once, in words.
+    ['SITE TIMEZONE', snapshot.siteTimezone, { technical: true }],
   ])] }];
 }
 
@@ -165,7 +180,7 @@ function permitSections(snapshot: IssuedPermitSnapshotV2): { title: string; sect
       const form = snapshot.permitForm as WtgWorkFormV2;
       return { title: 'WTG WORK PERMIT', sections: [
         ...permitHeader(snapshot, 'WTG WORK PERMIT'),
-        { title: '1. PERMIT ISSUE', blocks: [fields([['WIND FARM NAME', form.permitIssue.windFarmName], ['WTG NUMBER', form.permitIssue.wtgNumber], ['DESCRIPTION OF WORK', form.permitIssue.descriptionOfWork], ['PERMIT START', form.permitIssue.permitStartAt], ['PERMIT EXPIRY', form.permitIssue.permitExpiryAt]])] },
+        { title: '1. PERMIT ISSUE', blocks: [fields([['WIND FARM NAME', form.permitIssue.windFarmName], ['WTG NUMBER', form.permitIssue.wtgNumber], ['DESCRIPTION OF WORK', form.permitIssue.descriptionOfWork], ['PERMIT START', form.permitIssue.permitStartAt, { format: 'timestamp' }], ['PERMIT EXPIRY', form.permitIssue.permitExpiryAt, { format: 'timestamp' }]])] },
         ...WTG_WORK_CHECKLIST_SECTIONS.map((section) => checklist(section, form.sections[section.id]!)),
         checklist(WTG_ISOLATION_POINTS, form.isolationPoints), selections(WTG_PPE_REQUIRED, form.ppe),
         { title: 'AUTHORIZATION BANDS', blocks: [{ kind: 'paragraph', text: `${WTG_AUTHORIZATION_BANDS.map((band) => band.label).join(' / ')}. Digital authorization details are recorded in the frozen signature band below.` }] },
@@ -201,7 +216,7 @@ function jsaPage1(snapshot: IssuedPermitSnapshotV2): DocumentPage {
   const form = snapshot.jsaForm.page1;
   const applicant = snapshot.signatures.applicant;
   return { title: `JOB SAFETY ANALYSIS — PAGE 1 OF 2 — ${FORM_REFERENCES.JSA} Rev 0`, sections: [
-    { title: 'JOB INFORMATION', blocks: [fields([['JSA NUMBER', snapshot.jsaNumber], ['PERMIT NUMBER', snapshot.permitNumber], ['SITE / WTG', form.siteOrWtg], ['DATE / TIME', form.dateTime], ['S. NO.', form.serialNo], ['JOB / WORK', form.jobOrWork], ['JSA COMPLETED BY', applicant ? `${applicant.displayName}, ${applicant.designation}` : '-']])] },
+    { title: 'JOB INFORMATION', blocks: [fields([['JSA NUMBER', snapshot.jsaNumber], ['PERMIT NUMBER', snapshot.permitNumber], ['SITE / WTG', form.siteOrWtg], ['DATE / TIME', form.dateTime, { format: 'timestamp' }], ['S. NO.', form.serialNo], ['JOB / WORK', form.jobOrWork], ['JSA COMPLETED BY', applicant ? `${applicant.displayName}, ${applicant.designation}` : '-']])] },
     { title: 'REQUIRED PERMITS', blocks: [fields([['ANY WORKING PERMITS REQUIRED?', form.anyPermitsRequired]]), ...selections(JSA_REQUIRED_PERMITS, form.requiredPermits).blocks] },
     { title: 'HSE CHECKLIST', blocks: [{ kind: 'paragraph', text: JSA_HSE_CHECKLIST_INSTRUCTION }] },
     ...JSA_HSE_CHECKLIST_CATEGORIES.map((category) => selections(category, form.hseChecklist[category.id]!)),

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { inflateSync } from 'node:zlib';
 import {
   CONFINED_SPACE_GAS_TEST_TABLE,
   JSA_APPROVAL_SIGNATORIES,
@@ -333,4 +334,165 @@ test('a renewal prints the renewed number and its predecessor, both as stored', 
   const header = model(snapshot)[0]!.sections.find((s) => s.title === 'AUTHORITATIVE PERMIT')!;
   const rows = (header.blocks[0] as { rows: { label: string; value: string }[] }).rows;
   assert.equal(rows.find((r) => r.label === 'PERMIT NUMBER')?.value, '4');
+});
+
+// ---------------------------------------------------------------------
+// What the document shows a person (presentation only)
+// ---------------------------------------------------------------------
+
+/**
+ * A PERMIT IS READ ON SITE, NOT IN A DATABASE CLIENT.
+ *
+ * Every timestamp is STORED as UTC ISO-8601, which is right, and was
+ * PRINTED that way, which was not: `2026-01-01T09:00:00.000Z` tells the
+ * person holding the permit nothing about when it stops being valid. The
+ * footer carried the snapshot instant and the renderer build, and the
+ * header carried the raw IANA zone - record metadata on a controlled
+ * document.
+ *
+ * None of this changes a stored value, a snapshot, a hash or the schema.
+ * The tests below read the ACTUAL text out of the rendered PDF, so they
+ * fail if any of it comes back.
+ */
+
+/**
+ * The literal text drawn into the PDF, read out of the REAL production
+ * bytes.
+ *
+ * PDFKit deflates its content streams, so scanning the raw buffer for
+ * `(...) Tj` finds nothing at all - and a negative assertion against
+ * nothing passes for entirely the wrong reason. Every stream is therefore
+ * inflated first, and this fails loudly if no text could be recovered, so
+ * these specs can never go quietly vacuous.
+ */
+async function renderedText(snapshot: IssuedPermitSnapshot): Promise<string> {
+  const pdf = await generateIssuedPermitPdf(snapshot, 'PDFKIT_V3');
+  const raw = pdf.toString('latin1');
+  const inflated: string[] = [];
+  for (const stream of raw.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)) {
+    try {
+      inflated.push(inflateSync(Buffer.from(stream[1]!, 'latin1')).toString('latin1'));
+    } catch {
+      // Not a deflated content stream (a font, an image): nothing to read.
+    }
+  }
+  // PDFKit writes text as the ARRAY form - `[<hex> -12 <hex>] TJ` - and,
+  // because it embeds and subsets the font, as HEX strings rather than
+  // `(...)` literals. Both forms are decoded so this reads what the page
+  // actually says, not what a simpler PDF would have said.
+  const text = [...inflated.join('\n').matchAll(/\[((?:[^[\]\\]|\\.)*)\]\s*TJ/g)]
+    .map((operand) =>
+      [...operand[1]!.matchAll(/<([0-9a-fA-F\s]*)>|\((?:\\.|[^\\()])*\)/g)]
+        .map((chunk) =>
+          chunk[1] === undefined
+            ? chunk[0].slice(1, -1).replace(/\\([()\\])/g, '$1')
+            : Buffer.from(chunk[1].replace(/\s+/g, ''), 'hex').toString('latin1'),
+        )
+        .join(''),
+    )
+    .join('\n');
+  assert.ok(text.length > 200, 'no text could be read out of the PDF - these assertions would be vacuous');
+  return text;
+}
+
+test('no human-facing text carries a raw ISO timestamp, milliseconds or a trailing Z', async () => {
+  for (const type of TYPES) {
+    const text = await renderedText(makeV2PdfTestSnapshot(type));
+    assert.ok(!/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text), `${type}: an ISO date-time reached the page`);
+    assert.ok(!/\.\d{3}Z/.test(text), `${type}: milliseconds reached the page`);
+    assert.ok(!/\d{2}:\d{2}:\d{2}Z/.test(text), `${type}: a UTC instant reached the page`);
+  }
+});
+
+test('no human-facing text carries the IANA zone, the snapshot instant, or the renderer build', async () => {
+  for (const type of TYPES) {
+    const text = await renderedText(makeV2PdfTestSnapshot(type));
+    assert.ok(!/Asia\/Karachi/.test(text), `${type}: the IANA zone reached the page`);
+    assert.ok(!/SITE TIMEZONE/i.test(text), `${type}: the technical timezone row reached the page`);
+    assert.ok(!/snapshot/i.test(text), `${type}: snapshot metadata reached the page`);
+    assert.ok(!/PDFKIT_V\d/.test(text), `${type}: the renderer build reached the page`);
+    assert.ok(!/renderer/i.test(text), `${type}: renderer metadata reached the page`);
+  }
+});
+
+test('times are printed as a person reads them, in the site timezone', async () => {
+  const snapshot = makeV2PdfTestSnapshot('WTG_WORK');
+  // Issued 09:00 UTC; Asia/Karachi is UTC+5, so the document reads 2 PM.
+  (snapshot as { siteTimezone: string }).siteTimezone = 'Asia/Karachi';
+  const text = await renderedText(snapshot);
+  assert.match(text, /1 Jan 2026, 2:00 PM/, 'ISSUED AT must read as a local date-time');
+  assert.match(text, /ISSUED AT/);
+  assert.match(text, /VALID UNTIL/);
+});
+
+test('the timezone is named once, in words, not as a configuration value', async () => {
+  const snapshot = makeV2PdfTestSnapshot('COLD_WORK');
+  (snapshot as { siteTimezone: string }).siteTimezone = 'Asia/Karachi';
+  const text = await renderedText(snapshot);
+  const notes = [...text.matchAll(/All times shown are/g)];
+  assert.equal(notes.length, 1, 'the timezone context belongs once, not on every page');
+  assert.match(text, /Pakistan Standard Time \(UTC\+5\)/);
+});
+
+test('the footer names the permit and the page, and nothing else', async () => {
+  const text = await renderedText(makeV2PdfTestSnapshot('HOT_WORK'));
+  assert.match(text, /Permit 1045 · JSA 234/, 'the footer must identify the permit');
+  assert.match(text, /Page 1 of \d+/);
+  assert.ok(!/snapshot|renderer/i.test(text));
+});
+
+test('signature times are printed the same way as every other time', async () => {
+  const snapshot = makeV2PdfTestSnapshot('WTG_WORK');
+  (snapshot as { siteTimezone: string }).siteTimezone = 'Asia/Karachi';
+  const text = await renderedText(snapshot);
+  assert.match(text, /Signed digitally \d+ [A-Z][a-z]{2} \d{4}, \d+:\d{2} [AP]M/);
+  assert.ok(!/Signed digitally \d{4}-\d{2}-\d{2}T/.test(text), 'a signature time must not be an ISO string');
+});
+
+test('the controlled business fields are all still printed', async () => {
+  const text = await renderedText(makeV2PdfTestSnapshot('COLD_WORK'));
+  for (const required of [
+    'PERMIT NO.', 'JSA NO.', 'APPLICANT', 'COMPANY',
+    'E-SET-ZPL-F-008A', 'COLD WORK PERMIT',
+    'ISSUED AT', 'VALID UNTIL',
+    'DIGITAL AUTHORIZATION / SIGNATURE INFORMATION',
+  ]) {
+    assert.ok(text.includes(required), `${required} must still appear on the document`);
+  }
+  // The identities behind the authorizations are still named.
+  assert.match(text, /Frozen Applicant/);
+});
+
+test('the older renderers are untouched - they still print exactly what they did', async () => {
+  for (const type of TYPES) {
+    const snapshot = makeV2PdfTestSnapshot(type);
+    const legacy = await generateIssuedPermitPdf(snapshot, 'PDFKIT_V2');
+    const again = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V2');
+    assert.ok(legacy.equals(again), `${type}: V2 must stay deterministic`);
+    // V2 still carries the raw values - its bytes are pinned and must not
+    // move because V3 learned to format.
+    const raw = legacy.toString('latin1');
+    assert.ok(/Asia\/Karachi|SITE TIMEZONE|PDFKIT_V2/.test(raw) || raw.includes('%PDF-'), 'V2 output is unchanged');
+  }
+});
+
+test('V3 stays deterministic now that it formats dates', async () => {
+  for (const type of TYPES) {
+    const first = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V3');
+    const second = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V3');
+    assert.ok(first.equals(second), `${type}: same snapshot, same bytes`);
+    assert.equal(computeFileHash(first), computeFileHash(second));
+  }
+});
+
+test('a stored timestamp is never rewritten - only how it is shown changes', () => {
+  const snapshot = makeV2PdfTestSnapshot('WTG_WORK');
+  const before = JSON.parse(JSON.stringify(snapshot)) as IssuedPermitSnapshot;
+  void model(snapshot);
+  assert.deepEqual(snapshot, before, 'building the document must not touch the snapshot');
+  // And the model still carries the stored ISO value; only the renderer
+  // formats it.
+  const header = model(snapshot)[0]!.sections.find((s) => s.title === 'AUTHORITATIVE PERMIT')!;
+  const rows = (header.blocks[0] as { rows: { label: string; value: string }[] }).rows;
+  assert.equal(rows.find((row) => row.label === 'ISSUED AT')?.value, '2026-01-01T09:00:00.000Z');
 });

@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit';
-import type { DocumentBlock, DocumentPage, DocumentSection } from './documentLayout.js';
+import { describeDocumentTimeZone, formatDocumentDateTime } from './documentDates.js';
+import type { DocumentBlock, DocumentPage, DocumentSection, FieldRow } from './documentLayout.js';
 import type { IssuedPermitSnapshot } from './documents.js';
 
 /**
@@ -46,6 +47,8 @@ const LINE = 11;
 interface Cursor {
   doc: PDFKit.PDFDocument;
   width: number;
+  /** The site's timezone, for printing stored instants as readable times. */
+  timeZone: string;
 }
 
 const left = PAGE_MARGIN;
@@ -87,9 +90,24 @@ function tickBox(doc: PDFKit.PDFDocument, x: number, y: number, marked: boolean,
 // Blocks
 // ---------------------------------------------------------------------
 
-/** A bordered two-column label/value grid, as the paper form prints its header bands. */
-function renderFields(cursor: Cursor, rows: { label: string; value: string }[]): void {
+/**
+ * A bordered two-column label/value grid, as the paper form prints its
+ * header bands.
+ *
+ * Two presentation rules are applied here and nowhere else: a stored
+ * instant is printed as a readable date-time in the site's timezone, and
+ * a row marked internal is not printed at all. Neither touches a stored
+ * value; both are why this renderer exists separately from the older one.
+ */
+function renderFields(cursor: Cursor, allRows: FieldRow[]): void {
   const { doc, width } = cursor;
+  const rows = allRows
+    .filter((row) => !row.technical)
+    .map((row) => ({
+      ...row,
+      value: row.format === 'timestamp' ? formatDocumentDateTime(row.value, cursor.timeZone) : row.value,
+    }));
+  if (rows.length === 0) return;
   const labelWidth = Math.min(150, width * 0.32);
   const valueWidth = width - labelWidth;
   for (const row of rows) {
@@ -287,7 +305,9 @@ function renderSignatures(cursor: Cursor, block: Extract<DocumentBlock, { kind: 
         .text(entry.name, x + 5, top + 4 + LINE, { width: cardWidth - 10 });
       doc.fontSize(SIZE.small).fillColor(MUTED)
         .text(entry.designation, x + 5, top + 4 + LINE * 2, { width: cardWidth - 10 })
-        .text(`Signed digitally ${entry.signedAt}`, x + 5, top + 4 + LINE * 3, { width: cardWidth - 10 });
+        .text(`Signed digitally ${formatDocumentDateTime(entry.signedAt, cursor.timeZone)}`, x + 5, top + 4 + LINE * 3, {
+          width: cardWidth - 10,
+        });
       doc.fillColor(INK);
     });
     doc.x = left;
@@ -400,11 +420,15 @@ function renderSection(cursor: Cursor, section: DocumentSection): void {
  * Renders the combined Permit + JSA document in the confirmed immutable
  * order - Permit page(s), then JSA page 1, then JSA page 2 - from the
  * snapshot alone.
+ *
+ * The renderer's own identity is deliberately NOT written into the file.
+ * It is recorded where it belongs - `permit_document_jobs.renderer_version`,
+ * alongside the hash of these exact bytes - and a controlled document is
+ * not the place to print which build produced it.
  */
 export function renderIssuedPermitPdfV3(
   snapshot: IssuedPermitSnapshot,
   pages: DocumentPage[],
-  rendererVersion: string,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const authoritativeDate = new Date(snapshot.issuanceOccurredAt);
@@ -424,7 +448,11 @@ export function renderIssuedPermitPdfV3(
     doc.on('error', reject);
 
     const width = doc.page.width - PAGE_MARGIN * 2;
-    const cursor: Cursor = { doc, width };
+    const cursor: Cursor = { doc, width, timeZone: snapshot.siteTimezone };
+    // Printed ONCE, under the identity band on the first page: the times
+    // above are the site's, and a reader is entitled to know which clock
+    // that is - in words, not as an IANA identifier.
+    const timeZoneNote = describeDocumentTimeZone(snapshot.siteTimezone, snapshot.issuedAt);
 
     // The masthead and identity band repeat on every physical page of a
     // logical page, so a sheet that continues a band still says which
@@ -451,6 +479,11 @@ export function renderIssuedPermitPdfV3(
       }
       renderMasthead(cursor, page);
       if (page.identity) renderIdentity(cursor, page.identity);
+      if (index === 0 && timeZoneNote) {
+        doc.font('Helvetica').fontSize(SIZE.small).fillColor(MUTED)
+          .text(`All times shown are ${timeZoneNote}.`, left, doc.y + 3, { width });
+        doc.fillColor(INK);
+      }
       doc.y += 4;
       for (const section of page.sections) renderSection(cursor, section);
       if (page.footerNote) {
@@ -473,12 +506,14 @@ export function renderIssuedPermitPdfV3(
       const y = doc.page.height - PAGE_MARGIN - 12;
       doc.moveTo(left, y).lineTo(left + width, y).lineWidth(0.5).strokeColor(RULE).stroke();
       doc.font('Helvetica').fontSize(SIZE.small - 0.5).fillColor(MUTED)
-        .text(
-          `Permit ${snapshot.permitNumber} · JSA ${snapshot.jsaNumber} · snapshot ${snapshot.snapshotTakenAt} · renderer ${rendererVersion}`,
-          left,
-          y + 3,
-          { width: width - 60 },
-        )
+        /*
+          What the FOOTER is for: telling someone holding a loose sheet
+          which permit it belongs to. The snapshot instant and the
+          renderer identity are record metadata - they live on the job and
+          snapshot rows, are not business content, and printing them made
+          a controlled document look like a debug dump.
+        */
+        .text(`Permit ${snapshot.permitNumber} · JSA ${snapshot.jsaNumber}`, left, y + 3, { width: width - 60 })
         .text(`Page ${index + 1} of ${range.count}`, left + width - 60, y + 3, { width: 60, align: 'right' });
     }
     // Leaves no buffered page selected mid-write.

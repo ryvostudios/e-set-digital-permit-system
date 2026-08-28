@@ -552,7 +552,7 @@ export async function generateIssuedPermitPdf(
     case 'PDFKIT_V2':
       return renderIssuedPermitPdfLegacy(snapshot);
     case 'PDFKIT_V3':
-      return renderIssuedPermitPdfV3(snapshot, buildIssuedDocumentPages(snapshot), 'PDFKIT_V3');
+      return renderIssuedPermitPdfV3(snapshot, buildIssuedDocumentPages(snapshot));
     default: {
       const unreachable: never = rendererVersion;
       throw new Error(`unknown renderer version: ${String(unreachable)}`);

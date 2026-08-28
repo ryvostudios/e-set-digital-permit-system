@@ -30,6 +30,19 @@ import { buildIssuedDocumentPagesV2, isV2Snapshot, usesAnyV2FormVersion } from '
 export interface FieldRow {
   label: string;
   value: string;
+  /**
+   * PDFKIT_V3 only: a stored instant, to be printed as a human date-time
+   * in the site's timezone rather than as the ISO string it is stored as.
+   * The stored value is untouched - this only says how to show it.
+   */
+  format?: 'timestamp';
+  /**
+   * PDFKIT_V3 only: internal metadata that belongs in the record, not on
+   * the printed document (a configuration value, an identifier nobody
+   * reads). The older renderers still print it, so their bytes are
+   * unchanged.
+   */
+  technical?: boolean;
 }
 
 /**
