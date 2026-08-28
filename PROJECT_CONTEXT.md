@@ -22,160 +22,119 @@ built step by step, one verified section at a time.
 
 ## Current State (as of this document)
 
-Implementation has begun and proceeds section by section, per
-`SECURITY.md`'s development gate. This is a snapshot, not authoritative
-requirements - the other documents in this set (and `DECISIONS.md`'s
-Open Decisions) govern what's actually confirmed or still unresolved.
+The authoritative Permit + JSA work is complete on branch
+`feat/authoritative-permit-jsa`, deployed to the live project, and
+verified in hosted UAT. **`main` has not been merged yet.** Known-good
+checkpoint: `a52cbe2`.
 
-- Backend: Node.js + Express + TypeScript app (Supabase Auth token
-  verification, CORS, environment validation, PostgreSQL connection pool
-  and migration runner).
-- Frontend: React + Vite + TypeScript PWA scaffold with Supabase Auth;
-  no permit-workflow UI has been built yet.
-- Database: migrations `0001`-`0015` are applied and live-verified
-  against the live Supabase project (`yfxnigovfmngypbgcnaw`) - Supabase
-  security hardening; Team + Position -> Capabilities authorization;
-  privileged-access [CEO/Site Manager] data-model foundation; Permit/JSA
-  schema; CRO review and HSE review with 5-minute fallback approval;
-  CRO-only permit closure; the permit-status read-performance index; and
-  the Permit workflow completion schema (adds the
-  `PENDING_CORRECTION`/`HELD`/`CANCELLED` statuses, hold/cancellation
-  columns and CHECK constraints, the renewal-uniqueness index, and every
-  new lifecycle event type - see `database/migrations/README.md`).
-  Migration `0012_permit_workflow_completion.sql` has been applied and
-  live-verified successfully: migration recorded, new workflow statuses/
-  constraints live, hold/cancel invariants valid, renewal uniqueness
-  active, lifecycle append-only protections intact, RLS/default-deny
-  intact, no anon/authenticated direct grants, no new policies, no
-  data-integrity violations found.
-  Migration `0013_notifications_outbox_documents.sql` (notifications,
-  the WhatsApp outbox, immutable issued-document snapshots, their PDF
-  job state, and justified search/audit indexes) is applied and live-
-  verified. All new tables are RLS-enabled, there are no direct `anon`/
-  `authenticated` grants or new policies, and immutable snapshot
-  protections are active. The live database contained zero already-
-  issued permits, so the historical backfill had zero rows to process.
-  Migration `0014_fix_trigger_function_search_paths.sql` is applied and
-  live-verified. Both affected functions now have
-  `search_path=pg_catalog`, remain SECURITY INVOKER, and no longer trigger
-  the Supabase `function_search_path_mutable` warnings. All five support-
-  feature tables remain RLS-enabled, with zero direct `anon`/
-  `authenticated` grants and zero policies added; no security regression
-  was found, and Performance Advisor findings are informational only.
-  Migration `0015_backend_integrity_hardening.sql` is **APPLIED /
-  LIVE-VERIFIED**. It adds application account disabling,
-  credential-boundary support, and database integrity constraints without
-  changing agreed workflow semantics.
-- Backend notifications/outbox/documents domain
-  (`backend/src/domain/notifications/`,
-  `backend/src/domain/permits/{documents,search,workflowSideEffects}.ts`,
-  `backend/src/routes/notifications.ts`, extensions to
-  `backend/src/routes/permits.ts`): in-app notifications, a durable
-  WhatsApp outbox foundation, immutable issued Permit+JSA PDF generation,
-  permit search, and lifecycle/audit search are now implemented - see
-  `DECISIONS.md`'s "Notifications (in-app - implemented)", "Notifications
-  (WhatsApp outbox - foundation implemented, provider still open)", "PDF
-  (immutable issued Permit+JSA document - implemented this batch)", and
-  "Permit Search / Lifecycle Audit Search" sections for the full,
-  authoritative detail. In summary:
-  - `GET /api/v1/notifications` / `POST /api/v1/notifications/:id/read` -
-    recipient-scoped, paginated, unread-filterable.
-  - `GET /api/v1/permits/search` - Permit Number, JSA Number, status,
-    `createdBy`, company, and date-range filters, scoped by the exact
-    same access model as every other read endpoint.
-  - `GET /api/v1/permits/:id/history` now additionally accepts optional
-    filter/pagination query parameters (event type, actor, from/to
-    status, date range) - unchanged, unfiltered/unpaginated behavior when
-    none are supplied.
-  - `GET /api/v1/permits/:id/pdf` - authorizes permit visibility before
-    any document lookup; serves only the immutable issued PDF once
-    generated and SHA-256 verified; returns an explicit processing/unavailable status
-    otherwise, never a fake file.
-  - A CEO bootstrap CLI (`npm run bootstrap:ceo`,
-    `backend/src/scripts/bootstrapCeo.ts`) provisions the very first CEO
-    via the existing `privileged_access_events` model - never a public
-    endpoint.
-  - Two operator-run background processors, neither invoked
-    automatically (`npm run outbox:whatsapp:process`,
-    `npm run documents:process`).
-  - Migration 0013 refuses incomplete or ambiguous historical issuance
-    history and idempotently creates one immutable snapshot/PDF job for
-    every earlier issued permit. Historical issuance time remains the
-    lifecycle event time, while snapshot capture/row creation use the
-    actual DB backfill time. Responsibility handoffs abort with 409
-    when authoritative CRO/HSE recipient resolution is empty. Both
-    workers use atomic token-owned leases; PDF retries hash-reconcile an
-    already-uploaded immutable object. Worker failures persist/log only
-    fixed safe categories, never raw external exceptions. CEO bootstrap uses a database
-    singleton reservation and safely reuses a matching Auth identity.
-  - **Genuine manual/external blockers, not yet resolved by this batch:**
-    (1) no real WhatsApp provider is selected or configured - the outbox always
-    reports messages as failed/pending until one is (`DECISIONS.md`'s
-    open decision #2); (2) the private PDF bucket and Storage-scoped S3
-    credentials are not configured - PDF generation jobs remain in their
-    documented safe-pending state until an operator configures them (see
-    `DEPLOYMENT.md`). Auth Admin service-role authority remains separate and is
-    used only for CEO bootstrap.
-  - The live backend now uses the restricted `app_runtime` PostgreSQL login for
-    `DATABASE_URL`; migrations use a distinct owner in
-    `MIGRATION_DATABASE_URL`. Runtime smoke tests covered readiness and all
-    required application reads, including the SELECT-only `teams`, `positions`,
-    and `team_positions` lookups. The runtime role has no schema ownership/DDL,
-    migration-ledger/bootstrap access, application DELETE/TRUNCATE, or browser
-    role exposure; its `storage.buckets` SELECT is preflight-only.
-- Backend permit domain (`backend/src/domain/permits/`,
-  `backend/src/routes/permits.ts`, `backend/src/routes/auth.ts`): the
-  full agreed Permit workflow is now implemented - draft creation/
-  update/submission; CRO review (forward-to-HSE, send-back to applicant,
-  `permit.send_back`); applicant correction/resubmission
-  (`PENDING_CORRECTION -> PENDING_CRO`, `permit.submit`); HSE review
-  (approval, send-back to CRO - never directly to the applicant -
-  `permit.hse_review`, both with no time gate, matching the still-open
-  HSE-window-gap decision); CRO fallback approval; Hold/Resume of an
-  `ISSUED` permit (`permit.hold`/`permit.resume`, mandatory hold reason,
-  Resume time-gated to strictly before the permit's original midnight
-  expiry); Cancel of an `ISSUED`/`HELD` permit, permanently
-  (`permit.cancel`); Close from `ISSUED` or `HELD` (`permit.close`); and
-  Renewal of a `CLOSED`, midnight-expired permit into a brand-new
-  `ISSUED` permit with a new Permit Number, the same JSA, and no
-  re-review (`permit.renew`, database-uniqueness-enforced against double
-  renewal) - plus the full set of read APIs for frontend integration:
-  the caller's own effective capabilities (`GET /auth/me`), the caller's
-  own permit list (`GET /permits/mine`), a capability-gated status queue
-  (`GET /permits/queue?status=...`), permit detail with its JSA/computed
-  validity/available-actions hint (`GET /permits/:id`), and lifecycle
-  history (`GET /permits/:id/history`).
-  `GET /permits/mine` and `GET /permits/queue` are paginated
-  (`page`/`pageSize`, safe defaults, hard maximum page size of 100, and
-  a hard maximum on the COMPUTED offset - `(page - 1) * pageSize` may
-  not exceed 100,000, rejected with 400 rather than silently clamped,
-  since `pageSize` alone can turn an innocuous-looking `page` into a
-  pathological offset - see
-  `domain/permits/validation.ts::{paginationQuerySchema,MAX_PAGINATION_OFFSET}`).
-  In-app notifications, the WhatsApp outbox foundation, immutable issued
-  Permit+JSA PDF generation, permit search, and lifecycle/audit search
-  are now implemented (see above); the actual WhatsApp provider
-  integration is not - see `DECISIONS.md`'s Open Decisions for what's
-  still genuinely unresolved (the HSE-window gap, the WhatsApp
-  integration method, and whether closure remarks are mandatory).
-- Production hardening: backend-wide rate limiting (global + a stricter,
-  identity-keyed limit on mutation endpoints - `middleware/rateLimit.ts`),
-  security headers (`helmet`), a bounded JSON body limit with sanitized
-  malformed-JSON/oversized-body handling, an explicit trusted-proxy
-  address/network allowlist (`TRUST_PROXY_CIDRS` - never a hop count or
-  a wildcard; see `config/trustProxy.ts`), a `/ready` readiness endpoint
-  alongside the existing `/health` liveness endpoint, structured
-  per-request logging with a correlation id (`middleware/requestLog.ts` -
-  never logs tokens/headers/bodies), and startup-time environment
-  hardening (fail-fast validation with documented practical bounds on
-  every numeric/timing config value - port, DB pool/timeouts, rate-limit
-  window/counts - and a guard against a service-role key being placed in
-  `SUPABASE_PUBLISHABLE_KEY`). See `DEPLOYMENT.md` for the manual
-  production configuration this still requires (in particular,
-  `TRUST_PROXY_CIDRS` and the network-topology requirement it depends on
-  - the backend must not be reachable except through the configured
-  proxy) and the documented single-instance constraint on the in-memory
-  rate limiter.
+This is a snapshot of what is verified, not a statement of requirements -
+`DECISIONS.md`'s Open Decisions govern what is still genuinely
+unresolved.
+
+### Database
+
+- Migrations `0001`-`0034` are applied and live-verified against the live
+  Supabase project. **There is no outstanding migration.** See
+  `database/migrations/README.md` for the per-migration ledger.
+- `0032_pdf_renderer_v3.sql` (the `PDFKIT_V3` renderer identity),
+  `0033_per_permit_type_numbering.sql` (per-type counters and the
+  per-type uniqueness rule) and `0034_permit_number_on_submission.sql`
+  (allocation moved to submission) are all **APPLIED / LIVE / RECORDED**.
+
+### Numbering
+
+- A **DRAFT carries no permit number.** Nothing is consumed by creating,
+  editing or abandoning one.
+- The number is **assigned atomically on the first successful
+  `DRAFT -> PENDING_CRO` submission**, from the permit type's own
+  database-side counter, and is permanent thereafter. A failed or
+  rolled-back submission consumes nothing.
+- **Independent per-type series are live and UAT-verified:** Cold Work
+  `CW-*`, Hot Work `HW-*`, WTG Work `WTG-*`, Confined Space Entry
+  `CS-*`. `CW-1`, `CW-2`, `HW-1`, `WTG-1` and `CS-1` were all observed on
+  the hosted environment.
+- **JSA numbering remains one independent global sequence** across all
+  permit types.
+
+### Workflow
+
+- **Partial submissions are accepted.** A permit or JSA may be submitted
+  incomplete - review exists to see what was and was not filled in. Only
+  a meaningless or empty submission is refused.
+- CRO forwards to HSE and that forward **starts the 5-minute HSE review
+  window**, timed by the database.
+- **HSE can approve immediately.** After the window expires, an
+  authorized CRO's **fallback approval becomes available**; nothing
+  approves automatically, and no scheduler or timer transitions a permit
+  because a deadline passed.
+- **HSE approval and CRO fallback approval race safely**, sharing a row
+  lock, with exactly one authoritative winner; the loser is refused as a
+  conflict and creates no second issuance or signature. See
+  `DECISIONS.md` → "HSE Window Expiry and CRO Fallback".
+- **HSE retains read-only access** to a permit it reviewed, after
+  issuance and through `HELD`/`CANCELLED`/`CLOSED`, and **gains no
+  post-issuance action**. `DRAFT`, `PENDING_CRO` and `PENDING_CORRECTION`
+  remain invisible to HSE.
+- An authorized CRO can **Hold, Resume and Close**.
+- **The closing actor is recorded as the CRO who actually performed the
+  closure**, which need not be the CRO who forwarded or authorized the
+  permit; the record shows the closure and the frozen authorization as
+  separate facts, and the closing actor is named on its own lifecycle
+  event.
+
+### Issued documents
+
+- **Issued PDF generation is live**, through the backend document worker.
+- **`PDFKIT_V3` output is live**, including the blue vector checkmarks
+  used for every selected checklist and multi-select value.
+- **Issued PDFs remain immutable** after Hold, Resume and Closure: no new
+  snapshot, no new document job, and no change to renderer version,
+  expected file hash or storage path. `PDFKIT_V1`/`V2` output is
+  byte-unchanged and pinned by test.
+
+### Frontend
+
+- A complete React + TypeScript PWA covering the whole agreed surface -
+  application across all four templates, the paper-form Permit and JSA
+  editors, CRO and HSE review, records/detail/history, the secured PDF
+  action, notifications, the employee lifecycle, and CEO-only Site
+  Manager administration.
+- Success messages are live: **"Permit issued successfully."** (HSE
+  approval and CRO fallback approval) and **"Permit closed successfully."**
+  Each appears only after the backend confirms the transition, never on a
+  failed request, and is not re-shown by a refresh.
+- Frontend authorization is presentation only; every screen re-asks the
+  backend and shows its refusal honestly.
+
+### Hosted UAT verification
+
+The following were exercised end to end on the hosted environment:
+draft -> partial submit; per-type numbering including `CW-1`, `CW-2`,
+`HW-1`, `WTG-1`, `CS-1`; CRO review and forward; HSE immediate approval;
+CRO fallback approval after 5 minutes; PDF generation and download;
+Hold -> Resume with its lifecycle history; closure with the actual
+closing actor recorded in the closure section and history; the issued PDF
+unchanged after closure; and HSE read-only access after issuance.
+
+### Still genuinely open
+
+- No WhatsApp provider is selected or configured - the outbox reports
+  messages as pending/failed until one is (`DECISIONS.md` open decision
+  #1).
+- Whether closure remarks are mandatory is not finalized; they are stored
+  as optional today (`DECISIONS.md` open decision #2).
+- The authoritative per-template checklist item catalogue is not signed
+  off (`DECISIONS.md` open decision #3).
+- Supabase leaked-password protection and privileged-account MFA are not
+  enabled/live-verified - both remain go-live blockers (`DEPLOYMENT.md`).
+- Explicit site scoping must be designed before a second site or security
+  domain shares this database.
+- Backend production hardening (rate limiting, security headers,
+  structured request logging with a correlation id, environment
+  validation, `/ready` alongside `/health`, and an explicit trusted-proxy
+  allowlist) is in place; see `DEPLOYMENT.md` for the manual production
+  configuration it depends on and the single-instance constraint on the
+  in-memory rate limiter.
 
 ## Core Scope
 
@@ -190,11 +149,15 @@ Open Decisions) govern what's actually confirmed or still unresolved.
 - Closure by CRO only (no creator-initiated closure).
 - Renewal after midnight expiry, issuing a new Permit Number while
   preserving the same JSA Number and linking to permit history.
-- Read-only immutable PDF infrastructure for the currently defined skeletal
-  Permit/JSA data contract is implemented (see above); the official form
-  fields/layout remain a production blocker and must not be invented. Supabase
-  Storage upload requires manual, not-yet-live-verified private-bucket
-  configuration and Storage-scoped S3 credentials; it never uses Auth Admin.
+- Read-only immutable issued PDFs are implemented and LIVE: the private
+  Supabase Storage bucket and Storage-scoped S3 credentials are
+  configured, the backend document worker generates the issued document,
+  and `PDFKIT_V3` renders the authoritative Permit + JSA pages. Upload
+  never uses Auth Admin. What remains open is sign-off of the exact
+  per-template checklist item lists (`DECISIONS.md` open decision #3) -
+  those must not be invented, and any later change to them extends the DB
+  schema, validation, draft APIs, snapshot schema/version and renderer
+  together.
 - Durable, non-blocking in-app notifications - implemented. Durable,
   non-blocking WhatsApp lifecycle notifications via a future provider
   integration (permit actions never depend on notification delivery) -
@@ -204,11 +167,14 @@ Open Decisions) govern what's actually confirmed or still unresolved.
 
 ## Explicitly Out of Scope (for now)
 
-- **PRODUCTION BLOCKER:** official Permit and JSA field definitions and form
-  layout must be supplied and agreed before the frontend/immutable PDF
-  contract is final. No PPE/hazard/isolation/signature/equipment fields are
-  guessed here. Later official fields must extend the DB schema, validation,
-  draft APIs, snapshot schema/version, and renderer together.
+- The four permit templates and the JSA are implemented from the supplied
+  forms and driven by a server-side catalogue, and their sections,
+  checklists, PPE/hazard bands, isolation points and gas-test records are
+  live and UAT-verified. What is still NOT settled is formal sign-off of
+  the exact item lists per template (`DECISIONS.md` open decision #3);
+  nothing beyond what the supplied forms specify is guessed, and later
+  official changes must extend the DB schema, validation, draft APIs,
+  snapshot schema/version, and renderer together.
 - Before a second site/security domain shares this database, explicit site
   scoping must be designed across permits, assignments, queues, recipients,
   notifications, search, and relevant history/reporting.
@@ -217,9 +183,9 @@ Open Decisions) govern what's actually confirmed or still unresolved.
   infrastructure not justified by an actual current requirement.
 - Digital signature functionality.
 - Any assumption about the final WhatsApp integration method.
-- Any application code, dependency installation, or database schema —
-  these begin only after this documentation baseline is accepted and
-  implementation proceeds section by section.
+- Automatic time-based transitions of any kind: nothing in this system
+  approves, expires, or closes a permit because a clock passed a value.
+  Every transition is performed by an authenticated actor.
 
 ## How to Use This Documentation Set
 
@@ -230,6 +196,8 @@ Open Decisions) govern what's actually confirmed or still unresolved.
 - [`DECISIONS.md`](./DECISIONS.md) — accepted decisions and the authoritative open-decisions log.
 - [`DEPLOYMENT.md`](./DEPLOYMENT.md) — manual production configuration and deployment-time constraints (not workflow/business rules).
 
-These files are the authoritative source of truth for requirements until
-superseded by actual code, migrations, and configuration once
-implementation begins.
+These files are the authoritative source of truth for requirements
+EXCEPT where actual code, migrations and configuration already supersede
+them - which, for the Permit + JSA workflow, they now do. Where a
+document and the live system disagree, the live system and its tests are
+the fact and the document is the bug.

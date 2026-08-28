@@ -15,11 +15,12 @@ is not being ported into this system.
 
 ## Project Stage
 
-**Backend feature-complete; frontend implemented.** This repository's documentation set is still the
-authoritative source of truth for anything not yet superseded by actual
-code/migrations - see [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for
-the current, accurate implementation snapshot before assuming anything
-below.
+**The authoritative Permit + JSA workflow is complete, deployed and
+verified in hosted UAT** on branch `feat/authoritative-permit-jsa`
+(checkpoint `a52cbe2`). **`main` has not been merged yet.** See
+[`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) for the current, accurate
+implementation snapshot - including what remains genuinely open - before
+assuming anything below.
 
 - [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) — current-state summary and scope
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — target stack, trust boundaries, module principles
@@ -38,16 +39,22 @@ paginated read APIs, permit search, filtered lifecycle/audit search,
 in-app notifications, a durable WhatsApp outbox foundation, and
 immutable issued Permit+JSA PDF generation - all under Team + Position ->
 Capabilities authorization with Supabase Auth token verification.
-Database migrations `0001`-`0015` are applied and live-verified against
-the live Supabase project (see `database/migrations/README.md`) - `0012`
-is the workflow-completion schema (Send-Back/Hold/Resume/Cancel/Renewal),
-and `0013` adds notifications, outbox/document support, an atomic
-historical issued-document backfill, leased worker claims, and the
-initial-CEO singleton reservation. Migration `0014` pins the safe search
-path of two `0013` trigger functions without changing their behavior and
-security mode. Migration `0015_backend_integrity_hardening.sql` is
-**APPLIED / LIVE-VERIFIED**; its account-disable and cross-table/document/
-outbox integrity protections are active without changing workflow.
+Database migrations `0001`-`0034` are applied and live-verified against
+the live Supabase project, with **no outstanding migration** (see
+`database/migrations/README.md` for the per-migration ledger) - `0012` is
+the workflow-completion schema (Send-Back/Hold/Resume/Cancel/Renewal),
+`0013` adds notifications, outbox/document support and the historical
+issued-document backfill, `0032` adds the `PDFKIT_V3` renderer identity,
+`0033` gives each permit type its own number series, and `0034` moves
+number allocation to the first successful submission so a draft never
+consumes one.
+
+Permit numbering is database-authoritative and UAT-verified: a DRAFT has
+no number; the number is assigned atomically on the first successful
+`DRAFT -> PENDING_CRO` submission and is permanent thereafter; each type
+draws from its own series (Cold Work `CW-*`, Hot Work `HW-*`, WTG Work
+`WTG-*`, Confined Space Entry `CS-*`); and JSA numbering remains one
+independent global sequence.
 Backend production hardening (rate limiting, security headers, structured logging,
 environment validation, a `/ready` readiness endpoint) is also in place
 - see `PROJECT_CONTEXT.md` for the precise, current breakdown. The actual
@@ -70,10 +77,13 @@ shows its refusal honestly. See [`frontend/README.md`](./frontend/README.md)
 for its architecture, public environment variables, PWA caching policy,
 and the operator prerequisites it fails closed on.
 
-**Production blocker:** the official Permit/JSA field definitions and form
-layout have not yet been supplied. The immutable snapshot/PDF infrastructure
-is sound for the current skeletal schema, but its final business contract and
-frontend must not be treated as complete or extended with guessed fields.
+Issued PDF generation is live through the backend document worker, and
+`PDFKIT_V3` renders the authoritative Permit + JSA pages. An issued PDF is
+immutable: Hold, Resume and Closure create no new snapshot or document
+job and change no renderer version, hash or storage path. What is still
+open is formal sign-off of the exact per-template checklist item lists
+(`DECISIONS.md` open decision #3) - nothing beyond the supplied forms is
+guessed.
 
 ## Technology
 
@@ -97,17 +107,18 @@ Development proceeds section by section: implement one section, verify it
 
 ## Status of Open Decisions
 
-A few workflow rules remain intentionally **not yet finalized** - the
-gap between HSE window expiry and CRO fallback approval, the WhatsApp
-integration method, and whether closure remarks are mandatory. (The
-allowed states for Hold/Cancel, the CRO/HSE send-back target state, and
-the status of a renewed permit are now resolved and implemented.) See
-the "Open Decisions" section of [`DECISIONS.md`](./DECISIONS.md) before
+Two workflow rules remain intentionally **not yet finalized** - the
+WhatsApp integration method and whether closure remarks are mandatory -
+alongside sign-off of the per-template checklist item catalogue. (The
+allowed states for Hold/Cancel, the CRO/HSE send-back target state, the
+status of a renewed permit, and the gap between HSE window expiry and CRO
+fallback approval are now resolved and implemented.) See the "Open
+Decisions" section of [`DECISIONS.md`](./DECISIONS.md) before
 implementing related behavior.
 
-The remaining production/operator blockers are also explicit: the private
-PDF bucket and Storage-scoped S3 credentials are not configured; Supabase
+The remaining production/operator blockers are explicit: Supabase
 leaked-password protection and privileged-account MFA are not enabled and
-live-verified; the official Permit/JSA form and fields and final human-visible
-number format are unresolved; and explicit site scoping is required before a
-second site/security domain uses this database.
+live-verified; and explicit site scoping is required before a second
+site/security domain uses this database. (The private PDF bucket and
+Storage-scoped S3 credentials are now configured, and issued-document
+generation is live.)

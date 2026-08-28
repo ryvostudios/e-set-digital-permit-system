@@ -48,13 +48,24 @@ just a storage layer. Design work should plan for:
 - Permit Numbers and JSA Numbers are distinct identifiers with distinct
   lifecycles (see `WORKFLOW.md` for the rules governing when each
   changes vs. stays the same).
-- Number generation must eventually be atomic, unique, and
-  concurrency-safe — safe under concurrent requests even though normal
-  CRO operation assumes one active CRO at a time (see `SECURITY.md`,
-  "Backend concurrency protection is still required generally").
-- The specific generation mechanism (sequence, locking strategy, format)
-  is an implementation detail to be decided when this section is built,
-  not decided in this document.
+- Number generation is atomic, unique and concurrency-safe, and the
+  DATABASE is the sole authority - never the frontend and never
+  application memory. It is safe under concurrent requests even though
+  normal CRO operation assumes one active CRO at a time (see
+  `SECURITY.md`, "Backend concurrency protection is still required
+  generally").
+- **Implemented mechanism** (migrations `0033`/`0034`): each permit type
+  has its own counter row in `permit_number_counters`, allocated by
+  `allocate_permit_sequence()` under a row lock, with uniqueness enforced
+  per `(permit_type, permit_sequence)` rather than globally. A DRAFT holds
+  no number - `permit_sequence` is NULL, enforced by
+  `permits_draft_is_unnumbered` - and the number is issued inside the
+  transaction that performs the first successful `DRAFT -> PENDING_CRO`
+  submission, after which `permits_sequence_required_after_draft` makes
+  its presence structural. A submission that rolls back consumes nothing,
+  and a released number is never reused.
+- The JSA series is deliberately untouched by that work and remains one
+  independent global sequence.
 
 ## Time and Timezone
 
@@ -136,18 +147,23 @@ existing Auth population, RLS/default-deny on both new tables, zero browser-role
 grants or policies, active constraints/triggers, no invalid Company/Other or
 snapshot-integrity rows, and removal of the temporary migration hash helper.
 
-## What Is Deliberately Not Decided Here
+## What Was Deliberately Not Decided Here
+
+This document states PRINCIPLES. The items below were left to the
+implementing section rather than fixed here; for the Permit + JSA
+workflow they have since been decided, and the migrations are the fact:
 
 - Actual table names, columns, and types.
 - Actual enum values for permit state beyond what `WORKFLOW.md` already
   describes conceptually.
-- The exact numbering/generation mechanism.
+- The exact numbering/generation mechanism - now implemented; see
+  "Numbering" above and migrations `0033`/`0034`.
 - The exact concurrency mechanism (locking strategy vs. optimistic
-  versioning) per operation.
+  versioning) per operation - now `SELECT ... FOR UPDATE` row locks
+  combined with an expected-version check on every permit mutation.
 - Any Supabase-specific feature usage (e.g. Row Level Security) beyond
   the general principle that database access is mediated through the
   backend.
 
-These are implementation decisions made when the relevant section is
-actually built, following the principles above and the process in
-`SECURITY.md`.
+Where this document and an applied migration disagree, the migration is
+authoritative and this document is the bug.

@@ -46,13 +46,16 @@ confirmed.
 - V5.19's `SYSTEM_ADMIN` role is not assumed to exist in this system.
 
 ### Numbering
-- Every permit has a Permit Number; every JSA has its own JSA Number.
+- Draft permits are unnumbered. A Permit Number is assigned atomically on
+  the first successful `DRAFT -> PENDING_CRO` submission.
+- Permit numbering uses independent per-type sequences: `WTG-*`, `CW-*`,
+  `HW-*`, and `CS-*`. JSA numbering remains one independent global sequence.
 - Review, CRO send-back, HSE send-back, correction, resubmission, hold,
   and resume all keep the same Permit Number and same JSA Number.
 - Only a post-midnight renewal creates a new Permit Number, keeping the
   same JSA Number.
-- Number generation must eventually be atomic, unique, and
-  concurrency-safe.
+- Permit and JSA number allocation is database-authoritative, unique,
+  atomic, and concurrency-safe.
 
 ### Validity
 - Permits are valid only until the next midnight in the configured site
@@ -795,23 +798,40 @@ confirmed.
   `git diff`/`git status`, then commit — before starting the next
   section.
 
+### HSE Window Expiry and CRO Fallback (formerly Open Decision #1; implemented, UAT-verified)
+- **Nothing happens automatically when the 5-minute window expires.** No
+  scheduler, job or timer exists in this codebase to transition a permit
+  because a deadline passed; the permit stays `PENDING_HSE` until a human
+  acts. Eligibility is evaluated only when someone actually attempts an
+  action.
+- **HSE keeps their authority after expiry.** They may approve
+  immediately, and they may still approve or send back during the gap.
+  The window decides when CRO's fallback becomes AVAILABLE, not when
+  HSE's authority ends. This is why `hseApprove` and `hseSendBackToCro`
+  have no deadline check - previously noted as merely "consistent with
+  this being unresolved", and now the resolved rule.
+- **CRO fallback approval requires the deadline to have genuinely
+  passed**, computed by the database (`now() >= hse_review_deadline_at`)
+  under the same row lock that reads the permit - never by the backend's
+  or a browser's clock.
+- **The race has exactly one authoritative winner.** Both approvals take
+  the same row lock and both require the permit to still be
+  `PENDING_HSE` at the expected version. The first to commit issues the
+  permit; the loser is refused as a conflict, creates no second issuance
+  and no second signature. A fallback approval signs as `CRO FALLBACK
+  APPROVAL` and never produces an HSE signature.
+- **No distinct intermediate state, and no time limit** on how long a
+  permit may sit in the gap. Neither was invented.
+- The browser's countdown is display-only: it pairs the DB-authoritative
+  deadline with the server's clock as read, so a wrong device clock
+  cannot make the window look open or closed. It authorizes nothing.
+
 ## Open Decisions
 
 These are explicitly **unresolved** and must not be implemented until
 confirmed. Do not invent behavior for these.
 
-1. **HSE window expired, fallback approval not yet performed.**
-   What is permitted, if anything, during the gap after the HSE
-   5-minute window has expired but before CRO has actually performed
-   fallback approval? (E.g.: can HSE still act during this gap? Is there
-   a distinct intermediate state? Is there a time limit on how long a
-   permit can sit in this gap?) Note: this batch's HSE send-back is
-   still deliberately NOT time-gated either, for the same reason
-   (`hseApprove`/`hseSendBackToCro` both have no deadline check) - that
-   is consistent with this remaining unresolved, not a resolution of it.
-   See `WORKFLOW.md` → "HSE Five-Minute Window."
-
-2. **WhatsApp integration method.**
+1. **WhatsApp integration method.**
    The final mechanism for WhatsApp group/agent integration (which
    provider/API, how the CRO PC agent is installed, how it authenticates
    to the WhatsApp group) is not decided and requires research/
@@ -821,7 +841,7 @@ confirmed. Do not invent behavior for these.
    foundation implemented, provider still open)" under Accepted
    Decisions) - only the actual provider/send mechanism remains open.
 
-3. **Whether closure remarks are mandatory.**
+2. **Whether closure remarks are mandatory.**
    WORKFLOW.md requires CRO closure to record "the authoritative actor,
    timestamp, and any closure information/remarks required by the
    finalized closure form," but whether remarks must be non-empty (vs.
@@ -831,12 +851,13 @@ confirmed. Do not invent behavior for these.
    validation can be tightened later without a data migration. See
    `WORKFLOW.md` → "Closure."
 
-Former items #2 (allowed states for Hold), #3 (allowed states for
-Cancel), #6 (CRO/HSE send-back target state), and #7 (status of a
-renewed permit) are now RESOLVED - see "Send-Back / Correction", "Hold /
+Former items #1 (the HSE-window-expired gap), #2 (allowed states for
+Hold), #3 (allowed states for Cancel), #6 (CRO/HSE send-back target
+state), and #7 (status of a renewed permit) are now RESOLVED - see "HSE
+Window Expiry and CRO Fallback", "Send-Back / Correction", "Hold /
 Resume", "Cancel", and "Renewal" under Accepted Decisions above.
 
-4. **The exact checklist questions and option lists on the real forms.**
+3. **The exact checklist questions and option lists on the real forms.**
    The supplied permit/JSA forms gave their SECTIONS (General Work,
    Electrical Work, Mechanical Work, Hydraulic Work, Work at Heights,
    General Requirements, Equipment Condition, PPE, the HSE checklist

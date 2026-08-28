@@ -1,8 +1,10 @@
 # Workflow
 
-This document describes the known permit lifecycle. Rules explicitly
-marked **UNRESOLVED** are not to be implemented until finalized — see
-`DECISIONS.md` for the authoritative open-decisions log.
+This document describes the permit lifecycle as implemented, deployed and
+UAT-verified on branch `feat/authoritative-permit-jsa` (`main` not yet
+merged). No rule here is marked UNRESOLVED any longer; `DECISIONS.md`
+remains the authoritative open-decisions log for what is still genuinely
+undecided, and anything found there must not be invented here.
 
 ## Actors
 
@@ -17,15 +19,39 @@ marked **UNRESOLVED** are not to be implemented until finalized — see
 
 ## Permit and JSA Numbering
 
-- Every permit has a **Permit Number**.
-- Every JSA has its own **JSA Number**.
+- A **DRAFT has no Permit Number at all.** A draft is a private
+  work-in-progress: it may be created, edited and abandoned any number of
+  times without consuming a number from the operational register.
+- The **Permit Number is assigned atomically on the first successful
+  `DRAFT -> PENDING_CRO` submission**, inside the submitting transaction.
+  A submission that fails or rolls back leaves the draft unnumbered and
+  consumes nothing. Once assigned the number is permanent: it cannot be
+  changed, cleared, or stripped by returning the permit to `DRAFT`, and a
+  released number is never reused.
+- **Each permit type has its own independent series**, allocated by a
+  database-side per-type counter under a row lock - never computed by the
+  frontend or from application memory:
+  - Cold Work - `CW-*`
+  - Hot Work - `HW-*`
+  - WTG Work - `WTG-*`
+  - Confined Space Entry - `CS-*`
+- Every JSA has its own **JSA Number**, which remains **one independent
+  global sequence** across all permit types.
 - The following actions keep both numbers unchanged:
   Review, CRO send-back, HSE send-back, Correction, Resubmission, Hold,
-  Resume.
+  Resume, Closure.
 - **Only renewal after midnight** creates a new Permit Number. Renewal
   keeps the same JSA Number.
-- Number generation must eventually be atomic, unique, and
-  concurrency-safe (see `DATABASE.md`).
+- Number generation is atomic, unique and concurrency-safe in the
+  DATABASE, which is the sole authority (see `DATABASE.md` and migrations
+  `0033`/`0034`).
+
+## Submission Completeness
+
+- A permit or JSA may be submitted **partially completed**. Review exists
+  precisely so that CRO and HSE see what was and was not filled in.
+- What is refused is a **meaningless or empty submission** - there is
+  nothing to review. Everything short of that reaches CRO.
 
 ## Permit Validity
 
@@ -102,10 +128,28 @@ Creator creates & submits
 - Once CRO performs fallback approval, HSE must not be able to send
   back or review that completed approval cycle.
 
-**UNRESOLVED:** The period after the 5-minute window has expired but
-before CRO has actually performed fallback approval is not defined (can
-HSE still act during this gap? is there a distinct state?). Do not invent
-this rule — see `DECISIONS.md`.
+### After the window expires (resolved, implemented, UAT-verified)
+
+- **Nothing happens automatically.** No scheduler, job or timer
+  transitions a permit because its deadline passed. The permit simply
+  stays `PENDING_HSE` until a human acts.
+- **HSE does not lose their authority when the window expires.** They may
+  still approve or send back; the window governs when CRO's fallback
+  becomes AVAILABLE, not when HSE's authority ends.
+- **CRO fallback approval becomes available only once the deadline has
+  genuinely passed**, evaluated by the database's own clock
+  (`now() >= hse_review_deadline_at`) under the same row lock that reads
+  the permit - never by the backend's or a browser's clock.
+- **The two race safely, with exactly one authoritative winner.** HSE
+  approval and CRO fallback approval take the same row lock and both
+  require the permit to still be `PENDING_HSE` at the version the actor
+  was shown. The first to commit issues the permit; the second is refused
+  as a conflict, creates no second issuance, and produces no signature.
+  A CRO fallback approval signs as `CRO FALLBACK APPROVAL` and never as
+  HSE.
+
+There is deliberately no distinct intermediate state and no time limit on
+how long a permit may sit in this gap.
 
 ## Issuance
 
@@ -186,6 +230,18 @@ HELD   -> CRO CLOSE -> CLOSED
   closes it, then renews it - see Renewal).
 - Closure records the authoritative actor, timestamp, and any
   closure information/remarks required by the finalized closure form.
+- **The closing CRO need not be the CRO who forwarded or authorized the
+  permit**, and very often is not - work runs for hours and shifts
+  change. The record shows both facts separately: the frozen CRO
+  authorization on the issued document says who authorized the work, and
+  the closure record says who signed it off as finished. Neither is ever
+  inferred from the other, and the closure is shown in its own section on
+  the record and named on its own lifecycle event.
+- **Closure does not regenerate the issued PDF.** It creates no new
+  snapshot and no new document job; the renderer version, expected file
+  hash and storage path of the issued document are untouched. The same
+  document remains downloadable, byte-identical, after closure. Hold and
+  Resume leave it equally untouched.
 - Closed permits are treated as immutable historical records through
   ordinary application operations.
 
@@ -246,12 +302,24 @@ remains not implemented - see `DECISIONS.md`'s open WhatsApp-integration-
 method decision. Permit/database actions never depend on notification
 delivery succeeding (see `ARCHITECTURE.md`).
 
+## Read Access After Issuance
+
+Reading a permit is not the same authority as acting on it. The HSE
+reviewer who approved a permit **keeps read-only access to it after
+issuance and through every later state** (`ISSUED`, `HELD`, `CANCELLED`,
+`CLOSED`), and **gains no post-issuance action**: hold, resume, cancel
+and close remain CRO's alone. This adds no permit to HSE's view - each of
+those states is reachable only through `PENDING_HSE`, which HSE could
+already read - and the states before their queue (`DRAFT`,
+`PENDING_CRO`, `PENDING_CORRECTION`) remain invisible to them.
+
 ## Related Open Decisions
 
 See `DECISIONS.md` → "Open Decisions" for the authoritative, current
-list - as of this revision: the HSE-window-expired-but-not-yet-
-fallback-approved gap, the WhatsApp integration method, and whether
-closure remarks are mandatory. (Allowed states for Hold, allowed states
-for Cancel, CRO/HSE send-back target state, and the status of a renewed
-permit were resolved in this same revision - see `DECISIONS.md` →
-Accepted Decisions.)
+list - as of this revision: the WhatsApp integration method, whether
+closure remarks are mandatory, and the authoritative per-template
+checklist item catalogue. (Allowed states for Hold, allowed states for
+Cancel, CRO/HSE send-back target state, the status of a renewed permit,
+and the HSE-window-expired-but-not-yet-fallback-approved gap are all
+resolved - see `DECISIONS.md` → Accepted Decisions and "After the window
+expires" above.)

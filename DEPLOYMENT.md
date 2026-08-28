@@ -541,9 +541,11 @@ non-negotiable requirement:
   `DB_SSL=true` (enforced by `env.ts`); set `DB_CA_CERT_PATH` if the
   platform's default trusted CA store doesn't already cover Supabase's
   CA.
-- **Applying migrations.** `database/migrations/0001`-`0015` are applied
+- **Applying migrations.** `database/migrations/0001`-`0034` are applied
   and live-verified against the current Supabase project
-  (`yfxnigovfmngypbgcnaw`) - see `PROJECT_CONTEXT.md`. Migration
+  (`yfxnigovfmngypbgcnaw`), and there is no outstanding migration - see
+  `database/migrations/README.md` for the per-migration ledger and
+  `PROJECT_CONTEXT.md` for the current state. Migration
   `0012_permit_workflow_completion.sql` (the Send-Back/Hold/Resume/
   Cancel/Renewal schema) has been applied and live-verified: migration
   recorded, new workflow statuses/constraints live, hold/cancel

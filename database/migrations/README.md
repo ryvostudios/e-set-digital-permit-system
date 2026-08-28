@@ -222,10 +222,11 @@ Versioned, plain SQL migration files, applied in filename order by
   nothing: each type's counter was seeded from the highest number that
   type already held.
 
-- `0034_permit_number_on_submission.sql`: **NOT APPLIED — awaiting
-  deployment.** The only outstanding migration. It moves ALLOCATION from
-  0033's `BEFORE INSERT` trigger to the `DRAFT -> submitted` transition,
-  so a draft never consumes a permit number:
+- `0034_permit_number_on_submission.sql`: **APPLIED / LIVE.** Recorded in
+  the migration ledger and verified on the live project; there is no
+  outstanding migration. It moves ALLOCATION from 0033's `BEFORE INSERT`
+  trigger to the `DRAFT -> submitted` transition, so a draft never
+  consumes a permit number:
 
   1. `permit_sequence` becomes nullable, and a DRAFT is always NULL —
      typed or untyped, newly created or saved a hundred times, and
@@ -248,6 +249,12 @@ Versioned, plain SQL migration files, applied in filename order by
 
   0033's counter table, allocator function and unique indexes are reused
   unchanged; only its trigger is replaced.
+
+  UAT-verified on the live project: drafts carry no number; a number is
+  issued on the first successful submission and never afterwards changes;
+  and each type draws from its own series - `CW-1`, `CW-2`, `HW-1`,
+  `WTG-1`, `CS-1` were all observed. The JSA series remains one
+  independent global sequence.
 
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
