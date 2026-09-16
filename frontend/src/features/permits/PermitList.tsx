@@ -19,16 +19,6 @@ import { permitTypeLabel } from './labels';
  * fabricated to fill a column.
  */
 
-function workSummary(permit: PermitSummary): string {
-  // `wind_farm`/`wtg_number`/`work_description` are server-derived
-  // projections of the stored payload, present only for WTG work.
-  const parts = [permit.wind_farm, permit.wtg_number].filter(Boolean);
-  if (parts.length > 0) return parts.join(' · ');
-  if (permit.work_description) return permit.work_description;
-  if (permit.loto_number) return `LOTO ${permit.loto_number}`;
-  return '—';
-}
-
 export function PermitList({ permits, emptyMessage }: { permits: PermitSummary[]; emptyMessage: string }) {
   if (permits.length === 0) {
     return (
@@ -48,7 +38,6 @@ export function PermitList({ permits, emptyMessage }: { permits: PermitSummary[]
               <th scope="col">Permit No.</th>
               <th scope="col">Type</th>
               <th scope="col">Applicant</th>
-              <th scope="col">Work</th>
               <th scope="col">Status</th>
               <th scope="col">Raised</th>
               <th scope="col">
@@ -64,13 +53,12 @@ export function PermitList({ permits, emptyMessage }: { permits: PermitSummary[]
                 </th>
                 <td>{permitTypeLabel(permit.permit_type)}</td>
                 <td>{describePermitApplicant(permit) ?? '—'}</td>
-                <td>{workSummary(permit)}</td>
                 <td>
                   <StatusBadge status={permit.status} />
                 </td>
                 <td>{formatDate(permit.created_at)}</td>
                 <td>
-                  <Link to={ROUTES.permit(permit.id)}>
+                  <Link className="btn btn--primary btn--sm" to={ROUTES.permit(permit.id)}>
                     Open<span className="sr-only"> permit {permit.permitDisplayNumber}</span>
                   </Link>
                 </td>
@@ -94,8 +82,6 @@ export function PermitList({ permits, emptyMessage }: { permits: PermitSummary[]
               <dd>{permitTypeLabel(permit.permit_type)}</dd>
               <dt className="record-list__key">Applicant</dt>
               <dd>{describePermitApplicant(permit) ?? '—'}</dd>
-              <dt className="record-list__key">Work</dt>
-              <dd>{workSummary(permit)}</dd>
               <dt className="record-list__key">Raised</dt>
               <dd>{formatDate(permit.created_at)}</dd>
             </dl>

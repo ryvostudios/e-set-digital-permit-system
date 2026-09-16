@@ -47,7 +47,6 @@ describe('the list', () => {
 
     await screen.findAllByText('WTG-1');
     expect(screen.getAllByText(/WTG Work Permit/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/North Farm · WTG-14/).length).toBeGreaterThan(0);
   });
 
   it('never renders a DRAFT row even if a stale backend fixture contains one', async () => {
