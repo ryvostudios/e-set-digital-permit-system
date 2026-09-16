@@ -182,7 +182,7 @@ export function EmployeeListPage() {
                         </td>
                         <td>{employee.viewAllPermits ? <Badge tone="success">Granted</Badge> : <Badge>Not granted</Badge>}</td>
                         <td>
-                          <Link to={ROUTES.employee(employee.userId)}>
+                          <Link className="btn btn--primary btn--sm" to={ROUTES.employee(employee.userId)}>
                             Manage<span className="sr-only"> {employee.displayName}</span>
                           </Link>
                         </td>
