@@ -59,35 +59,72 @@ describe('the sidebar logout', () => {
 /**
  * The official E-SET logo in the sidebar.
  *
- * It is branding, not a control: it must appear without displacing any
- * part of the frame that people actually use. These specs therefore
- * check the logo AND, in the same breath, that navigation, Review,
- * Alerts, the identity and Logout are all still there and still behave
- * the way they did. Nothing here asserts a pixel size or a CSS value -
- * where the logo sits is expressed as document order, which is the part
- * that carries meaning.
+ * There is exactly ONE logo in the shell and it lives in the top brand
+ * header, beside the E-SET / Permit to Work text. The large standalone
+ * logo that used to float between the navigation and Alerts is gone.
+ *
+ * These specs check the logo AND, in the same breath, that navigation,
+ * Review, Alerts, the identity and Logout are all still there and still
+ * behave the way they did. Nothing asserts a pixel size or a CSS value -
+ * where the logo sits is expressed as containment and document order,
+ * which is the part that carries meaning.
  */
+
+/** Every official-logo image the shell renders. */
+function logos(): HTMLImageElement[] {
+  return Array.from(document.querySelectorAll('img[src="/branding/eset-logo.png"]'));
+}
+
 describe('the sidebar branding', () => {
-  it('renders the supplied logo file', async () => {
+  it('renders the official logo exactly once', async () => {
     quietBackend();
     renderAs(<AppShell />, normalEmployee());
 
-    const logo = await screen.findByTestId('sidebar-brand-logo');
-    expect(logo.tagName).toBe('IMG');
-    expect(logo).toHaveAttribute('src', '/branding/eset-logo.png');
+    await screen.findByRole('button', { name: /^logout$/i });
+    expect(logos()).toHaveLength(1);
   });
 
-  it('is decorative and is not a link', async () => {
+  it('puts it in the top brand header, beside the name', async () => {
     quietBackend();
     renderAs(<AppShell />, normalEmployee());
 
-    const logo = await screen.findByTestId('sidebar-brand-logo');
-    // Empty alt on purpose: the sidebar already names E-SET in text at
-    // the top, and a screen reader must not hear it twice.
-    expect(logo).toHaveAttribute('alt', '');
-    expect(logo.closest('a')).toBeNull();
-    // ...and it is not a navigation destination of any kind.
-    expect(logo.closest('li')).toBeNull();
+    await screen.findByRole('button', { name: /^logout$/i });
+    const brand = logos()[0]?.closest('.brand');
+    expect(brand).not.toBeNull();
+    expect(brand?.textContent).toContain('E-SET');
+    expect(brand?.textContent).toContain('Permit to Work');
+  });
+
+  it('comes before the E-SET text in document order', async () => {
+    quietBackend();
+    renderAs(<AppShell />, normalEmployee());
+
+    await screen.findByRole('button', { name: /^logout$/i });
+    const logo = logos()[0];
+    const name = screen.getByText('E-SET');
+    // DOCUMENT_POSITION_FOLLOWING: the text comes after the logo.
+    expect(logo.compareDocumentPosition(name) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('no longer floats between the navigation and Alerts', async () => {
+    quietBackend();
+    renderAs(<AppShell />, normalEmployee());
+
+    await screen.findByRole('button', { name: /^logout$/i });
+    // The old standalone element is gone entirely...
+    expect(document.querySelector('.sidebar__logo')).toBeNull();
+    // ...and the one remaining logo is not inside the navigation at all.
+    expect(logos()[0]?.closest('nav')).toBeNull();
+  });
+
+  it('is decorative, so the name is announced once', async () => {
+    quietBackend();
+    renderAs(<AppShell />, normalEmployee());
+
+    await screen.findByRole('button', { name: /^logout$/i });
+    // The brand link already reads "E-SET Permit to Work".
+    expect(logos()[0]).toHaveAttribute('alt', '');
+    expect(screen.queryByRole('img', { name: /e-set/i })).not.toBeInTheDocument();
   });
 
   it('leaves the main navigation in place', async () => {
@@ -98,35 +135,27 @@ describe('the sidebar branding', () => {
     expect(screen.getByRole('link', { name: /my permits/i })).toBeInTheDocument();
   });
 
-  it('leaves Review in place, and sits below it', async () => {
+  it('leaves Review in place where the actor has it', async () => {
     quietBackend();
     renderAs(<AppShell />, croEmployee());
 
-    const review = await screen.findByRole('link', { name: /cro review/i });
-    const logo = screen.getByTestId('sidebar-brand-logo');
-    // DOCUMENT_POSITION_FOLLOWING: the logo comes after Review.
-    expect(review.compareDocumentPosition(logo) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(await screen.findByRole('link', { name: /cro review/i })).toBeInTheDocument();
   });
 
-  it('leaves Alerts and Notifications in place, and sits above them', async () => {
+  it('leaves Alerts and Notifications in place', async () => {
     quietBackend();
     renderAs(<AppShell />, normalEmployee());
 
-    const notifications = await screen.findByRole('link', { name: /notifications/i });
-    const logo = screen.getByTestId('sidebar-brand-logo');
-    expect(logo.compareDocumentPosition(notifications) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(await screen.findByRole('link', { name: /notifications/i })).toBeInTheDocument();
   });
 
-  it('leaves the identity and Logout in place, and sits above them', async () => {
+  it('leaves the identity and Logout in place', async () => {
     quietBackend();
     renderAs(<AppShell />, siteManager());
 
     const logout = await screen.findByRole('button', { name: /^logout$/i });
     const footer = logout.closest('.sidebar__footer');
     expect(footer?.textContent).toMatch(/\S/);
-
-    const logo = screen.getByTestId('sidebar-brand-logo');
-    expect(logo.compareDocumentPosition(logout) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('does not change what navigating does', async () => {

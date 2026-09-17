@@ -7,7 +7,6 @@ import { useApiResource } from '../lib/useApiResource';
 import { Button, IconButton } from '../ui/Button';
 import {
   BellIcon,
-  BrandMark,
   ChevronDownIcon,
   CloseIcon,
   DocumentIcon,
@@ -197,9 +196,18 @@ export function AppShell() {
 
       <aside className="shell__sidebar" data-open={drawerOpen} id="app-navigation">
         <NavLink to={ROUTES.home} className="brand">
-          <span style={{ color: 'var(--accent)' }} aria-hidden="true">
-            <BrandMark />
-          </span>
+          {/*
+            The official E-SET logo, in place of the simplified mark.
+            Decorative: the link's own text already reads "E-SET / Permit
+            to Work", so alt text here would say it twice.
+          */}
+          <img
+            className="brand__logo"
+            src="/branding/eset-logo.png"
+            alt=""
+            width={224}
+            height={256}
+          />
           <span>
             <span className="brand__name">E-SET</span>
             <span className="brand__tag">Permit to Work</span>
@@ -229,24 +237,6 @@ export function AppShell() {
               </ul>
             </div>
           ))}
-
-          {/*
-            The official E-SET logo, filling the space the navigation
-            leaves above Alerts. Decorative on purpose: the sidebar
-            already names the company in text at the top, so alt text
-            here would announce "E-SET" to a screen reader twice inside
-            one landmark. Deliberately not a link and not a navigation
-            item - the wordmark at the top is already the way home.
-          */}
-          <div className="sidebar__logo">
-            <img
-              src="/branding/eset-logo.png"
-              alt=""
-              width={224}
-              height={256}
-              data-testid="sidebar-brand-logo"
-            />
-          </div>
 
           <div style={{ marginTop: 'auto' }}>
             <p className="nav__group-label">Alerts</p>
