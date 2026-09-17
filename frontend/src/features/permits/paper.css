@@ -517,3 +517,36 @@
     padding: 0 var(--space-2);
   }
 }
+/* Review keeps the submitted Permit and both JSA pages in one reading
+ * flow. History is supporting context, not a page in that document. */
+.review-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(16rem, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+  margin-top: var(--space-4);
+}
+
+.review-document,
+.review-history {
+  min-width: 0;
+}
+
+.review-history {
+  position: sticky;
+  top: calc(var(--topbar-height, 4rem) + var(--space-4));
+  max-height: calc(100vh - var(--topbar-height, 4rem) - var(--space-6));
+  overflow-y: auto;
+}
+
+@media (max-width: 900px) {
+  .review-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .review-history {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+  }
+}

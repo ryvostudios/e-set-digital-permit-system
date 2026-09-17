@@ -100,7 +100,8 @@ describe('a V2 record never reaches a V1 renderer', () => {
       const user = userEvent.setup();
       renderRecord(detailFor('WTG_WORK_V2', status));
       await screen.findByTestId('permit-document-WTG_WORK');
-      await user.click(screen.getByRole('tab', { name: /job safety analysis/i }));
+      const tab = screen.queryByRole('tab', { name: /job safety analysis/i });
+      if (tab) await user.click(tab);
       await screen.findByTestId('jsa-page-1');
       expect(screen.queryByTestId('v1-jsa-document')).not.toBeInTheDocument();
     });
@@ -147,10 +148,8 @@ describe('a V1 record still goes to the V1 renderers', () => {
   });
 
   it('renders the V1 JSA document', async () => {
-    const user = userEvent.setup();
     renderRecord(detailFor('WTG_WORK_V1', 'PENDING_CRO'));
     await screen.findByTestId('v1-permit-document');
-    await user.click(screen.getByRole('tab', { name: /job safety analysis/i }));
     expect(await screen.findByTestId('v1-jsa-document')).toBeInTheDocument();
     expect(screen.queryByTestId('jsa-page-1')).not.toBeInTheDocument();
   });

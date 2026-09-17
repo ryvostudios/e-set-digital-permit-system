@@ -156,8 +156,8 @@ describe('every read-only surface', () => {
       const { container } = renderRecord(detailFor(status), user());
       await identityBand();
 
-      expect(screen.getByText(AUTHORITATIVE.applicantName)).toBeInTheDocument();
-      expect(screen.getByText(AUTHORITATIVE.permitNumber)).toBeInTheDocument();
+      expect(screen.getAllByText(AUTHORITATIVE.applicantName).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(AUTHORITATIVE.permitNumber).length).toBeGreaterThan(0);
       expect(container.textContent ?? '').not.toMatch(SYSTEM_SET_WORDING);
     });
   }

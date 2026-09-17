@@ -119,10 +119,44 @@ function renderRecord(detail: PermitDetailResponse, user = normalEmployee()) {
 
 /** Opens the JSA tab and waits for the document that tab draws. */
 async function openJsaTab() {
+  const visible = screen.queryByTestId('jsa-page-1');
+  if (visible) return visible;
   const user = userEvent.setup();
   await user.click(screen.getByRole('tab', { name: /job safety analysis/i }));
   return screen.findByTestId('jsa-page-1');
 }
+
+describe('continuous CRO and HSE review', () => {
+  for (const review of [
+    { status: 'PENDING_CRO' as const, user: croEmployee(), actions: ['forward_hse', 'send_back'] as const },
+    { status: 'PENDING_HSE' as const, user: normalEmployee({ capabilities: ['permit.hse_review'] }), actions: ['hse_approve', 'hse_send_back'] as const },
+  ]) {
+    it(`${review.status} keeps Permit, JSA page 1 and JSA page 2 in one read-only document beside History`, async () => {
+      renderRecord(v2Detail({ status: review.status, availableActions: [...review.actions] }), review.user);
+
+      const document = await screen.findByTestId('continuous-review-document');
+      expect(await within(document).findByTestId('permit-document-WTG_WORK')).toBeInTheDocument();
+      expect(within(document).getByTestId('jsa-page-1')).toBeInTheDocument();
+      expect(within(document).getByTestId('jsa-page-2')).toBeInTheDocument();
+      expect(screen.getByTestId('review-history-column')).not.toBe(document);
+      expect(screen.queryByRole('tablist', { name: /permit record sections/i })).not.toBeInTheDocument();
+      expect(within(document).queryAllByRole('textbox')).toHaveLength(0);
+      expect(within(document).queryAllByRole('radio')).toHaveLength(0);
+    });
+  }
+
+  it('preserves CRO send-back and forward actions', async () => {
+    renderRecord(v2Detail({ status: 'PENDING_CRO', availableActions: ['forward_hse', 'send_back'] }), croEmployee());
+    expect(await screen.findByRole('button', { name: /forward to hse/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /return for correction/i })).toBeInTheDocument();
+  });
+
+  it('preserves HSE approval and send-back actions', async () => {
+    renderRecord(v2Detail({ status: 'PENDING_HSE', availableActions: ['hse_approve', 'hse_send_back'] }));
+    expect(await screen.findByRole('button', { name: /approve and issue/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /return to cro/i })).toBeInTheDocument();
+  });
+});
 
 describe('a V2 draft its owner may edit', () => {
   it('still opens the V2 editor, unchanged', async () => {

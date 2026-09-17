@@ -146,6 +146,7 @@ export function PermitDetailPage() {
 
   const { permit, jsa, validity, availableActions, history, signatures, document, serverTime, closure } = detail;
   const canEdit = availableActions.includes('update');
+  const isContinuousReview = permit.status === 'PENDING_CRO' || permit.status === 'PENDING_HSE';
 
   /**
    * An authoritative (V2) record the owner may edit opens as ONE
@@ -259,9 +260,35 @@ export function PermitDetailPage() {
         </div>
       ) : null}
 
-      <Tabs tabs={TABS} activeId={tab} onChange={(next) => setTab(next as TabId)} label="Permit record sections" />
+      {isContinuousReview ? (
+        <div className="review-layout" data-testid="continuous-review-layout">
+          <article className="review-document stack" data-testid="continuous-review-document">
+            <section aria-label="Permit" data-testid="review-permit-section">
+              {isV2 ? (
+                <V2PermitRecord permit={permit} jsa={jsa} signatures={signatures} catalogue={formCatalogue} />
+              ) : (
+                <PermitDocument permit={permit} validity={validity} signatures={signatures} closure={closure} />
+              )}
+            </section>
+            <section aria-label="Job Safety Analysis" data-testid="review-jsa-section">
+              {isV2 ? (
+                <V2JsaRecord permit={permit} jsa={jsa} catalogue={formCatalogue} />
+              ) : (
+                <JsaDocument jsa={jsa} />
+              )}
+            </section>
+          </article>
+          <aside className="review-history" aria-label="Permit history" data-testid="review-history-column">
+            <div className="card">
+              <PermitHistory events={history} />
+            </div>
+          </aside>
+        </div>
+      ) : (
+        <>
+          <Tabs tabs={TABS} activeId={tab} onChange={(next) => setTab(next as TabId)} label="Permit record sections" />
 
-      <div style={{ marginTop: 'var(--space-4)' }}>
+          <div style={{ marginTop: 'var(--space-4)' }}>
         <TabPanel id="permit" activeId={tab}>
           {isV2 ? (
             <>
@@ -326,7 +353,9 @@ export function PermitDetailPage() {
             <PermitHistory events={history} />
           </div>
         </TabPanel>
-      </div>
+          </div>
+        </>
+      )}
 
       {!editing ? (
         <PermitActions
