@@ -57,6 +57,18 @@ test('an employee resolves to their real company, team and position', async () =
   assert.equal(osama?.privilegedRole, null, 'an employee is never described by a privileged role');
 });
 
+test('a deleted employee remains resolvable for historical permit and audit actions', async () => {
+  const query = accounts({ workforce: [CRO] });
+  const identities = await resolvePermitActorIdentities(query, ['cro-b']);
+
+  assert.equal(identities.get('cro-b')?.displayName, 'Osama');
+  assert.equal(
+    query.calls.some((call) => call.sql.includes('app_user_access')),
+    false,
+    'historical identity resolution must not discard a workforce profile because current access was deleted',
+  );
+});
+
 test('a privileged account resolves to its role, with no team or position invented', async () => {
   const identities = await resolvePermitActorIdentities(
     accounts({ privileged: [{ user_id: 'ceo-1', display_name: 'Ayesha Khan', role: 'CEO' }] }),

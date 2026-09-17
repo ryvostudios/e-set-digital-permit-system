@@ -132,7 +132,9 @@ export function SiteManagersPage() {
 
   // Defensive: a response missing this key must render an empty list,
   // never crash the screen.
-  const siteManagers = resource.data?.siteManagers ?? [];
+  const siteManagers = (resource.data?.siteManagers ?? []).filter(
+    (siteManager) => siteManager.active && siteManager.accountState === 'ACTIVE',
+  );
 
   return (
     <>

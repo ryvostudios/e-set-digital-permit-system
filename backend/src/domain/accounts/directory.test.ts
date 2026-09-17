@@ -83,6 +83,20 @@ test('listEmployees excludes accounts holding an active privileged grant', async
   }
 });
 
+test('listEmployees excludes terminally deleted accounts from every page, search and filter', async () => {
+  const captured: Captured[] = [];
+  await listEmployees(
+    stubQuery([[], [{ count: '0' }]], captured),
+    { search: 'Former Employee', state: 'DISABLED', companyCode: 'ZPL' },
+    { page: 1, pageSize: 25 },
+  );
+
+  for (const { sql } of captured) {
+    assert.match(sql, /a\.state <> 'DELETED'/);
+  }
+  assert.deepEqual(captured[0]?.params.slice(0, 3), ['%Former Employee%', 'DISABLED', 'ZPL']);
+});
+
 test('listEmployees never returns an email or any credential internals', async () => {
   const captured: Captured[] = [];
   const result = await listEmployees(
@@ -210,20 +224,13 @@ test('loadOrganizationAdministration returns the full hierarchy by STABLE ID', a
   assert.equal(position?.siteManagerAssignable, true);
 });
 
-test('loadOrganizationAdministration INCLUDES deactivated rows - an admin must see them to manage them', async () => {
-  const companies = await loadOrganizationAdministration(
-    stubQuery(
-      [[
-        { ...ADMIN_ROW, company_deactivated_at: '2026-01-01T00:00:00.000Z',
-          team_deactivated_at: '2026-01-02T00:00:00.000Z',
-          team_position_deactivated_at: '2026-01-03T00:00:00.000Z' },
-      ]],
-      [],
-    ),
-  );
-  assert.equal(companies[0]?.deactivatedAt, '2026-01-01T00:00:00.000Z');
-  assert.equal(companies[0]?.teams[0]?.deactivatedAt, '2026-01-02T00:00:00.000Z');
-  assert.equal(companies[0]?.teams[0]?.positions[0]?.deactivatedAt, '2026-01-03T00:00:00.000Z');
+test('loadOrganizationAdministration excludes inactive companies, teams and associations in SQL', async () => {
+  const captured: Captured[] = [];
+  await loadOrganizationAdministration(stubQuery([[]], captured));
+  const sql = captured[0]?.sql ?? '';
+  assert.match(sql, /WHERE c\.deactivated_at IS NULL/);
+  assert.match(sql, /t\.company_id = c\.id AND t\.deactivated_at IS NULL/);
+  assert.match(sql, /tp\.team_id = t\.id AND tp\.deactivated_at IS NULL/);
 });
 
 test('a company with no teams, and a team with no positions, are returned as empty - not omitted', async () => {
@@ -266,14 +273,13 @@ test('loadOrganizationAdministration is NOT filtered by assignability or by a cl
   assert.ok(!sql.includes("code IN ("));
 });
 
-test('listSiteManagers reports the current grant state and excludes the CEO tier', async () => {
+test('listSiteManagers returns only active current grants and excludes the CEO tier', async () => {
   const captured: Captured[] = [];
   const siteManagers = await listSiteManagers(
     stubQuery(
       [
         [
           { user_id: 'u-1', display_name: 'Sara Ahmed', active: true, account_state: 'ACTIVE' },
-          { user_id: 'u-2', display_name: 'Bilal Raza', active: false, account_state: 'DISABLED' },
         ],
       ],
       captured,
@@ -282,10 +288,11 @@ test('listSiteManagers reports the current grant state and excludes the CEO tier
 
   assert.deepEqual(siteManagers, [
     { userId: 'u-1', displayName: 'Sara Ahmed', active: true, accountState: 'ACTIVE' },
-    { userId: 'u-2', displayName: 'Bilal Raza', active: false, accountState: 'DISABLED' },
   ]);
   const sql = captured[0]?.sql ?? '';
   assert.ok(sql.includes("role = 'CEO'"), 'the CEO tier must be filtered out');
   assert.ok(sql.includes("role = 'SITE_MANAGER'"), 'grant state comes from the SITE_MANAGER role only');
   assert.ok(sql.includes('ORDER BY ordinal DESC'), 'state must come from the LATEST event, never a stale one');
+  assert.ok(sql.includes("sm.action = 'GRANTED'"), 'a revoked Site Manager is not a current choice');
+  assert.ok(sql.includes("a.state = 'ACTIVE'"), 'a disabled or deleted account is not a current choice');
 });

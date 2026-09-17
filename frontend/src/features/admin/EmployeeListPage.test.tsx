@@ -92,6 +92,19 @@ describe('the list', () => {
     expect(calls.every((call) => !call.url.includes('site-managers'))).toBe(true);
     expect(screen.queryByText('Sara Ahmed')).not.toBeInTheDocument();
   });
+
+  it('does not render a terminally deleted employee or offer deleted as a normal filter', async () => {
+    stubEmployeeList(listResponse([
+      EMPLOYEE,
+      { ...EMPLOYEE, userId: 'employee-deleted', displayName: 'Former Employee', state: 'DELETED' },
+    ]));
+    renderAs(<EmployeeListPage />, siteManager());
+
+    expect(await screen.findByRole('rowheader', { name: 'Ali Khan' })).toBeInTheDocument();
+    expect(screen.queryByText('Former Employee')).not.toBeInTheDocument();
+    expect(within(screen.getByLabelText(/account status/i)).queryByRole('option', { name: 'Deleted' }))
+      .not.toBeInTheDocument();
+  });
 });
 
 describe('searching and filtering', () => {

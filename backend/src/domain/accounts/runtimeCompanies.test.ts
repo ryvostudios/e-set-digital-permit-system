@@ -118,6 +118,7 @@ test('the transfer and directory schemas accept the same runtime codes', () => {
   assert.equal(employeeListQuerySchema.safeParse({ companyCode: 'ABB' }).success, true);
   assert.equal(employeeListQuerySchema.safeParse({ companyCode: 'ABC_CONTRACTORS' }).success, true);
   assert.equal(employeeListQuerySchema.safeParse({ companyCode: 'abb' }).success, false);
+  assert.equal(employeeListQuerySchema.safeParse({ state: 'DELETED' }).success, false);
 });
 
 test('no request schema accepts an id, a name, a capability or an authority field', () => {

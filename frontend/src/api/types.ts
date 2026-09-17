@@ -527,13 +527,13 @@ export interface SiteManagerListItem {
  * DISTINCT FROM `OrganizationCompany` ABOVE, deliberately. That one
  * answers "which Team + Position may an employee be placed into right
  * now?" - assignable, fully-active combinations, identified by NAME -
- * and the employee forms depend on it. This one answers the management
- * question and returns EVERY row, retired ones included, identified by
- * STABLE UUID. Both endpoints exist on the backend for that reason.
+ * and the employee forms depend on it. This one answers the current
+ * management question by STABLE UUID, including active companies with
+ * no teams and active teams with no positions.
  *
- * `deactivatedAt` is an ISO timestamp when the record has been retired,
- * and null while it is active. Retired rows are returned on purpose:
- * organization history must stay visible.
+ * `deactivatedAt` remains in the contract for defensive compatibility,
+ * but the normal endpoint returns active rows only. Retired rows remain
+ * stored and auditable rather than being exposed as current choices.
  */
 export interface OrganizationAdminPosition {
   /** The Team + Position association - what an employee is actually assigned to. */

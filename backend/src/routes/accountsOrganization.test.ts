@@ -128,14 +128,6 @@ before(() => {
             site_manager_assignable: true,
             position_id: POSITION_ID, position_name: 'CRO',
           },
-          {
-            company_id: '18000000-0000-4000-8000-0000000000aa',
-            company_code: 'ABC_CONTRACTORS', company_name: 'ABC Contractors',
-            company_deactivated_at: '2026-01-01T00:00:00.000Z',
-            team_id: null, team_name: null, team_deactivated_at: null,
-            team_position_id: null, team_position_deactivated_at: null,
-            site_manager_assignable: null, position_id: null, position_name: null,
-          },
         ],
       };
     }
@@ -734,15 +726,15 @@ test('the mutation and its audit share one transaction', async () => {
 // The administration directory
 // =====================================================================
 
-test('the administration directory returns IDs, not names, and includes retired rows', async () => {
+test('the administration directory returns active structure by stable ID and omits retired rows', async () => {
   authorizeCeo();
   const response = await call('/admin/organization/structure', { token: VALID_TOKEN });
   assert.equal(response.status, 200);
 
   const companies = response.body.companies as Array<Record<string, unknown>>;
-  assert.equal(companies.length, 2);
+  assert.equal(companies.length, 1);
 
-  const [eset, abc] = companies;
+  const [eset] = companies;
   assert.equal(eset?.id, COMPANY_ID);
   assert.equal(eset?.code, 'E_SET');
   assert.equal(eset?.deactivatedAt, null);
@@ -758,11 +750,10 @@ test('the administration directory returns IDs, not names, and includes retired 
   assert.equal(positions[0]?.siteManagerAssignable, true);
   assert.equal(positions[0]?.deactivatedAt, null);
 
-  // A DEACTIVATED, runtime-created company with zero teams is still
-  // returned - an administrator must be able to see it to manage it.
-  assert.equal(abc?.code, 'ABC_CONTRACTORS');
-  assert.notEqual(abc?.deactivatedAt, null);
-  assert.deepEqual(abc?.teams, []);
+  const directoryQuery = capturedQueries.find((entry) => entry.sql.includes('FROM companies c'))?.sql ?? '';
+  assert.match(directoryQuery, /WHERE c\.deactivated_at IS NULL/);
+  assert.match(directoryQuery, /t\.company_id = c\.id AND t\.deactivated_at IS NULL/);
+  assert.match(directoryQuery, /tp\.team_id = t\.id AND tp\.deactivated_at IS NULL/);
 });
 
 test('the administration directory exposes no capability mapping', async () => {

@@ -153,20 +153,26 @@ describe('granting and revoking', () => {
     expect(calls.find((call) => call.url.includes('/revoke'))?.body).toEqual({});
   });
 
-  it('restores authority through the grant endpoint', async () => {
-    const user = userEvent.setup();
-    const { calls } = stubFetch({
-      'GET /api/v1/admin/site-managers': { body: { siteManagers: [{ ...SITE_MANAGER_ROW, active: false }] } },
-      'POST /api/v1/admin/site-managers/sm-1/grant': {
-        body: { status: 'ok', siteManager: { userId: 'sm-1', active: true } },
+  it('does not render revoked, disabled, or deleted identities in the current list', async () => {
+    stubFetch({
+      'GET /api/v1/admin/site-managers': {
+        body: {
+          siteManagers: [
+            SITE_MANAGER_ROW,
+            { ...SITE_MANAGER_ROW, userId: 'sm-revoked', displayName: 'Former Manager', active: false },
+            { ...SITE_MANAGER_ROW, userId: 'sm-disabled', displayName: 'Disabled Manager', accountState: 'DISABLED' },
+            { ...SITE_MANAGER_ROW, userId: 'sm-deleted', displayName: 'Deleted Manager', accountState: 'DELETED' },
+          ],
+        },
       },
     });
     renderAs(<SiteManagersPage />, ceo());
 
-    await user.click(await screen.findByRole('button', { name: /restore authority/i }));
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /restore authority/i }));
-
-    await waitFor(() => expect(calls.some((call) => call.url.includes('/grant'))).toBe(true));
+    expect(await screen.findByText('Sara Ahmed')).toBeInTheDocument();
+    expect(screen.queryByText('Former Manager')).not.toBeInTheDocument();
+    expect(screen.queryByText('Disabled Manager')).not.toBeInTheDocument();
+    expect(screen.queryByText('Deleted Manager')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /restore authority/i })).not.toBeInTheDocument();
   });
 
   it('says that past actions remain recorded against their name', async () => {

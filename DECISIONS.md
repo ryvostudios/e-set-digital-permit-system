@@ -729,15 +729,17 @@ confirmed.
   from the very team id being checked, making the check tautological and
   quietly removing it. A deactivation target is a single row with no
   parent claim to cross-check, so those stay flat.
-- **The admin directory is a SECOND reader, not a widened one.**
+- **The admin directory is a SECOND current-state reader, not a widened one.**
   `loadOrganization` answers "which combinations may an employee be
   placed into right now?" and is consumed by the employee forms: it
   returns only assignable, fully-active combinations. The new
   `loadOrganizationAdministration`, served at `/admin/organization/structure`,
-  answers the opposite question and
-  returns EVERY row, retired ones included, by stable UUID. Widening the
-  first would have started offering retired combinations in the employee
-  forms, which the database refuses anyway.
+  returns the active management tree by stable UUID, preserving active
+  companies with no teams and active teams with no positions. Retired
+  rows remain stored and append-only-audited but are absent from normal
+  operational screens. Widening the first reader would have started
+  offering retired combinations in the employee forms, which the
+  database refuses anyway.
 - POSITION_CREATED is emitted ONLY when a global `positions` row is
   genuinely minted. `INSERT ... ON CONFLICT DO NOTHING RETURNING` is
   what distinguishes minting from reusing the shared row; an audit that

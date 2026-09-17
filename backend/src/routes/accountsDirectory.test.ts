@@ -230,6 +230,18 @@ test('the employee directory rejects an out-of-range page size', async () => {
   }
 });
 
+test('the employee directory does not expose the terminal deleted state as a normal filter', async () => {
+  const { url, close } = await startServer();
+  try {
+    authorizeSiteManager();
+    const response = await get(url, '/admin/employees?state=DELETED', VALID_TOKEN);
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as { error: string }).error, 'invalid_request');
+  } finally {
+    await close();
+  }
+});
+
 test('directory authorization is resolved before any directory query runs', async () => {
   const { url, close } = await startServer();
   try {

@@ -60,7 +60,7 @@ export function EmployeeListPage() {
 
   // Defensive: a response missing this key must render an empty list,
   // never crash the screen.
-  const employees = resource.data?.employees ?? [];
+  const employees = (resource.data?.employees ?? []).filter((employee) => employee.state !== 'DELETED');
 
   function handleSearch(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -123,7 +123,6 @@ export function EmployeeListPage() {
                 <option value="">Any status</option>
                 <option value="ACTIVE">Active</option>
                 <option value="DISABLED">Disabled</option>
-                <option value="DELETED">Deleted</option>
               </Select>
             </div>
             <div className="row">

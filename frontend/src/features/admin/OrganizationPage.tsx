@@ -45,10 +45,9 @@ import { useToast } from '../../ui/Toast';
  * bounded path; this screen has no capability picker, cannot send one,
  * and cannot set `siteManagerAssignable` - which it only ever displays.
  *
- * RETIRED RECORDS STAY VISIBLE. The endpoint returns them on purpose:
- * a team that vanished from the list would be indistinguishable from one
- * that never existed, and organization history is exactly what this
- * screen exists to make legible.
+ * RETIRED RECORDS STAY IN HISTORY, NOT IN THIS CURRENT-STATE TREE. The
+ * backend omits them from the normal management endpoint while retaining
+ * their database rows, stable ids and append-only audit events.
  */
 
 /** Backend refusal reasons, in the words a person can act on. */
@@ -150,7 +149,17 @@ export function OrganizationPage() {
     );
   }
 
-  const companies = resource.data?.companies ?? [];
+  const companies = (resource.data?.companies ?? [])
+    .filter((company) => company.deactivatedAt === null)
+    .map((company) => ({
+      ...company,
+      teams: company.teams
+        .filter((team) => team.deactivatedAt === null)
+        .map((team) => ({
+          ...team,
+          positions: team.positions.filter((position) => position.deactivatedAt === null),
+        })),
+    }));
 
   function closeDialogs(): void {
     setCompanyOpen(false);
@@ -557,8 +566,8 @@ export function OrganizationPage() {
         description={
           pending ? (
             <>
-              <strong>{pending.name}</strong> will be retired. It stays visible with its history, and
-              nobody new can be assigned to it. Employees, permits and audit records are not deleted.
+              <strong>{pending.name}</strong> will be retired and leave the current organization tree.
+              Its history stays recorded, and employees, permits and audit records are not deleted.
             </>
           ) : (
             ''

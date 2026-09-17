@@ -123,25 +123,24 @@ describe('the hierarchy', () => {
     expect(screen.getByText('CRO')).toBeInTheDocument();
   });
 
-  it('keeps RETIRED records visible, marked by text and not by colour alone', async () => {
+  it('omits retired companies and teams from the current organization tree', async () => {
     structureOnly();
     renderAs(<OrganizationPage />, ceo());
 
-    // A retired company and a retired team both remain on screen.
-    expect(await screen.findByText('ABC Contractors')).toBeInTheDocument();
-    expect(screen.getByText('Legacy Team')).toBeInTheDocument();
-    expect(screen.getAllByText('Inactive').length).toBeGreaterThanOrEqual(2);
+    expect(await screen.findByText('E-SET')).toBeInTheDocument();
+    expect(screen.queryByText('ABC Contractors')).not.toBeInTheDocument();
+    expect(screen.queryByText('Legacy Team')).not.toBeInTheDocument();
+    expect(screen.queryByText('Inactive')).not.toBeInTheDocument();
     expect(screen.getAllByText('Active').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('offers no action beneath a retired company', async () => {
+  it('offers actions only for active structure', async () => {
     structureOnly();
     renderAs(<OrganizationPage />, ceo());
 
-    await screen.findByText('ABC Contractors');
-    // E-SET is active and offers Add team; the retired company does not,
-    // so exactly one "Add team" exists on the page.
+    await screen.findByText('E-SET');
     expect(screen.getAllByRole('button', { name: /add team/i })).toHaveLength(1);
+    expect(screen.queryByText('ABC Contractors')).not.toBeInTheDocument();
   });
 
   it('never offers a delete control anywhere', async () => {
@@ -473,14 +472,13 @@ describe('retiring a record', () => {
     ).toBeInTheDocument();
   });
 
-  it('offers no retire control on an already-retired record', async () => {
+  it('offers retire controls only on active records', async () => {
     structureOnly();
     renderAs(<OrganizationPage />, ceo());
 
-    await screen.findByText('Legacy Team');
-    // Active: E-SET company, E-BOP team, CRO position = 3 retire buttons.
-    // The retired company and retired team contribute none.
+    await screen.findByText('E-SET');
     expect(screen.getAllByRole('button', { name: /^retire$/i })).toHaveLength(3);
+    expect(screen.queryByText('Legacy Team')).not.toBeInTheDocument();
   });
 });
 

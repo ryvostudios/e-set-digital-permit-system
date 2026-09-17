@@ -43,7 +43,7 @@ export interface EmployeeListItem {
 export interface EmployeeListFilters {
   /** Case-insensitive substring match on the authoritative display name. */
   search?: string | undefined;
-  state?: 'ACTIVE' | 'DISABLED' | 'DELETED' | undefined;
+  state?: 'ACTIVE' | 'DISABLED' | undefined;
   /**
    * Filters on the authoritative `companies.code`. Typed as `string`
    * because the set of companies is managed at runtime (migration
@@ -76,7 +76,8 @@ const EMPLOYEE_DIRECTORY_FROM = `
  * filter can alter the statement's shape.
  */
 const EMPLOYEE_DIRECTORY_WHERE = `
-      WHERE NOT EXISTS (
+      WHERE a.state <> 'DELETED'
+        AND NOT EXISTS (
               SELECT 1 FROM (
                 SELECT DISTINCT ON (role) role, action
                   FROM privileged_access_events
@@ -245,9 +246,10 @@ export interface SiteManagerListItem {
 
 /**
  * The E-SET Site Manager tier, for the CEO-only administration screen -
- * every named privileged identity that currently holds, or has ever
- * held, SITE_MANAGER, together with whether the grant is active right
- * now.
+ * every named privileged identity that currently holds SITE_MANAGER and
+ * whose application account is active. Revoked, disabled and deleted
+ * identities remain in their append-only identity/grant/audit records,
+ * but are not current administrative choices.
  *
  * THE CEO TIER IS EXCLUDED. An identity holding an active CEO grant is
  * filtered out entirely: the grant/revoke endpoints refuse to touch it
@@ -273,8 +275,10 @@ export async function listSiteManagers(queryFn: QueryFn): Promise<SiteManagerLis
           ORDER BY ordinal DESC
           LIMIT 1
        ) sm ON TRUE
-       LEFT JOIN app_user_access a ON a.user_id = pi.user_id
-      WHERE NOT EXISTS (
+       JOIN app_user_access a ON a.user_id = pi.user_id
+      WHERE sm.action = 'GRANTED'
+        AND a.state = 'ACTIVE'
+        AND NOT EXISTS (
               SELECT 1 FROM (
                 SELECT action
                   FROM privileged_access_events
@@ -329,17 +333,17 @@ export interface OrganizationAdminCompany {
 }
 
 /**
- * The FULL organization structure, for the Organization Management
- * screen. Read-only, like everything else in this module.
+ * The ACTIVE organization structure, for the normal Organization
+ * Management screen. Read-only, like everything else in this module.
  *
  * HOW THIS DIFFERS FROM `loadOrganization`, AND WHY BOTH EXIST.
  * `loadOrganization` answers a different question - "which combinations
  * may a manager place an employee into right now?" - so it returns only
  * assignable, fully-active combinations, identified by name. An
- * administrator managing the structure needs the opposite: every row,
- * including retired ones, identified by STABLE ID, or the management
- * state is impossible to understand (a team that has vanished from the
- * list is indistinguishable from one that was never created).
+ * administrator managing current structure needs stable IDs, including
+ * active companies with no teams and active teams with no positions.
+ * Retired rows remain in the database and append-only organization audit,
+ * but do not remain operational choices on this screen.
  *
  * The employee-provisioning contract is therefore left exactly as it
  * is. Widening it instead would have started offering retired
@@ -385,9 +389,10 @@ export async function loadOrganizationAdministration(
             tp.site_manager_assignable,
             p.id AS position_id, p.name AS position_name
        FROM companies c
-       LEFT JOIN teams t ON t.company_id = c.id
-       LEFT JOIN team_positions tp ON tp.team_id = t.id
+       LEFT JOIN teams t ON t.company_id = c.id AND t.deactivated_at IS NULL
+       LEFT JOIN team_positions tp ON tp.team_id = t.id AND tp.deactivated_at IS NULL
        LEFT JOIN positions p ON p.id = tp.position_id
+      WHERE c.deactivated_at IS NULL
       ORDER BY c.name ASC, c.id ASC, t.name ASC NULLS FIRST, t.id ASC, p.name ASC, tp.id ASC`,
   );
 
