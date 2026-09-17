@@ -2,7 +2,6 @@ import { useState, type FormEvent } from 'react';
 import { SignInError } from '../../auth/AuthProvider';
 import { isSupabaseConfigured } from '../../auth/supabaseClient';
 import { useAuth } from '../../auth/useAuth';
-import { BrandMark } from '../../layout/Icons';
 import { Button } from '../../ui/Button';
 import { Checkbox, FormError, Input, PasswordInput } from '../../ui/Field';
 import { Alert } from '../../ui/Feedback';
@@ -60,7 +59,19 @@ export function LoginPage() {
       <div>
         <div className="centered-page__panel">
           <div className="centered-page__brand">
-            <BrandMark size={30} />
+            {/*
+              The official E-SET logo, in place of the simplified mark.
+              Decorative: the name sits immediately beside it, so alt
+              text here would announce the company twice.
+            */}
+            <img
+              className="centered-page__brand-logo"
+              src="/branding/eset-logo.png"
+              alt=""
+              width={224}
+              height={256}
+              data-testid="login-brand-logo"
+            />
             <span>
               <span className="centered-page__brand-name">E-SET Digital Permit System</span>
               <span className="centered-page__brand-tag">Permit to Work</span>

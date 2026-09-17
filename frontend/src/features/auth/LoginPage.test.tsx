@@ -149,3 +149,58 @@ describe('accessibility', () => {
     expect(screen.getByLabelText(/^password/i)).toHaveAttribute('autocomplete', 'current-password');
   });
 });
+
+/**
+ * The sign-in header carries the official E-SET logo in place of the
+ * simplified mark it replaced. It is branding, so what matters is that
+ * it is the real asset, that it stays decorative, and that not one part
+ * of signing in moved because of it.
+ */
+describe('the sign-in header branding', () => {
+  it('renders the official logo asset', () => {
+    renderLogin();
+    const logo = screen.getByTestId('login-brand-logo');
+    expect(logo.tagName).toBe('IMG');
+    expect(logo).toHaveAttribute('src', '/branding/eset-logo.png');
+  });
+
+  it('shows the logo once, not twice', () => {
+    renderLogin();
+    expect(screen.getAllByTestId('login-brand-logo')).toHaveLength(1);
+  });
+
+  it('is decorative, so the name is announced once', () => {
+    renderLogin();
+    // The title sits immediately beside it; alt text would repeat it.
+    expect(screen.getByTestId('login-brand-logo')).toHaveAttribute('alt', '');
+    expect(screen.queryByRole('img', { name: /e-set/i })).not.toBeInTheDocument();
+  });
+
+  it('keeps the title and the subtitle', () => {
+    renderLogin();
+    expect(screen.getByText('E-SET Digital Permit System')).toBeInTheDocument();
+    // Rendered lower-case and upper-cased by CSS, so match the text.
+    expect(screen.getByText(/permit to work/i)).toBeInTheDocument();
+  });
+
+  it('keeps the whole sign-in form', () => {
+    renderLogin();
+    expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^password/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /remember me/i })).toBeInTheDocument();
+  });
+
+  it('does not change what signing in does', async () => {
+    const user = userEvent.setup();
+    const auth = renderLogin();
+
+    await user.type(screen.getByLabelText(/email/i), 'ali@example.com');
+    await user.type(screen.getByLabelText(/^password/i), 'correct-horse-battery');
+    await user.click(screen.getByRole('button', { name: /sign in/i }));
+
+    await waitFor(() =>
+      expect(auth.signIn).toHaveBeenCalledWith('ali@example.com', 'correct-horse-battery', false),
+    );
+  });
+});

@@ -230,6 +230,24 @@ export function AppShell() {
             </div>
           ))}
 
+          {/*
+            The official E-SET logo, filling the space the navigation
+            leaves above Alerts. Decorative on purpose: the sidebar
+            already names the company in text at the top, so alt text
+            here would announce "E-SET" to a screen reader twice inside
+            one landmark. Deliberately not a link and not a navigation
+            item - the wordmark at the top is already the way home.
+          */}
+          <div className="sidebar__logo">
+            <img
+              src="/branding/eset-logo.png"
+              alt=""
+              width={224}
+              height={256}
+              data-testid="sidebar-brand-logo"
+            />
+          </div>
+
           <div style={{ marginTop: 'auto' }}>
             <p className="nav__group-label">Alerts</p>
             <ul className="nav__list">

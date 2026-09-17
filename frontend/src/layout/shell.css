@@ -67,6 +67,37 @@
   flex: 1;
 }
 
+/*
+ * The supplied E-SET logo, in the open space the navigation leaves
+ * above Alerts.
+ *
+ * `margin-top: auto` here and on the Alerts block splits that free
+ * space between the two, centring the logo in the gap using the
+ * sidebar's own flex layout rather than a fixed offset. No frame, no
+ * background, no effects - the artwork is shown exactly as supplied.
+ *
+ * On a short viewport the free space is zero, both auto margins
+ * collapse, and the rule below drops the logo entirely so that
+ * navigation and the footer keep their room.
+ */
+.sidebar__logo {
+  margin-top: auto;
+  display: flex;
+  justify-content: center;
+  padding: var(--space-4) var(--space-3);
+}
+
+.sidebar__logo img {
+  width: clamp(105px, 60%, 125px);
+  height: auto;
+}
+
+@media (max-height: 44rem) {
+  .sidebar__logo {
+    display: none;
+  }
+}
+
 .nav__group-label {
   padding: 0 var(--space-3) var(--space-2);
   font-size: 0.6875rem;
@@ -331,6 +362,15 @@
     box-shadow: var(--shadow-lg);
   }
 
+  /*
+   * The drawer reuses this same element, so the large logo has to be
+   * taken out explicitly: it belongs to the desktop sidebar, and mobile
+   * navigation is left exactly as it was.
+   */
+  .sidebar__logo {
+    display: none;
+  }
+
   .shell__sidebar[data-open='true'] {
     transform: translateX(0);
     visibility: visible;
@@ -399,6 +439,31 @@
   padding: var(--space-5);
   background: var(--brand-primary);
   color: var(--brand-on-primary);
+}
+
+/*
+ * The official E-SET logo in the sign-in header, in place of the
+ * simplified mark it replaces.
+ *
+ * Sized by HEIGHT with `width: auto`, so the 7:8 artwork keeps its own
+ * proportions and is never cropped or stretched; `flex: none` stops the
+ * row from squeezing it when the title wraps. The header itself is
+ * already a centred flex row, so no alignment rule is needed here.
+ *
+ * No frame, no background, no effects - the artwork is shown exactly as
+ * supplied.
+ */
+.centered-page__brand-logo {
+  flex: none;
+  height: 42px;
+  width: auto;
+}
+
+/* Narrow screens: a little smaller, same proportions, title intact. */
+@media (max-width: 30rem) {
+  .centered-page__brand-logo {
+    height: 34px;
+  }
 }
 
 .centered-page__brand-name {
