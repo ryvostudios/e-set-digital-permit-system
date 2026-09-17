@@ -9,6 +9,7 @@ import { Button } from '../../ui/Button';
 import { Input, Select } from '../../ui/Field';
 import { Alert, ErrorState, SkeletonRows } from '../../ui/Feedback';
 import { Badge, FilterPanel, PageHeader, Pagination } from '../../ui/Layout';
+import { useOrganization } from './useOrganization';
 
 /**
  * The employee directory, for CEO and System Site Managers.
@@ -35,6 +36,7 @@ function StateBadge({ state }: { state: 'ACTIVE' | 'DISABLED' | 'DELETED' }) {
 
 export function EmployeeListPage() {
   const { capabilities } = useCurrentUser();
+  const organization = useOrganization();
   const [searchDraft, setSearchDraft] = useState('');
   const [search, setSearch] = useState('');
   const [state, setState] = useState('');
@@ -71,7 +73,7 @@ export function EmployeeListPage() {
       <PageHeader
         eyebrow="Administration"
         title="Employees"
-        description="Normal employee accounts across E-SET, ZPL, and SGRE."
+        description="Normal employee accounts across the organization."
         actions={
           <Link className="btn btn--primary" to={ROUTES.employeeNew}>
             Add employee
@@ -104,9 +106,11 @@ export function EmployeeListPage() {
                 }}
               >
                 <option value="">Any company</option>
-                <option value="E_SET">E-SET</option>
-                <option value="ZPL">ZPL</option>
-                <option value="SGRE">SGRE</option>
+                {organization.companies.map((company) => (
+                  <option key={company.code} value={company.code}>
+                    {company.name}
+                  </option>
+                ))}
               </Select>
               <Select
                 label="Account status"

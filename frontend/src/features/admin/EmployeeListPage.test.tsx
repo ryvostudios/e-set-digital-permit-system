@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { ceo, normalEmployee, siteManager } from '../../test/factories';
@@ -25,6 +25,12 @@ const EMPLOYEE = {
   viewAllPermits: false,
 };
 
+const RUNTIME_COMPANY = {
+  code: 'ABB',
+  name: 'ABB',
+  teams: [],
+};
+
 function listResponse(employees: unknown[], overrides = {}) {
   return {
     body: {
@@ -34,9 +40,19 @@ function listResponse(employees: unknown[], overrides = {}) {
   };
 }
 
+function stubEmployeeList(
+  employeeResponse: ReturnType<typeof listResponse> | { status: number; body: unknown },
+  organizationResponse: { status?: number; body?: unknown } = { body: { companies: [RUNTIME_COMPANY] } },
+) {
+  return stubFetch({
+    'GET /api/v1/admin/employees': employeeResponse,
+    'GET /api/v1/admin/organization': organizationResponse,
+  });
+}
+
 describe('the list', () => {
   it('shows the safe fields the API returns', async () => {
-    stubFetch({ 'GET /api/v1/admin/employees': listResponse([EMPLOYEE]) });
+    stubEmployeeList(listResponse([EMPLOYEE]));
     renderAs(<EmployeeListPage />, siteManager());
 
     await waitFor(() => expect(screen.getAllByText('Ali Khan').length).toBeGreaterThan(0));
@@ -46,7 +62,7 @@ describe('the list', () => {
   });
 
   it('shows no email address, because the API returns none', async () => {
-    stubFetch({ 'GET /api/v1/admin/employees': listResponse([EMPLOYEE]) });
+    stubEmployeeList(listResponse([EMPLOYEE]));
     renderAs(<EmployeeListPage />, siteManager());
 
     await waitFor(() => expect(screen.getAllByText('Ali Khan').length).toBeGreaterThan(0));
@@ -54,22 +70,20 @@ describe('the list', () => {
   });
 
   it('shows the View all permits state where the API reports it', async () => {
-    stubFetch({
-      'GET /api/v1/admin/employees': listResponse([{ ...EMPLOYEE, viewAllPermits: true }]),
-    });
+    stubEmployeeList(listResponse([{ ...EMPLOYEE, viewAllPermits: true }]));
     renderAs(<EmployeeListPage />, siteManager());
 
     await waitFor(() => expect(screen.getAllByText(/granted/i).length).toBeGreaterThan(0));
   });
 
   it('shows an explicit empty state', async () => {
-    stubFetch({ 'GET /api/v1/admin/employees': listResponse([]) });
+    stubEmployeeList(listResponse([]));
     renderAs(<EmployeeListPage />, siteManager());
     expect(await screen.findByText(/no employees match this search/i)).toBeInTheDocument();
   });
 
   it('never renders a privileged identity as an employee - the backend excludes them', async () => {
-    const { calls } = stubFetch({ 'GET /api/v1/admin/employees': listResponse([EMPLOYEE]) });
+    const { calls } = stubEmployeeList(listResponse([EMPLOYEE]));
     renderAs(<EmployeeListPage />, ceo());
 
     await waitFor(() => expect(calls.length).toBeGreaterThan(0));
@@ -83,7 +97,7 @@ describe('the list', () => {
 describe('searching and filtering', () => {
   it('sends the search term to the server', async () => {
     const user = userEvent.setup();
-    const { calls } = stubFetch({ 'GET /api/v1/admin/employees': listResponse([EMPLOYEE]) });
+    const { calls } = stubEmployeeList(listResponse([EMPLOYEE]));
     renderAs(<EmployeeListPage />, siteManager());
     await waitFor(() => expect(screen.getAllByText('Ali Khan').length).toBeGreaterThan(0));
 
@@ -93,30 +107,50 @@ describe('searching and filtering', () => {
     await waitFor(() => expect(calls.some((call) => call.url.includes('search=Khan'))).toBe(true));
   });
 
-  it('sends the company and state filters to the server', async () => {
+  it('takes company options from organization data and sends runtime company and state filters', async () => {
     const user = userEvent.setup();
-    const { calls } = stubFetch({ 'GET /api/v1/admin/employees': listResponse([EMPLOYEE]) });
+    const { calls } = stubEmployeeList(listResponse([EMPLOYEE]));
     renderAs(<EmployeeListPage />, siteManager());
     await waitFor(() => expect(screen.getAllByText('Ali Khan').length).toBeGreaterThan(0));
 
-    await user.selectOptions(screen.getByLabelText(/^company/i), 'E_SET');
-    await waitFor(() => expect(calls.some((call) => call.url.includes('companyCode=E_SET'))).toBe(true));
+    const company = screen.getByLabelText(/^company/i);
+    expect(within(company).getByRole('option', { name: 'Any company' })).toBeInTheDocument();
+    expect(within(company).getByRole('option', { name: 'ABB' })).toBeInTheDocument();
+    expect(within(company).queryByRole('option', { name: 'E-SET' })).not.toBeInTheDocument();
+
+    await user.selectOptions(company, 'ABB');
+    await waitFor(() => expect(calls.some((call) => call.url.includes('companyCode=ABB'))).toBe(true));
 
     await user.selectOptions(screen.getByLabelText(/account status/i), 'DISABLED');
     await waitFor(() => expect(calls.some((call) => call.url.includes('state=DISABLED'))).toBe(true));
+
+    await user.click(screen.getByRole('button', { name: /^reset$/i }));
+    await waitFor(() => expect(company).toHaveValue(''));
+    expect(screen.getByLabelText(/account status/i)).toHaveValue('');
+  });
+
+  it('keeps the employee list usable when organization metadata fails', async () => {
+    stubEmployeeList(listResponse([EMPLOYEE]), { status: 503, body: { error: 'unavailable' } });
+    renderAs(<EmployeeListPage />, siteManager());
+
+    expect(await screen.findByText('Normal employee accounts across the organization.')).toBeInTheDocument();
+    expect(screen.getAllByText('Ali Khan').length).toBeGreaterThan(0);
+    const company = screen.getByLabelText(/^company/i);
+    expect(within(company).getAllByRole('option')).toHaveLength(1);
+    expect(within(company).getByRole('option', { name: 'Any company' })).toBeInTheDocument();
   });
 
   it('always sends a bounded page size', async () => {
-    const { calls } = stubFetch({ 'GET /api/v1/admin/employees': listResponse([]) });
+    const { calls } = stubEmployeeList(listResponse([]));
     renderAs(<EmployeeListPage />, siteManager());
     await waitFor(() => expect(calls.length).toBeGreaterThan(0));
-    expect(calls[0]?.url).toMatch(/pageSize=\d+/);
+    expect(calls.find((call) => call.url.startsWith('/api/v1/admin/employees?'))?.url).toMatch(/pageSize=\d+/);
   });
 });
 
 describe('authorization', () => {
   it('tells an ordinary employee this is not theirs, and shows the server refusal', async () => {
-    stubFetch({ 'GET /api/v1/admin/employees': { status: 403, body: { error: 'forbidden' } } });
+    stubEmployeeList({ status: 403, body: { error: 'forbidden' } });
     renderAs(<EmployeeListPage />, normalEmployee());
 
     expect(screen.getByText(/reserved to the ceo and system site managers/i)).toBeInTheDocument();
@@ -126,11 +160,9 @@ describe('authorization', () => {
 
 describe('when account management is unavailable in this environment', () => {
   it('reports it without naming a credential or a host', async () => {
-    stubFetch({
-      'GET /api/v1/admin/employees': {
-        status: 503,
-        body: { error: 'account_management_unavailable', message: 'Account management is not available right now' },
-      },
+    stubEmployeeList({
+      status: 503,
+      body: { error: 'account_management_unavailable', message: 'Account management is not available right now' },
     });
     renderAs(<EmployeeListPage />, siteManager());
 
