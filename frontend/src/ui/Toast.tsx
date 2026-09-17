@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 /**
  * Transient confirmations ("Permit submitted", "Permission granted").
@@ -28,14 +28,27 @@ const TOAST_DURATION_MS = 5000;
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(0);
+  const dismissTimers = useRef(new Set<ReturnType<typeof globalThis.setTimeout>>());
+
+  useEffect(() => {
+    const timers = dismissTimers.current;
+    return () => {
+      for (const timer of timers) {
+        globalThis.clearTimeout(timer);
+      }
+      timers.clear();
+    };
+  }, []);
 
   const show = useCallback((message: string, tone: ToastTone = 'success') => {
     nextId.current += 1;
     const id = nextId.current;
     setToasts((current) => [...current, { id, tone, message }]);
-    window.setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
+      dismissTimers.current.delete(timer);
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, TOAST_DURATION_MS);
+    dismissTimers.current.add(timer);
   }, []);
 
   const api = useMemo<ToastApi>(() => ({ show }), [show]);
