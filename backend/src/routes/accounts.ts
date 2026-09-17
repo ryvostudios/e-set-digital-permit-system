@@ -15,7 +15,19 @@ import {
   transferEmployee,
   updateEmployeeDisplayName,
 } from '../domain/accounts/employees.js';
-import { listEmployees, listSiteManagers, loadOrganization } from '../domain/accounts/directory.js';
+import {
+  listEmployees,
+  listSiteManagers,
+  loadOrganization,
+  loadOrganizationAdministration,
+} from '../domain/accounts/directory.js';
+import {
+  createCompany,
+  createTeam,
+  createTeamPosition,
+  deactivateOrganizationRecord,
+  type DeactivationOutcome,
+} from '../domain/accounts/organization.js';
 import { setUserCapabilityGrant } from '../domain/accounts/userPermissions.js';
 import { resolveProvisioningCompany } from '../domain/accounts/companies.js';
 import {
@@ -43,6 +55,14 @@ import {
   privilegedUserIdParamsSchema,
   resetEmployeePasswordBodySchema,
   updateEmployeeBodySchema,
+  createCompanyBodySchema,
+  createTeamBodySchema,
+  createTeamPositionBodySchema,
+  organizationDeactivateBodySchema,
+  companyIdParamsSchema,
+  companyTeamParamsSchema,
+  teamIdParamsSchema,
+  teamPositionIdParamsSchema,
 } from '../domain/accounts/validation.js';
 import { resolvePrivilegedAccess } from '../authz/privilegedAccess.js';
 import { query } from '../db/pool.js';
@@ -1040,3 +1060,316 @@ async function changeEmployeePermission(
     employee: { userId: params.data.id, capability: body.data.capability, active: action === 'GRANTED' },
   });
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Organization Management (Phase 2)                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Runtime management of the organization structure:
+ *
+ *   Company -> Team -> Team + Position association
+ *
+ * AUTHORITY IS THE EXISTING ONE, NOT A NEW ONE. Every route below uses
+ * the same `authorize()` gate the employee-administration mutations
+ * already use: CEO or E-SET SITE_MANAGER, resolved per request from the
+ * append-only `privileged_access_events` log. No second
+ * management-authority mechanism is introduced, and nothing here reads a
+ * company, team or position NAME to decide anything. A user whose
+ * position is literally called `CEO`, `Site Manager`, `CRO`, `HSE` or
+ * `Administrator` gets exactly the same 403 as any other employee.
+ *
+ * WHY THE CREATE ROUTES ARE NESTED UNDER THEIR PARENT. The task sketch
+ * suggested a flat `/teams/:teamId/positions`. The nested form is used
+ * instead because `createTeamPosition()` resolves the team with
+ * `WHERE t.id = $1 AND t.company_id = $2` - a deliberate Phase 1 safety
+ * property with its own passing test. Flattening the route would force
+ * the company to be derived from the very team id being checked, making
+ * the check tautological and quietly removing it. Deactivation stays
+ * flat, because a deactivation target is a single row and carries no
+ * parent claim to cross-check.
+ *
+ * NO RENAME, NO DELETE, NO CAPABILITY EDITOR. Those are deliberately
+ * absent in this phase: there is no route that renames a company or
+ * team, none that deletes anything, and none that can attach, detach or
+ * name a capability. The only capability write in the whole area is the
+ * bounded baseline grant inside the domain layer.
+ *
+ * THE DATABASE IS THE FINAL INTEGRITY AUTHORITY. Migration 0035's
+ * lifecycle guards - active-employee dependencies and required CRO/HSE
+ * coverage - are never bypassed or duplicated as a stricter application
+ * rule. The domain layer recognises their refusals and this layer maps
+ * them to a clean 409; a raw PostgreSQL error is never returned.
+ */
+
+/** A lifecycle or uniqueness refusal the database (or domain) declined. Never leaks SQL. */
+function sendOrganizationConflict(res: Response, reason: string, message: string): void {
+  res.status(409).json({ error: 'conflict', reason, message });
+}
+
+function sendOrganizationNotFound(res: Response, message: string): void {
+  res.status(404).json({ error: 'not_found', message });
+}
+
+/**
+ * The full organization structure for the Organization Management
+ * screen: every company, team and Team + Position association, by
+ * STABLE ID, including retired rows.
+ *
+ * Deliberately separate from `GET /admin/organization`, which answers
+ * the different question "which combinations may an employee be placed
+ * into right now?" and is consumed by the employee forms. That
+ * endpoint's contract is unchanged.
+ */
+accountsRouter.get(
+  '/admin/organization/structure',
+  requireAuth,
+  managerReadLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    res.status(200).json({ companies: await loadOrganizationAdministration(query) });
+  },
+);
+
+/**
+ * Create a company.
+ *
+ * The body carries a display NAME and nothing else. The machine-readable
+ * `code` is generated server-side, is immutable once written, and is not
+ * authority - no client can propose `E_SET`, `CEO`, or any other
+ * privileged-looking value, because the schema has no field for it.
+ *
+ * A new company has ZERO teams. No default, general, admin or hidden
+ * team is created.
+ */
+accountsRouter.post(
+  '/admin/organization/companies',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const body = createCompanyBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await createCompany(body.data.name, { actorUserId });
+    if (result.outcome === 'conflict') {
+      sendOrganizationConflict(res, result.reason, 'A company with that name already exists');
+      return;
+    }
+    if (result.outcome === 'failed') {
+      // Every generated candidate collided. Not a client error, and not
+      // something to retry blindly at this layer.
+      res.status(409).json({
+        error: 'conflict',
+        reason: result.reason,
+        message: 'A unique company code could not be generated for that name',
+      });
+      return;
+    }
+    res.status(201).json({ company: result.company });
+  },
+);
+
+/** Add a team to a company - any active company, the seeded three included. */
+accountsRouter.post(
+  '/admin/organization/companies/:companyId/teams',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = companyIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = createTeamBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await createTeam(params.data.companyId, body.data.name, { actorUserId });
+    if (result.outcome === 'not_found') {
+      sendOrganizationNotFound(res, 'Company not found');
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendOrganizationConflict(
+        res,
+        result.reason,
+        result.reason === 'company_inactive'
+          ? 'That company is inactive and cannot receive new teams'
+          : 'A team with that name already exists in this company',
+      );
+      return;
+    }
+    res.status(201).json({ team: result.team });
+  },
+);
+
+/**
+ * Associate a position with a team.
+ *
+ * The body carries a position NAME. The domain reuses the existing
+ * global `positions` row when that name already exists and mints one
+ * otherwise - a position is shared vocabulary, never duplicated per
+ * company - then creates the association, marks it assignable, and
+ * grants EXACTLY the applicant baseline through the bounded
+ * SECURITY DEFINER function. All of it in one transaction.
+ *
+ * The request cannot influence any of that: it carries no capability,
+ * no `siteManagerAssignable`, no position id and no flag, and the schema
+ * is `.strict()`, so attempting to supply one is a 400.
+ */
+accountsRouter.post(
+  '/admin/organization/companies/:companyId/teams/:teamId/positions',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = companyTeamParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = createTeamPositionBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+
+    const result = await createTeamPosition(
+      params.data.companyId,
+      params.data.teamId,
+      body.data.positionName,
+      { actorUserId },
+    );
+    if (result.outcome === 'not_found') {
+      // Also the answer when the team belongs to a DIFFERENT company:
+      // a caller learns nothing about structure it did not name.
+      sendOrganizationNotFound(res, 'Team not found in this company');
+      return;
+    }
+    if (result.outcome === 'conflict') {
+      sendOrganizationConflict(
+        res,
+        result.reason,
+        result.reason === 'team_inactive'
+          ? 'That team is inactive and cannot receive new positions'
+          : 'That position is already associated with this team',
+      );
+      return;
+    }
+    res.status(201).json({ association: result.association });
+  },
+);
+
+/**
+ * Deactivation, for all three levels.
+ *
+ * There is NO hard delete anywhere in this area. Deactivation never
+ * cascades, and the database refuses it while an ACTIVE employee still
+ * depends on the record, or when it would newly break - or further
+ * worsen - required CRO/HSE coverage. Those refusals arrive here as
+ * typed outcomes and become a 409; employees, permits, audit rows and
+ * historical ids are untouched either way.
+ */
+function sendDeactivationOutcome(res: Response, result: DeactivationOutcome, subject: string): void {
+  if (result.outcome === 'not_found') {
+    sendOrganizationNotFound(res, `${subject} not found`);
+    return;
+  }
+  if (result.outcome === 'conflict') {
+    sendOrganizationConflict(res, result.reason, `${subject} is already inactive`);
+    return;
+  }
+  if (result.outcome === 'blocked') {
+    sendOrganizationConflict(
+      res,
+      result.reason,
+      result.reason === 'active_employees'
+        ? `${subject} still has active employees; reassign or disable them first`
+        : `${subject} cannot be deactivated because required permit review coverage depends on it`,
+    );
+    return;
+  }
+  res.status(200).json({ status: 'ok' });
+}
+
+accountsRouter.patch(
+  '/admin/organization/companies/:companyId/deactivate',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = companyIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = organizationDeactivateBodySchema.safeParse(req.body ?? {});
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+    const result = await deactivateOrganizationRecord('company', params.data.companyId, { actorUserId });
+    sendDeactivationOutcome(res, result, 'Company');
+  },
+);
+
+accountsRouter.patch(
+  '/admin/organization/teams/:teamId/deactivate',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = teamIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = organizationDeactivateBodySchema.safeParse(req.body ?? {});
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+    const result = await deactivateOrganizationRecord('team', params.data.teamId, { actorUserId });
+    sendDeactivationOutcome(res, result, 'Team');
+  },
+);
+
+accountsRouter.patch(
+  '/admin/organization/team-positions/:teamPositionId/deactivate',
+  requireAuth,
+  managerAccountLimiter,
+  async (req: Request, res: Response) => {
+    const actorUserId = await authorize(req, res);
+    if (!actorUserId) return;
+    const params = teamPositionIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      sendValidationError(res, params.error.issues);
+      return;
+    }
+    const body = organizationDeactivateBodySchema.safeParse(req.body ?? {});
+    if (!body.success) {
+      sendValidationError(res, body.error.issues);
+      return;
+    }
+    const result = await deactivateOrganizationRecord(
+      'team_position',
+      params.data.teamPositionId,
+      { actorUserId },
+    );
+    sendDeactivationOutcome(res, result, 'Position assignment');
+  },
+);

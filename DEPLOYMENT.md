@@ -372,38 +372,20 @@ they depend on the actual deployment topology:
   runtime role before anything can use it. Prefer least privilege: leave
   them unapplied until Phase 2 is ready to deploy.
 
-  #### Phase 2 prerequisite — the minimum the mutation API needs
+  #### Phase 2 prerequisite — now delivered by migration 0037
 
-  Apply these immediately before the Phase 2 backend that exposes the
-  Organization Management endpoints. Each one maps to a statement that
-  actually exists in `domain/accounts/organization.ts` /
-  `organizationAudit.ts`:
+  These privileges are no longer applied by hand. Phase 2 mounts the
+  Organization Management routes, and
+  `0037_organization_management_runtime_privileges.sql` grants exactly
+  the ten they need - see that migration and the ledger entry in
+  `database/migrations/README.md` for the full list and the reasoning.
 
-  ```sql
-  GRANT INSERT ON TABLE public.companies TO app_runtime;
-  GRANT UPDATE (deactivated_at) ON TABLE public.companies TO app_runtime;
-  GRANT INSERT ON TABLE public.teams TO app_runtime;
-  GRANT UPDATE (deactivated_at) ON TABLE public.teams TO app_runtime;
-  GRANT INSERT ON TABLE public.positions TO app_runtime;
-  GRANT INSERT ON TABLE public.team_positions TO app_runtime;
-  GRANT UPDATE (deactivated_at) ON TABLE public.team_positions TO app_runtime;
-  GRANT INSERT ON TABLE public.organization_audit_events TO app_runtime;
-  GRANT USAGE ON SEQUENCE public.organization_audit_events_ordinal_seq TO app_runtime;
-  GRANT EXECUTE ON FUNCTION public.grant_baseline_applicant_capabilities(UUID) TO app_runtime;
-  ```
+  Applying 0037 is therefore the Phase 2 database step. Do not apply
+  these grants manually as well.
 
-  #### Deferred until rename endpoints actually exist
-
-  ```sql
-  -- NOT required by Phase 1 or by the Phase 2 create/deactivate API.
-  -- Apply only when a rename endpoint is implemented.
-  GRANT UPDATE (name) ON TABLE public.companies TO app_runtime;
-  GRANT UPDATE (name) ON TABLE public.teams TO app_runtime;
-  ```
-
-  No code renames a company or a team today. Granting `UPDATE (name)`
-  now would hand the runtime role a capability nothing exercises, which
-  is exactly the kind of drift least privilege exists to prevent.
+  **Deferred, still:** `UPDATE (name)` on `companies` and `teams`. No
+  rename endpoint exists in Phase 2, and 0037 actively REVOKES those
+  privileges rather than granting them.
 
   #### Why the UPDATE grants are column-level
 
@@ -678,7 +660,7 @@ non-negotiable requirement:
   whatever hasn't been applied yet, in order; nothing here changes that
   process.
 
-  ### 0036 — applicant-company identity CONTRACT (NOT YET APPLIED)
+  ### 0036 — applicant-company identity CONTRACT (APPLIED / LIVE)
 
   The CONTRACT half of the rollout 0035 began. Apply it only after the
   `dba7922` backend is live and verified, which it now is.
@@ -708,6 +690,60 @@ non-negotiable requirement:
   If a rollback past `dba7922` ever becomes necessary, a forward migration
   relaxing this constraint must be applied FIRST. There is no ordering in
   which the old backend and the contracted constraint coexist.
+
+  ### 0037 — Organization Management runtime privileges (NOT YET APPLIED)
+
+  The Phase 2 database step. It adjusts privileges only: no table,
+  function, trigger, policy, sequence or column is created, and no data
+  is changed.
+
+  **DEPLOYMENT ORDER: MIGRATION FIRST, THEN BACKEND.** Both orders are
+  non-destructive, but migration-first is strictly better and is the
+  supported one:
+
+  * **0037 then backend (recommended).** 0037 only widens what the
+    runtime role MAY do. The currently deployed backend has no
+    Organization Management route and never writes an organization
+    table, so the grants sit unused until the new backend arrives. There
+    is no window in which anything fails.
+  * **Backend then 0037 (works, but degraded).** The organization
+    routes would exist and their WRITES would fail with `42501` until
+    the grants land. Reads are unaffected - `app_runtime` already holds
+    SELECT on the organization tables - and the permit workflow is
+    completely untouched either way. Nothing else in production breaks,
+    because no frontend calls these routes yet: Phase 3 does not exist.
+
+  That last point is the safety margin worth keeping in mind. Shipping
+  the Phase 2 API ahead of its frontend cannot cause a production
+  failure, because no client calls it.
+
+  **REQUIRED PREFLIGHT - run this before applying 0037:**
+
+  ```sql
+  SELECT 1 FROM pg_roles WHERE rolname = 'app_runtime';
+  ```
+
+  If that returns no row, STOP. 0037 WARNs and skips when the role is
+  absent - which keeps it applicable to local and CI databases, where the
+  operator-created login does not exist - but in PRODUCTION that branch
+  means the migration grants nothing, verifies nothing, and is still
+  recorded in `schema_migrations` as applied. The ledger would then claim
+  a privilege delta that does not exist, and the first organization
+  mutation would fail with `42501`. The WARNING in the migration output
+  is the second line of defence; this preflight is the first.
+
+  After applying, confirm the surface took effect:
+
+  ```sql
+  SELECT has_table_privilege('app_runtime','public.companies','INSERT')      AS can_create,
+         has_column_privilege('app_runtime','public.companies','deactivated_at','UPDATE') AS can_retire,
+         has_column_privilege('app_runtime','public.companies','name','UPDATE')           AS must_be_false;
+  ```
+
+  Rollback: 0037 grants no schema change, so reverting the backend needs
+  no database action. The grants may be left in place - they are
+  unusable without the routes - or revoked by a forward migration if the
+  phase is abandoned.
 
 ## Rate limiting - production scaling constraint
 

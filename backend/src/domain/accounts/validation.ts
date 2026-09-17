@@ -167,3 +167,99 @@ export const resetEmployeePasswordBodySchema = z
 export const employeeIdParamsSchema = z.object({
   id: z.string().uuid('id must be a UUID'),
 });
+
+
+/* ------------------------------------------------------------------ */
+/* Organization Management (Phase 2)                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * An organization display name, as a person types it.
+ *
+ * Trimmed, bounded, and required to contain at least one letter or
+ * digit - so a name made only of punctuation or whitespace is rejected
+ * at the boundary rather than becoming an unreadable row. The database
+ * independently enforces non-blankness and normalized uniqueness; this
+ * is the friendly first refusal, not the authority.
+ *
+ * Deliberately NOT restricted to an alphabet: real companies and teams
+ * legitimately use hyphens, ampersands, accents and digits.
+ */
+const organizationNameSchema = z
+  .string()
+  .trim()
+  .min(2, 'name must be at least 2 characters')
+  .max(120)
+  .refine((value) => /[\p{L}\p{N}]/u.test(value), {
+    message: 'name must contain at least one letter or number',
+  });
+
+/**
+ * Create a company.
+ *
+ * `.strict()`, and it names exactly ONE field. That is what structurally
+ * prevents a client from proposing the things that would be authority:
+ * there is no `code` (the server generates it and the database freezes
+ * it), no `id`, no `deactivatedAt`, no `teams`, and no capability,
+ * privilege or flag of any kind. Supplying one is a 400, not a silently
+ * ignored extra key.
+ */
+export const createCompanyBodySchema = z
+  .object({
+    name: organizationNameSchema,
+  })
+  .strict();
+
+/**
+ * Create a team inside a company.
+ *
+ * The company is the validated route parameter, never a body field - so
+ * a caller cannot name one company in the path and another in the body.
+ */
+export const createTeamBodySchema = z
+  .object({
+    name: organizationNameSchema,
+  })
+  .strict();
+
+/**
+ * Associate a position with a team.
+ *
+ * Carries a NAME only. It carries no capability id, no capability name,
+ * no `siteManagerAssignable`, and no privileged flag, because every one
+ * of those is a trusted server concern: a runtime association always
+ * receives exactly the applicant baseline, and assignability is set on
+ * INSERT by the domain layer. `.strict()` makes an attempt to supply
+ * any of them a 400 rather than something to be filtered out later.
+ *
+ * The position itself is a GLOBAL vocabulary row. The domain reuses an
+ * existing row when the name already exists and mints one otherwise;
+ * the client never chooses a position id.
+ */
+export const createTeamPositionBodySchema = z
+  .object({
+    positionName: organizationNameSchema,
+  })
+  .strict();
+
+/** Deactivation carries nothing at all: the target is the route parameter. */
+export const organizationDeactivateBodySchema = z.object({}).strict();
+
+export const companyIdParamsSchema = z
+  .object({ companyId: z.string().uuid('companyId must be a UUID') })
+  .strict();
+
+export const companyTeamParamsSchema = z
+  .object({
+    companyId: z.string().uuid('companyId must be a UUID'),
+    teamId: z.string().uuid('teamId must be a UUID'),
+  })
+  .strict();
+
+export const teamIdParamsSchema = z
+  .object({ teamId: z.string().uuid('teamId must be a UUID') })
+  .strict();
+
+export const teamPositionIdParamsSchema = z
+  .object({ teamPositionId: z.string().uuid('teamPositionId must be a UUID') })
+  .strict();

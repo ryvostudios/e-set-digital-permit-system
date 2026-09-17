@@ -705,6 +705,77 @@ confirmed.
   a Phase 2 prerequisite; `UPDATE (name)` on `companies`/`teams` is
   deferred further still, until rename endpoints actually exist.
 
+### Organization Management API (Phase 2 implemented; migration 0037 NOT yet applied)
+- **Authority reuses the EXISTING mechanism; no second one was created.**
+  Every organization route uses the same `authorize()` gate the employee
+  administration mutations already use - CEO or E-SET SITE_MANAGER,
+  resolved per request from the append-only `privileged_access_events`
+  log. Nothing reads a company, team or position NAME to decide anything.
+  An employee whose position is called `CEO`, `Site Manager`, `CRO`,
+  `HSE` or `Administrator` gets the same 403 as any other employee; the
+  ZPL "Site Manager" job title confers nothing, exactly as before.
+- Seven routes, all under `/api/v1/admin/organization`: one read
+  (`/structure`), three creates (company, team, team + position) and
+  three deactivations (company, team, team-position). There is NO rename
+  route, NO delete route and NO capability-management route in this
+  phase, and tests assert each of those paths is unrouted rather than
+  merely unimplemented.
+- **The create routes are nested under their parent; deactivation is
+  flat.** `POST .../companies/:companyId/teams/:teamId/positions` rather
+  than a flat `/teams/:teamId/positions`, because
+  `createTeamPosition()` resolves the team with
+  `WHERE t.id = $1 AND t.company_id = $2` - a Phase 1 safety property
+  with its own test. A flat route would force the company to be derived
+  from the very team id being checked, making the check tautological and
+  quietly removing it. A deactivation target is a single row with no
+  parent claim to cross-check, so those stay flat.
+- **The admin directory is a SECOND reader, not a widened one.**
+  `loadOrganization` answers "which combinations may an employee be
+  placed into right now?" and is consumed by the employee forms: it
+  returns only assignable, fully-active combinations. The new
+  `loadOrganizationAdministration`, served at `/admin/organization/structure`,
+  answers the opposite question and
+  returns EVERY row, retired ones included, by stable UUID. Widening the
+  first would have started offering retired combinations in the employee
+  forms, which the database refuses anyway.
+- POSITION_CREATED is emitted ONLY when a global `positions` row is
+  genuinely minted. `INSERT ... ON CONFLICT DO NOTHING RETURNING` is
+  what distinguishes minting from reusing the shared row; an audit that
+  claimed a position was created every time an association was made
+  would be describing something that did not happen.
+- 0037's self-verification proves the EFFECTIVE privilege surface, column
+  by column from the catalogue, because `has_table_privilege(...,
+  'UPDATE')` is FALSE when only a column-level grant exists and would
+  therefore miss `GRANT UPDATE (name) ON companies`. Its revokes repair
+  DIRECT grants; a privilege inherited through role membership is NOT
+  repaired - the migration FAILS on it rather than recording a surface it
+  did not achieve, and deliberately does not touch role memberships.
+- The request can never carry authority. Every schema is `.strict()` and
+  names only a display name: there is no `code` field (the server
+  generates it and 0035 freezes it), no capability, no
+  `siteManagerAssignable`, no privileged marker and no id. Supplying one
+  is a 400, not a silently ignored key.
+- A runtime-created Team + Position still receives EXACTLY
+  `permit.create` + `permit.submit`, through the bounded SECURITY
+  DEFINER function, whatever the position is named. Phase 2 adds no new
+  capability path and no generic grant function.
+- **The database stays the final integrity authority.** 0035's lifecycle
+  guards - active-employee dependencies, and required CRO/HSE coverage
+  with its do-not-worsen-a-degraded-requirement rule - are never
+  bypassed and never duplicated as a stricter application check. The
+  domain recognises their refusals and the route layer maps them to a
+  clean 409; a raw PostgreSQL error never reaches a client.
+- Migration 0037 grants the ten runtime privileges Phase 2 needs and
+  actively REVOKES rename, re-code, delete, truncate and direct
+  capability writes. Its revokes run BEFORE its grants because PostgreSQL
+  cannot subtract a column from a table-level grant - which also makes it
+  corrective and idempotent.
+- EMPLOYEE PROVISIONING IS STILL CLOSED TO THE SEEDED THREE, deliberately.
+  `createEmployeeBodySchema`, `updateEmployeeBodySchema` and
+  `employeeListQuerySchema` still use `z.enum(COMPANY_CODES)`, so an
+  employee cannot yet be created in a runtime company. That is PHASE 4
+  work and does not block Phase 2, which manages structure only.
+
 ### Privileged System Identities (implemented; migration 0019 applied and live-verified)
 - `privileged_identities` (migration 0019) is the authoritative home for
   a CEO's or E-SET SITE_MANAGER's personal display name - the one

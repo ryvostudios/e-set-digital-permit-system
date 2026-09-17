@@ -549,3 +549,229 @@ test('an unexpected database error is never swallowed as a business outcome', as
     /connection terminated/,
   );
 });
+
+// =====================================================================
+// POSITION_CREATED must describe what actually happened
+// =====================================================================
+
+test('reusing an existing global position emits NO POSITION_CREATED', async () => {
+  const captured: Captured[] = [];
+  // The INSERT ... ON CONFLICT DO NOTHING RETURNING returns NO row, which
+  // is how the domain knows the shared vocabulary row already existed.
+  const deps = fakeTransaction(
+    [
+      [{ id: TEAM_ID, deactivated_at: null, company_deactivated_at: null }],
+      [], // INSERT ... RETURNING -> nothing inserted
+      [{ id: POSITION_ID, name: 'Supervisor' }], // the existing row
+      [{ id: TEAM_POSITION_ID }],
+      [],
+      [],
+      [],
+    ],
+    captured,
+  );
+
+  const result = await createTeamPosition(COMPANY_ID, TEAM_ID, 'Supervisor', ACTOR, deps);
+  assert.equal(result.outcome, 'ok');
+
+  const events = captured
+    .filter((entry) => entry.sql.includes('organization_audit_events'))
+    .map((entry) => entry.params[0]);
+  assert.deepEqual(events, ['TEAM_POSITION_CREATED', 'BASELINE_CAPABILITIES_GRANTED']);
+  assert.ok(!events.includes('POSITION_CREATED'), 'no position was created, so none may be claimed');
+});
+
+test('minting a NEW global position emits POSITION_CREATED exactly once', async () => {
+  const captured: Captured[] = [];
+  const deps = fakeTransaction(
+    [
+      [{ id: TEAM_ID, deactivated_at: null, company_deactivated_at: null }],
+      [{ id: POSITION_ID, name: 'Rope Access Technician' }], // genuinely inserted
+      [{ id: TEAM_POSITION_ID }],
+      [],
+      [],
+      [],
+      [],
+    ],
+    captured,
+  );
+
+  const result = await createTeamPosition(COMPANY_ID, TEAM_ID, 'Rope Access Technician', ACTOR, deps);
+  assert.equal(result.outcome, 'ok');
+
+  const events = captured
+    .filter((entry) => entry.sql.includes('organization_audit_events'))
+    .map((entry) => entry.params[0]);
+  assert.deepEqual(events, ['POSITION_CREATED', 'TEAM_POSITION_CREATED', 'BASELINE_CAPABILITIES_GRANTED']);
+  assert.equal(events.filter((event) => event === 'POSITION_CREATED').length, 1);
+});
+
+test('the position INSERT uses RETURNING - that is what distinguishes mint from reuse', async () => {
+  const captured: Captured[] = [];
+  await createTeamPosition(COMPANY_ID, TEAM_ID, 'Supervisor', ACTOR, associationDeps(captured));
+  const insert = captured.find((entry) => entry.sql.includes('INSERT INTO positions'));
+  assert.match(insert?.sql ?? '', /ON CONFLICT DO NOTHING RETURNING id, name/);
+});
+
+test('when the position is minted, no redundant SELECT is issued', async () => {
+  const captured: Captured[] = [];
+  const deps = fakeTransaction(
+    [
+      [{ id: TEAM_ID, deactivated_at: null, company_deactivated_at: null }],
+      [{ id: POSITION_ID, name: 'New Designation' }],
+      [{ id: TEAM_POSITION_ID }],
+      [], [], [], [],
+    ],
+    captured,
+  );
+  await createTeamPosition(COMPANY_ID, TEAM_ID, 'New Designation', ACTOR, deps);
+  const selects = captured.filter((entry) => entry.sql.includes('SELECT id, name FROM positions'));
+  assert.equal(selects.length, 0, 'RETURNING already produced the row');
+});
+
+// =====================================================================
+// Transactional atomicity - behavioural, not statement-order
+// =====================================================================
+
+/**
+ * A transaction fake that records BEGIN/COMMIT/ROLLBACK and tags every
+ * statement with the client that issued it, so a test can prove the work
+ * and its audit really did share one connection.
+ */
+function transactionSpy(
+  responses: QueryResultRow[][],
+  captured: Array<Captured & { clientId: number }>,
+  options: { throwOn?: (sql: string) => unknown } = {},
+): { deps: OrganizationDeps; clients: () => number } {
+  let clientCount = 0;
+  const deps: OrganizationDeps = {
+    withTransaction: async <T>(fn: (client: PoolClient) => Promise<T>): Promise<T> => {
+      clientCount += 1;
+      const clientId = clientCount;
+      let call = 0;
+      const query = async <R extends QueryResultRow = QueryResultRow>(
+        sql: string,
+        params: unknown[] = [],
+      ): Promise<QueryResult<R>> => {
+        captured.push({ sql, params, clientId });
+        const thrown = options.throwOn?.(sql);
+        if (thrown) throw thrown;
+        // Transaction control is a real statement on the client, but it
+        // consumes none of the scripted responses - otherwise BEGIN
+        // would shift every answer by one.
+        if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+          return { rows: [], rowCount: 0, command: sql, oid: 0, fields: [] };
+        }
+        const rows = (responses[call] ?? []) as R[];
+        call += 1;
+        return { rows, rowCount: rows.length, command: 'SELECT', oid: 0, fields: [] };
+      };
+      // Mirrors db/pool.ts::withTransaction exactly.
+      await query('BEGIN');
+      try {
+        const result = await fn({ query } as unknown as PoolClient);
+        await query('COMMIT');
+        return result;
+      } catch (err) {
+        await query('ROLLBACK');
+        throw err;
+      }
+    },
+  };
+  return { deps, clients: () => clientCount };
+}
+
+const ASSOCIATION_RESPONSES: QueryResultRow[][] = [
+  [{ id: TEAM_ID, deactivated_at: null, company_deactivated_at: null }],
+  [{ id: POSITION_ID, name: 'Supervisor' }],
+  [{ id: TEAM_POSITION_ID }],
+  [], [], [], [],
+];
+
+test('the whole association is one transaction on ONE client', async () => {
+  const captured: Array<Captured & { clientId: number }> = [];
+  const spy = transactionSpy(ASSOCIATION_RESPONSES, captured);
+
+  const result = await createTeamPosition(COMPANY_ID, TEAM_ID, 'Supervisor', ACTOR, spy.deps);
+  assert.equal(result.outcome, 'ok');
+
+  assert.equal(spy.clients(), 1, 'more than one connection was used');
+  const ids = new Set(captured.map((entry) => entry.clientId));
+  assert.equal(ids.size, 1, 'statements were split across clients');
+
+  const order = captured.map((entry) => entry.sql.split(/\s+/).slice(0, 3).join(' '));
+  assert.equal(order[0], 'BEGIN');
+  assert.equal(order.at(-1), 'COMMIT');
+  // Everything that matters happened between them.
+  const joined = captured.map((entry) => entry.sql).join('\n');
+  assert.match(joined, /INSERT INTO positions/);
+  assert.match(joined, /INSERT INTO team_positions/);
+  assert.match(joined, /grant_baseline_applicant_capabilities/);
+  assert.match(joined, /organization_audit_events/);
+});
+
+test('a FAILING baseline grant rolls the whole association back - no COMMIT', async () => {
+  const captured: Array<Captured & { clientId: number }> = [];
+  const spy = transactionSpy(ASSOCIATION_RESPONSES, captured, {
+    throwOn: (sql) =>
+      sql.includes('grant_baseline_applicant_capabilities')
+        ? new Error('the baseline applicant capabilities are not both defined (found 1)')
+        : undefined,
+  });
+
+  await assert.rejects(
+    () => createTeamPosition(COMPANY_ID, TEAM_ID, 'Supervisor', ACTOR, spy.deps),
+    /baseline applicant capabilities/,
+  );
+
+  const statements = captured.map((entry) => entry.sql);
+  assert.ok(statements.includes('ROLLBACK'), 'the transaction must roll back');
+  assert.ok(!statements.includes('COMMIT'), 'a failed grant must never commit');
+  // The association INSERT ran, and is therefore discarded by the rollback.
+  assert.ok(statements.some((sql) => sql.includes('INSERT INTO team_positions')));
+  // And no audit row claims success.
+  assert.ok(!statements.some((sql) => sql.includes('organization_audit_events')));
+});
+
+test('a FAILING audit insert rolls the mutation back - the audit cannot be skipped', async () => {
+  const captured: Array<Captured & { clientId: number }> = [];
+  const spy = transactionSpy(ASSOCIATION_RESPONSES, captured, {
+    throwOn: (sql) =>
+      sql.includes('organization_audit_events')
+        ? Object.assign(new Error('append-only'), { code: '42501' })
+        : undefined,
+  });
+
+  await assert.rejects(() => createTeamPosition(COMPANY_ID, TEAM_ID, 'Supervisor', ACTOR, spy.deps));
+
+  const statements = captured.map((entry) => entry.sql);
+  assert.ok(statements.includes('ROLLBACK'));
+  assert.ok(!statements.includes('COMMIT'), 'a mutation whose audit failed must not commit');
+});
+
+test('company creation and its audit also share one transaction, and roll back together', async () => {
+  const captured: Array<Captured & { clientId: number }> = [];
+  const spy = transactionSpy([[{ id: COMPANY_ID, code: 'ABC', name: 'ABC' }], []], captured, {
+    throwOn: (sql) =>
+      sql.includes('organization_audit_events') ? Object.assign(new Error('boom'), { code: '42501' }) : undefined,
+  });
+
+  await assert.rejects(() => createCompany('ABC', ACTOR, spy.deps));
+  const statements = captured.map((entry) => entry.sql);
+  assert.ok(statements.includes('ROLLBACK'));
+  assert.ok(!statements.includes('COMMIT'));
+});
+
+test('deactivation and its audit share one transaction, and roll back together', async () => {
+  const captured: Array<Captured & { clientId: number }> = [];
+  const spy = transactionSpy([[{ id: TEAM_POSITION_ID, deactivated_at: null }], [], []], captured, {
+    throwOn: (sql) =>
+      sql.includes('organization_audit_events') ? Object.assign(new Error('boom'), { code: '42501' }) : undefined,
+  });
+
+  await assert.rejects(() =>
+    deactivateOrganizationRecord('team_position', TEAM_POSITION_ID, ACTOR, spy.deps));
+  const statements = captured.map((entry) => entry.sql);
+  assert.ok(statements.includes('ROLLBACK'));
+  assert.ok(!statements.includes('COMMIT'));
+});

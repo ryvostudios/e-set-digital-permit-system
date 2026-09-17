@@ -293,3 +293,143 @@ export async function listSiteManagers(queryFn: QueryFn): Promise<SiteManagerLis
     accountState: row.account_state,
   }));
 }
+
+
+export interface OrganizationAdminPosition {
+  /** The Team + Position association. This is what an employee is assigned to. */
+  teamPositionId: string;
+  teamId: string;
+  /** The GLOBAL position row. One row is shared by every team that uses the name. */
+  positionId: string;
+  positionName: string;
+  deactivatedAt: string | null;
+  /**
+   * Whether a manager may place an employee here. It is NOT authority:
+   * it never confers System Site Manager status, CRO/HSE review, or any
+   * other capability. Capabilities come only from
+   * `team_position_capabilities`.
+   */
+  siteManagerAssignable: boolean;
+}
+
+export interface OrganizationAdminTeam {
+  id: string;
+  companyId: string;
+  name: string;
+  deactivatedAt: string | null;
+  positions: OrganizationAdminPosition[];
+}
+
+export interface OrganizationAdminCompany {
+  id: string;
+  code: string;
+  name: string;
+  deactivatedAt: string | null;
+  teams: OrganizationAdminTeam[];
+}
+
+/**
+ * The FULL organization structure, for the Organization Management
+ * screen. Read-only, like everything else in this module.
+ *
+ * HOW THIS DIFFERS FROM `loadOrganization`, AND WHY BOTH EXIST.
+ * `loadOrganization` answers a different question - "which combinations
+ * may a manager place an employee into right now?" - so it returns only
+ * assignable, fully-active combinations, identified by name. An
+ * administrator managing the structure needs the opposite: every row,
+ * including retired ones, identified by STABLE ID, or the management
+ * state is impossible to understand (a team that has vanished from the
+ * list is indistinguishable from one that was never created).
+ *
+ * The employee-provisioning contract is therefore left exactly as it
+ * is. Widening it instead would have started offering retired
+ * combinations in the employee forms, which the database refuses to
+ * accept anyway.
+ *
+ * IDENTIFIERS ARE IDS, NEVER NAMES. Every object carries its UUID.
+ * Nothing downstream should key on a display name: names are editable
+ * data with no authority attached, and two companies may legitimately
+ * use the same team or position name.
+ *
+ * CAPABILITY MAPPINGS ARE DELIBERATELY NOT EXPOSED. Which permissions a
+ * Team + Position carries is authorization data; a management screen
+ * that creates structure has no need of it, and this API cannot change
+ * it in any case.
+ *
+ * A company with zero teams, and a team with zero positions, are both
+ * legitimate and are returned as empty arrays rather than omitted.
+ */
+export async function loadOrganizationAdministration(
+  queryFn: QueryFn,
+): Promise<OrganizationAdminCompany[]> {
+  const result = await queryFn<{
+    company_id: string;
+    company_code: string;
+    company_name: string;
+    company_deactivated_at: Date | string | null;
+    team_id: string | null;
+    team_name: string | null;
+    team_deactivated_at: Date | string | null;
+    team_position_id: string | null;
+    position_id: string | null;
+    position_name: string | null;
+    team_position_deactivated_at: Date | string | null;
+    site_manager_assignable: boolean | null;
+  }>(
+    // LEFT JOINs so a company with no teams, and a team with no
+    // positions, still appear - they are normal states, not gaps.
+    `SELECT c.id AS company_id, c.code AS company_code, c.name AS company_name,
+            c.deactivated_at AS company_deactivated_at,
+            t.id AS team_id, t.name AS team_name, t.deactivated_at AS team_deactivated_at,
+            tp.id AS team_position_id, tp.deactivated_at AS team_position_deactivated_at,
+            tp.site_manager_assignable,
+            p.id AS position_id, p.name AS position_name
+       FROM companies c
+       LEFT JOIN teams t ON t.company_id = c.id
+       LEFT JOIN team_positions tp ON tp.team_id = t.id
+       LEFT JOIN positions p ON p.id = tp.position_id
+      ORDER BY c.name ASC, c.id ASC, t.name ASC NULLS FIRST, t.id ASC, p.name ASC, tp.id ASC`,
+  );
+
+  const toIso = (value: Date | string | null): string | null =>
+    value === null ? null : new Date(value).toISOString();
+
+  const companies: OrganizationAdminCompany[] = [];
+  for (const row of result.rows) {
+    let company = companies.find((entry) => entry.id === row.company_id);
+    if (!company) {
+      company = {
+        id: row.company_id,
+        code: row.company_code,
+        name: row.company_name,
+        deactivatedAt: toIso(row.company_deactivated_at),
+        teams: [],
+      };
+      companies.push(company);
+    }
+    if (row.team_id === null) continue;
+
+    let team = company.teams.find((entry) => entry.id === row.team_id);
+    if (!team) {
+      team = {
+        id: row.team_id,
+        companyId: company.id,
+        name: row.team_name ?? '',
+        deactivatedAt: toIso(row.team_deactivated_at),
+        positions: [],
+      };
+      company.teams.push(team);
+    }
+    if (row.team_position_id === null || row.position_id === null) continue;
+
+    team.positions.push({
+      teamPositionId: row.team_position_id,
+      teamId: team.id,
+      positionId: row.position_id,
+      positionName: row.position_name ?? '',
+      deactivatedAt: toIso(row.team_position_deactivated_at),
+      siteManagerAssignable: row.site_manager_assignable === true,
+    });
+  }
+  return companies;
+}

@@ -312,7 +312,7 @@ Versioned, plain SQL migration files, applied in filename order by
   PHASE 2 prerequisite, not a Phase 1 one, without
   which the new domain code cannot write.
 
-- `0036_permit_applicant_company_contract.sql`: **NOT YET APPLIED.
+- `0036_permit_applicant_company_contract.sql`: **APPLIED / LIVE.
   CONTRACT STEP** of the rollout 0035 began. 0035 is live and the
   `dba7922` backend is deployed, so the compatibility window it opened
   can now be closed. 0036:
@@ -347,6 +347,42 @@ Versioned, plain SQL migration files, applied in filename order by
   constraint, deployed first. Verified by
   `backend/src/db/migration0036.test.ts`, which runs the real 0035 and
   0036 SQL in sequence.
+
+- `0037_organization_management_runtime_privileges.sql`: **NOT YET
+  APPLIED.** The Phase 2 runtime privilege delta. 0035 created the
+  organization objects and granted `app_runtime` nothing on them - Phase
+  1 mounted no mutation route, so nothing could write and granting early
+  would have widened the runtime role before anything used it. Phase 2
+  mounts the routes, so the minimum privileges are granted here, in a
+  forward migration rather than by editing live history.
+
+  It grants exactly ten privileges, each mapping to a statement that
+  exists in `domain/accounts/organization.ts` / `organizationAudit.ts`:
+  INSERT on `companies`, `teams`, `positions`, `team_positions` and
+  `organization_audit_events`; `UPDATE (deactivated_at)` on the three
+  lifecycle tables; USAGE on the audit ordinal sequence; and EXECUTE on
+  `grant_baseline_applicant_capabilities(UUID)`.
+
+  It deliberately grants NO rename (`UPDATE (name)` on companies/teams -
+  no rename endpoint exists), no `UPDATE` on `companies.code`/`id`, no
+  `UPDATE` on `positions` (no lifecycle column by design), no direct
+  write on `team_position_capabilities` (the bounded SECURITY DEFINER
+  function stays the only capability write path), and no DELETE or
+  TRUNCATE anywhere.
+
+  REVOKES RUN BEFORE GRANTS, and that order is load-bearing: PostgreSQL
+  cannot subtract a column from a table-level grant, so any table-level
+  `UPDATE` is cleared first and the precise column-level grants then
+  re-establish the intended surface. That also makes the migration
+  CORRECTIVE - an environment where someone granted too much by hand is
+  brought back to the intended surface by running it - and idempotent.
+
+  It creates no table, function, trigger, policy, sequence or column and
+  changes no data; it adjusts privileges only, and skips with a NOTICE
+  where the operator-created `app_runtime` role does not exist. Verified
+  by `backend/src/db/migration0037.test.ts`, which asserts both that
+  every required privilege is present and that every forbidden one is
+  absent.
 
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in

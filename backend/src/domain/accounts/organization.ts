@@ -272,15 +272,26 @@ export async function createTeamPosition(
       // unique violation when "Supervisor" already exists. The SELECT
       // that follows is what makes the reuse path work when DO NOTHING
       // returns no row.
-      await client.query(
-        `INSERT INTO positions (name) VALUES ($1) ON CONFLICT DO NOTHING`,
+      //
+      // RETURNING is what tells the two paths apart. `ON CONFLICT DO
+      // NOTHING` returns a row ONLY when it genuinely inserted, so an
+      // empty result means the name already existed and the SELECT below
+      // resolves the shared row. That distinction is not cosmetic: it
+      // decides whether a POSITION_CREATED audit event is truthful.
+      const minted = await client.query<{ id: string; name: string }>(
+        `INSERT INTO positions (name) VALUES ($1) ON CONFLICT DO NOTHING RETURNING id, name`,
         [name],
       );
-      const position = await client.query<{ id: string; name: string }>(
-        `SELECT id, name FROM positions WHERE lower(btrim(name)) = lower(btrim($1))`,
-        [name],
-      );
-      const positionRow = position.rows[0];
+      const positionCreated = minted.rows.length > 0;
+
+      const positionRow =
+        minted.rows[0] ??
+        (
+          await client.query<{ id: string; name: string }>(
+            `SELECT id, name FROM positions WHERE lower(btrim(name)) = lower(btrim($1))`,
+            [name],
+          )
+        ).rows[0];
       if (!positionRow) throw new Error('position row could not be resolved after insert');
 
       const association = await client.query<{ id: string }>(
@@ -298,13 +309,19 @@ export async function createTeamPosition(
       // with one capability or none is never committed.
       await client.query(`SELECT grant_baseline_applicant_capabilities($1)`, [associationRow.id]);
 
-      await recordOrganizationAuditEvent(client.query.bind(client), {
-        eventType: 'POSITION_CREATED',
-        actorUserId: actor.actorUserId,
-        companyId,
-        teamId,
-        positionId: positionRow.id,
-      });
+      // ONLY when a global position row was genuinely minted. Reusing
+      // the shared "Supervisor" row for a second team creates no
+      // position, and an audit trail that claimed otherwise would be
+      // lying about what happened.
+      if (positionCreated) {
+        await recordOrganizationAuditEvent(client.query.bind(client), {
+          eventType: 'POSITION_CREATED',
+          actorUserId: actor.actorUserId,
+          companyId,
+          teamId,
+          positionId: positionRow.id,
+        });
+      }
       await recordOrganizationAuditEvent(client.query.bind(client), {
         eventType: 'TEAM_POSITION_CREATED',
         actorUserId: actor.actorUserId,

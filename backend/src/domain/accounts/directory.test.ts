@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { QueryResult, QueryResultRow } from 'pg';
-import { listEmployees, listSiteManagers, loadOrganization } from './directory.js';
+import {
+  listEmployees,
+  listSiteManagers,
+  loadOrganization,
+  loadOrganizationAdministration,
+} from './directory.js';
 
 /**
  * The read-only administrative directory. What matters here is not
@@ -180,6 +185,85 @@ test('loadOrganization offers only structure whose whole chain is active', async
   assert.match(sql, /t\.deactivated_at IS NULL/);
   assert.match(sql, /c\.deactivated_at IS NULL/);
   assert.match(sql, /tp\.site_manager_assignable = TRUE/);
+});
+
+const ADMIN_ROW = {
+  company_id: 'c-1', company_code: 'E_SET', company_name: 'E-SET', company_deactivated_at: null,
+  team_id: 't-1', team_name: 'E-BOP', team_deactivated_at: null,
+  team_position_id: 'tp-1', team_position_deactivated_at: null, site_manager_assignable: true,
+  position_id: 'p-1', position_name: 'CRO',
+};
+
+test('loadOrganizationAdministration returns the full hierarchy by STABLE ID', async () => {
+  const companies = await loadOrganizationAdministration(stubQuery([[ADMIN_ROW]], []));
+  const company = companies[0];
+  assert.equal(company?.id, 'c-1');
+  assert.equal(company?.code, 'E_SET');
+  assert.equal(company?.deactivatedAt, null);
+  const team = company?.teams[0];
+  assert.equal(team?.id, 't-1');
+  assert.equal(team?.companyId, 'c-1');
+  const position = team?.positions[0];
+  assert.equal(position?.teamPositionId, 'tp-1');
+  assert.equal(position?.positionId, 'p-1');
+  assert.equal(position?.positionName, 'CRO');
+  assert.equal(position?.siteManagerAssignable, true);
+});
+
+test('loadOrganizationAdministration INCLUDES deactivated rows - an admin must see them to manage them', async () => {
+  const companies = await loadOrganizationAdministration(
+    stubQuery(
+      [[
+        { ...ADMIN_ROW, company_deactivated_at: '2026-01-01T00:00:00.000Z',
+          team_deactivated_at: '2026-01-02T00:00:00.000Z',
+          team_position_deactivated_at: '2026-01-03T00:00:00.000Z' },
+      ]],
+      [],
+    ),
+  );
+  assert.equal(companies[0]?.deactivatedAt, '2026-01-01T00:00:00.000Z');
+  assert.equal(companies[0]?.teams[0]?.deactivatedAt, '2026-01-02T00:00:00.000Z');
+  assert.equal(companies[0]?.teams[0]?.positions[0]?.deactivatedAt, '2026-01-03T00:00:00.000Z');
+});
+
+test('a company with no teams, and a team with no positions, are returned as empty - not omitted', async () => {
+  const companies = await loadOrganizationAdministration(
+    stubQuery(
+      [[
+        { ...ADMIN_ROW, company_id: 'c-2', company_code: 'ABC_CONTRACTORS', company_name: 'ABC',
+          team_id: null, team_name: null, team_deactivated_at: null,
+          team_position_id: null, position_id: null, position_name: null,
+          team_position_deactivated_at: null, site_manager_assignable: null },
+        { ...ADMIN_ROW, company_id: 'c-3', company_code: 'XYZ', company_name: 'XYZ',
+          team_id: 't-9', team_name: 'Empty Team',
+          team_position_id: null, position_id: null, position_name: null,
+          team_position_deactivated_at: null, site_manager_assignable: null },
+      ]],
+      [],
+    ),
+  );
+  assert.deepEqual(companies[0]?.teams, []);
+  assert.equal(companies[1]?.teams[0]?.name, 'Empty Team');
+  assert.deepEqual(companies[1]?.teams[0]?.positions, []);
+});
+
+test('loadOrganizationAdministration exposes no capability mapping and is a pure SELECT', async () => {
+  const captured: Captured[] = [];
+  await loadOrganizationAdministration(stubQuery([[]], captured));
+  const sql = captured[0]?.sql ?? '';
+  assert.ok(!sql.includes('team_position_capabilities'), 'authorization data is not directory data');
+  assert.ok(sql.trimStart().startsWith('SELECT'));
+  assert.ok(!/INSERT|UPDATE|DELETE/i.test(sql));
+});
+
+test('loadOrganizationAdministration is NOT filtered by assignability or by a closed company set', async () => {
+  const captured: Captured[] = [];
+  await loadOrganizationAdministration(stubQuery([[]], captured));
+  const sql = captured[0]?.sql ?? '';
+  // The employee-facing reader filters on both; the admin view must not,
+  // or management state becomes impossible to understand.
+  assert.ok(!sql.includes('site_manager_assignable = TRUE'));
+  assert.ok(!sql.includes("code IN ("));
 });
 
 test('listSiteManagers reports the current grant state and excludes the CEO tier', async () => {
