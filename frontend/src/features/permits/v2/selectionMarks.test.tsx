@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { Route, Routes } from 'react-router-dom';
@@ -90,6 +90,45 @@ function renderRecord(detail: PermitDetailResponse, user: CurrentUser = normalEm
     user,
     { route: '/permits/permit-1' },
   );
+}
+
+/**
+ * The JSA page, however this status presents it.
+ *
+ * PENDING_CRO and PENDING_HSE draw the Permit and the JSA CONTINUOUSLY,
+ * so there is no Permit/JSA tab to click - the JSA is already on screen.
+ * Every other status keeps the tabs. Mirrors `openJsaTab` in
+ * V2RecordDocuments.test.tsx so both suites open the JSA the same way.
+ */
+async function openJsa(): Promise<HTMLElement> {
+  // Wait for the record to finish loading before deciding HOW the JSA
+  // is presented: until the fetch settles neither the continuous
+  // document nor the tab exists, and branching early would read the
+  // empty shell as "no tab" and click nothing.
+  await waitFor(() => {
+    const presented =
+      screen.queryByTestId('jsa-page-1') ??
+      screen.queryByRole('tab', { name: /job safety analysis/i });
+    expect(presented).not.toBeNull();
+  });
+
+  const visible = screen.queryByTestId('jsa-page-1');
+  if (visible) return visible;
+  await userEvent.setup().click(screen.getByRole('tab', { name: /job safety analysis/i }));
+  return screen.findByTestId('jsa-page-1');
+}
+
+/**
+ * The Permit document, for scoping a PERMIT assertion.
+ *
+ * Needed because a band id is only unique WITHIN a document: the
+ * catalogue defines a `ppe` band on the permit AND one on the JSA, so a
+ * global `selection-ppe` query matches both while continuous review has
+ * the two documents on screen together. Scoping is what keeps a permit
+ * assertion about the permit.
+ */
+function permitDocument(type: PermitTypeKey = 'WTG_WORK'): Promise<HTMLElement> {
+  return screen.findByTestId(`permit-document-${type}`);
 }
 
 /** The drawn marks inside an element - the one thing that says "selected". */
@@ -190,8 +229,7 @@ describe('the old ambiguous mark', () => {
     } as unknown as JsaFormPayload;
 
     const { container } = renderRecord(detailFor(payload({ [first!.id]: 'YES' }), { jsaPayload }));
-    await userEvent.setup().click(await screen.findByRole('tab', { name: /job safety analysis/i }));
-    const page1 = await screen.findByTestId('jsa-page-1');
+    const page1 = await openJsa();
 
     const band_ = within(page1).getByTestId(`selection-${requiredPermits.id}`);
     const selected = within(band_).getByText(chosen.label).closest('li')!;
@@ -217,13 +255,24 @@ describe('a multi-select band', () => {
 
     renderRecord(detailFor(withPpe));
 
-    const list = await screen.findByTestId(`selection-${ppe.id}`);
+    // Scoped to the PERMIT: the JSA declares a band with the same id,
+    // and continuous review draws both documents at once.
+    const list = within(await permitDocument()).getByTestId(`selection-${ppe.id}`);
     const selected = within(list).getByText(chosen.label).closest('li')!;
     const unselected = within(list).getByText(notChosen.label).closest('li')!;
     expect(marksIn(selected)).toHaveLength(1);
     expect(marksIn(unselected)).toHaveLength(0);
     // The unselected option is still PRINTED - it is empty, not missing.
     expect(unselected.textContent).toContain(notChosen.label);
+
+    // ...and the JSA's identically-named band is a DIFFERENT element that
+    // this permit selection did not touch. A permit tick must never be
+    // read as a JSA tick.
+    const jsaBand = within(await openJsa()).queryByTestId(`selection-${ppe.id}`);
+    if (jsaBand) {
+      expect(jsaBand).not.toBe(list);
+      expect(marksIn(jsaBand)).toHaveLength(0);
+    }
   });
 });
 
