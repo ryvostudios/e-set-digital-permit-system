@@ -11,6 +11,11 @@ import type {
   LifecycleEvent,
   NotificationListResponse,
   OrganizationCompany,
+  OrganizationAdminCompany,
+  OrganizationLevel,
+  CreatedCompany,
+  CreatedTeam,
+  CreatedTeamPosition,
   Permit,
   PermitDetailResponse,
   PermitFormPayload,
@@ -446,4 +451,84 @@ export function setSiteManagerGrant(
 ): Promise<{ status: string; siteManager: { userId: string; active: boolean } }> {
   const action = active ? 'grant' : 'revoke';
   return apiRequest(`/admin/site-managers/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: {} });
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Organization Management                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Every request below carries the MINIMUM the backend's `.strict()`
+ * schema accepts - a display name, and nothing else.
+ *
+ * There is deliberately no field here for a company `code` (the server
+ * generates and freezes it), for a capability, for
+ * `siteManagerAssignable`, or for any privileged marker. The backend
+ * rejects an unexpected key with a 400 rather than ignoring it, so these
+ * signatures are not merely a convention: sending more would fail.
+ *
+ * There is also no delete function of any kind. Retiring a record is a
+ * PATCH to its `deactivate` route, which preserves history.
+ */
+
+/** GET /api/v1/admin/organization/structure - every company, team and association, by id. */
+export function getOrganizationStructure(
+  signal?: AbortSignal,
+): Promise<{ companies: OrganizationAdminCompany[] }> {
+  return apiRequest('/admin/organization/structure', { ...(signal ? { signal } : {}) });
+}
+
+/** POST /api/v1/admin/organization/companies */
+export function createCompany(name: string): Promise<{ company: CreatedCompany }> {
+  return apiRequest('/admin/organization/companies', { method: 'POST', body: { name } });
+}
+
+/** POST /api/v1/admin/organization/companies/:companyId/teams */
+export function createTeam(companyId: string, name: string): Promise<{ team: CreatedTeam }> {
+  return apiRequest(`/admin/organization/companies/${encodeURIComponent(companyId)}/teams`, {
+    method: 'POST',
+    body: { name },
+  });
+}
+
+/**
+ * POST /api/v1/admin/organization/companies/:companyId/teams/:teamId/positions
+ *
+ * Nested under the company because the server resolves the team WITHIN
+ * it - a team id belonging to another company reads as "not found"
+ * rather than being accepted.
+ *
+ * The server reuses the existing global position row when that name
+ * already exists and mints one otherwise; the client never chooses a
+ * position id, and never learns which path was taken beyond the
+ * `positionId` it gets back.
+ */
+export function createTeamPosition(
+  companyId: string,
+  teamId: string,
+  positionName: string,
+): Promise<{ association: CreatedTeamPosition }> {
+  return apiRequest(
+    `/admin/organization/companies/${encodeURIComponent(companyId)}/teams/${encodeURIComponent(teamId)}/positions`,
+    { method: 'POST', body: { positionName } },
+  );
+}
+
+/**
+ * PATCH .../deactivate - the only removal this application performs.
+ *
+ * The body is empty: the target is the validated route parameter, so a
+ * stale value in a form can never redirect the action at something else.
+ */
+export function deactivateOrganizationRecord(
+  level: OrganizationLevel,
+  id: string,
+): Promise<{ status: string }> {
+  const segment =
+    level === 'company' ? 'companies' : level === 'team' ? 'teams' : 'team-positions';
+  return apiRequest(`/admin/organization/${segment}/${encodeURIComponent(id)}/deactivate`, {
+    method: 'PATCH',
+    body: {},
+  });
 }

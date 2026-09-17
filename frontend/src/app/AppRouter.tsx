@@ -15,6 +15,7 @@ import { CreateEmployeePage } from '../features/admin/CreateEmployeePage';
 import { EmployeeDetailPage } from '../features/admin/EmployeeDetailPage';
 import { EmployeeListPage } from '../features/admin/EmployeeListPage';
 import { AuditLogsPage } from '../features/admin/AuditLogsPage';
+import { OrganizationPage } from '../features/admin/OrganizationPage';
 import { SiteManagersPage } from '../features/admin/SiteManagersPage';
 import { AppShell } from '../layout/AppShell';
 import { Button } from '../ui/Button';
@@ -135,6 +136,7 @@ export function AppRouter() {
           <Route path={ROUTES.employees} element={<EmployeeListPage />} />
           <Route path={ROUTES.employeeNew} element={<CreateEmployeePage />} />
           <Route path={ROUTES.employeePattern} element={<EmployeeDetailPage />} />
+          <Route path={ROUTES.organization} element={<OrganizationPage />} />
           <Route path={ROUTES.siteManagers} element={<SiteManagersPage />} />
           <Route path={ROUTES.auditLogs} element={<AuditLogsPage />} />
           {/*

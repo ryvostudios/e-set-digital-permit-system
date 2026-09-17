@@ -62,6 +62,14 @@ export function buildNavigation(capabilities: Capabilities): NavGroup[] {
   if (capabilities.canManageEmployees) {
     administration.push({ to: ROUTES.employees, label: 'Employees', icon: 'people', matchPrefix: ROUTES.employees });
   }
+  if (capabilities.canManageOrganization) {
+    administration.push({
+      to: ROUTES.organization,
+      label: 'Organization',
+      icon: 'people',
+      matchPrefix: ROUTES.organization,
+    });
+  }
   if (capabilities.canManageSiteManagers) {
     // "System Site Managers", not "Site Managers": this is the privileged
     // E-SET system role, and a ZPL organizational Site Manager job title

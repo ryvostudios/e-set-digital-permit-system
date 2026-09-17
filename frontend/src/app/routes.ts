@@ -19,5 +19,6 @@ export const ROUTES = {
   employee: (id: string) => `/admin/employees/${id}`,
   employeePattern: '/admin/employees/:id',
   auditLogs: '/admin/audit-logs',
+  organization: '/admin/organization',
   siteManagers: '/admin/site-managers',
 } as const;

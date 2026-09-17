@@ -872,3 +872,201 @@
     display: flex;
   }
 }
+
+/* ------------------------------------------------------ Organization */
+
+/*
+ * The Company -> Team -> Position hierarchy.
+ *
+ * Depth is carried by a LEFT RULE and indentation rather than by nested
+ * cards: three levels of card-inside-card wastes most of a phone's width
+ * on borders and padding, and makes the structure harder to read, not
+ * easier. The rule is what the eye follows down a level.
+ *
+ * Indentation is deliberately modest and shrinks on a phone, so a long
+ * position name still has room to wrap instead of forcing the page
+ * sideways.
+ */
+.org-company {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.org-company + .org-company {
+  margin-top: var(--space-3);
+}
+
+/* A retired record stays legible - muted, never faint-to-the-point-of-
+   unreadable, and never distinguished by colour alone (every one also
+   carries an "Inactive" badge). */
+.org-company--inactive {
+  background: var(--surface-sunken);
+  border-style: dashed;
+}
+
+.org-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  flex-wrap: wrap;
+}
+
+.org-head__main {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 14rem;
+}
+
+/* The disclosure control is the whole title block, so the tap target on
+   a phone is the row rather than a small chevron. */
+.org-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: var(--space-1) 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.org-toggle__chevron {
+  flex: none;
+  color: var(--text-subtle);
+  transition: transform 120ms ease;
+}
+.org-toggle[aria-expanded='true'] .org-toggle__chevron {
+  transform: rotate(90deg);
+}
+
+.org-title {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.org-title__name {
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
+}
+
+.org-title__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* The generated company code. Monospace because it is an identifier, not
+   prose - and it is never editable here. */
+.org-code {
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+.org-head__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.org-body {
+  border-top: 1px solid var(--border);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+/* One level down: teams inside a company, positions inside a team. */
+.org-branch {
+  border-left: 2px solid var(--border-strong);
+  padding-left: var(--space-4);
+  margin-left: var(--space-2);
+}
+
+.org-team + .org-team {
+  margin-top: var(--space-3);
+}
+
+.org-team__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.org-positions {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.org-position {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.org-position:last-child {
+  border-bottom: none;
+}
+
+.org-position__name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.org-position--inactive .org-position__name,
+.org-team--inactive .org-title__name {
+  color: var(--text-muted);
+}
+
+/* An empty level is a normal state - a company may legitimately have no
+   teams - so it reads as guidance rather than as an error. */
+.org-empty {
+  padding: var(--space-3) 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.org-add {
+  margin-top: var(--space-2);
+}
+
+@media (max-width: 40rem) {
+  .org-branch {
+    padding-left: var(--space-3);
+    margin-left: var(--space-1);
+  }
+  .org-head,
+  .org-body {
+    padding-left: var(--space-3);
+    padding-right: var(--space-3);
+  }
+  /* Actions drop under the title rather than squeezing it to nothing. */
+  .org-head__actions,
+  .org-team__head .org-head__actions {
+    width: 100%;
+  }
+}

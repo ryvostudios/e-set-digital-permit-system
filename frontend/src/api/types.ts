@@ -514,3 +514,86 @@ export interface SiteManagerListItem {
   active: boolean;
   accountState: AccountState | null;
 }
+
+
+/* ------------------------------------------------------------------ */
+/* Organization Management                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The administrative view of the organization, from
+ * `GET /admin/organization/structure`.
+ *
+ * DISTINCT FROM `OrganizationCompany` ABOVE, deliberately. That one
+ * answers "which Team + Position may an employee be placed into right
+ * now?" - assignable, fully-active combinations, identified by NAME -
+ * and the employee forms depend on it. This one answers the management
+ * question and returns EVERY row, retired ones included, identified by
+ * STABLE UUID. Both endpoints exist on the backend for that reason.
+ *
+ * `deactivatedAt` is an ISO timestamp when the record has been retired,
+ * and null while it is active. Retired rows are returned on purpose:
+ * organization history must stay visible.
+ */
+export interface OrganizationAdminPosition {
+  /** The Team + Position association - what an employee is actually assigned to. */
+  teamPositionId: string;
+  teamId: string;
+  /** The GLOBAL position row, shared by every team using that name. */
+  positionId: string;
+  positionName: string;
+  deactivatedAt: string | null;
+  /**
+   * Server-controlled. It means "a manager may place an employee here",
+   * and is NOT authority: it never confers System Site Manager status,
+   * CRO/HSE review, or any capability. Display only - there is no
+   * endpoint to change it and this application must never offer one.
+   */
+  siteManagerAssignable: boolean;
+}
+
+export interface OrganizationAdminTeam {
+  id: string;
+  companyId: string;
+  name: string;
+  deactivatedAt: string | null;
+  positions: OrganizationAdminPosition[];
+}
+
+export interface OrganizationAdminCompany {
+  id: string;
+  /** Generated and frozen by the server. Never chosen or edited by a client. */
+  code: string;
+  name: string;
+  deactivatedAt: string | null;
+  teams: OrganizationAdminTeam[];
+}
+
+/** What the server confirms it created. The code is its answer, never our input. */
+export interface CreatedCompany {
+  id: string;
+  code: string;
+  name: string;
+}
+
+export interface CreatedTeam {
+  id: string;
+  name: string;
+  companyId: string;
+}
+
+export interface CreatedTeamPosition {
+  teamPositionId: string;
+  positionId: string;
+  positionName: string;
+  teamId: string;
+  /**
+   * The capabilities the SERVER attached - always exactly
+   * `permit.create` + `permit.submit`. Echoed back so a screen can state
+   * what was granted; it is never a request field.
+   */
+  baselineCapabilities: string[];
+}
+
+/** The three levels that can be retired. There is no hard delete. */
+export type OrganizationLevel = 'company' | 'team' | 'team_position';

@@ -59,6 +59,17 @@ export interface Capabilities {
   /** CEO-only: permanent deletion, and Site Manager administration. */
   canDeleteEmployees: boolean;
   canManageSiteManagers: boolean;
+
+  /**
+   * Organization structure administration - companies, teams and the
+   * Team + Position associations employees are assigned to.
+   *
+   * CEO or E-SET SITE_MANAGER, mirroring the backend's own gate, which
+   * resolves the same tier from the append-only privileged grant log on
+   * every request. A Position NAMED 'CEO', 'Site Manager', 'CRO' or
+   * 'HSE' is an ordinary job title and grants none of this.
+   */
+  canManageOrganization: boolean;
   /**
    * The ADMINISTRATIVE/SECURITY audit trail (who created an account, who
    * reset a password, who disabled it).
@@ -112,6 +123,7 @@ export function deriveCapabilities(user: CurrentUser): Capabilities {
     canManageEmployees: isPrivileged,
     canDeleteEmployees: isCeo,
     canManageSiteManagers: isCeo,
+    canManageOrganization: isPrivileged,
     canViewAdministrativeAudit: isPrivileged,
     canCorrectRecords: isCeo,
     // Matches `requirePermitApplicant`: the capability, OR a privileged
