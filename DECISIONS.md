@@ -687,7 +687,17 @@ confirmed.
   renew / read / organization directory -> add and apply the contract
   migration, which backfills anything the old backend wrote during the
   overlap, proves nothing is left, and only then makes the column
-  mandatory.
+  mandatory. Steps 1-3 are COMPLETE: 0035 is live, `dba7922` is deployed,
+  and the window was verified with a deliberate old-backend write.
+- `0036_permit_applicant_company_contract.sql` is the CONTRACT step,
+  written and not yet applied. **Once it is applied, rolling the backend
+  back past `dba7922` is not safe for applicant-identity writes:** an
+  older build writes the three legacy snapshot columns and not
+  `applicant_company_id`, which the contracted constraint rejects with
+  `23514`, stopping permit SUBMIT and RENEW. Reads are unaffected. A
+  rollback would require a forward migration relaxing the constraint,
+  deployed first - there is no ordering in which the old backend and the
+  contracted constraint coexist.
 - PHASE 1 NEEDS NO `app_runtime` ORGANIZATION GRANT. No Organization
   Management mutation route is mounted in Phase 1, so nothing writes a
   company, team, position, association or organization audit row, and the

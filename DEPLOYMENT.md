@@ -330,21 +330,22 @@ they depend on the actual deployment topology:
   privileged grants/functions/sequences, schema creation, bootstrap state,
   and the migration ledger are all denied to `app_runtime`.
 
-  ### 0035 — runtime Organization Management, EXPAND step (NOT YET APPLIED)
+  ### 0035 — runtime Organization Management, EXPAND step (APPLIED / LIVE)
 
   **0035 is the EXPAND half of an EXPAND → DEPLOY → CONTRACT rollout.**
   It is deliberately compatible with BOTH the currently deployed backend
   and the new one, so the ordinary order works with no outage:
 
-  1. **Apply 0035.** The running backend keeps submitting and renewing
-     permits: 0035 adds `permits.applicant_company_id` but does not yet
-     require it, so a backend that does not write the column is still
-     satisfied by `permits_applicant_identity_complete`.
-  2. **Deploy the backend** that populates `applicant_company_id`.
+  1. **Apply 0035.** DONE. The running backend kept submitting and
+     renewing permits: 0035 adds `permits.applicant_company_id` but does
+     not yet require it, so a backend that does not write the column is
+     still satisfied by `permits_applicant_identity_complete`.
+  2. **Deploy the backend** that populates `applicant_company_id`. DONE -
+     `dba7922` is live on Render (Auto-Deploy remains OFF).
   3. **Live-verify** submit, renew, permit reads, organization directory.
-  4. **Contract, later:** a separate migration backfills anything the old
-     backend wrote during the overlap and only then makes the column
-     mandatory.
+     DONE, including a deliberate old-backend write during the window.
+  4. **Contract:** `0036_permit_applicant_company_contract.sql` - written,
+     NOT YET APPLIED. See its own section below.
 
   The reverse order is NOT supported and must not be attempted: the new
   backend names `applicant_company_id` in every permit list query and
@@ -676,6 +677,37 @@ non-negotiable requirement:
   Running `npm run migrate` (from `backend/`) against a database applies
   whatever hasn't been applied yet, in order; nothing here changes that
   process.
+
+  ### 0036 — applicant-company identity CONTRACT (NOT YET APPLIED)
+
+  The CONTRACT half of the rollout 0035 began. Apply it only after the
+  `dba7922` backend is live and verified, which it now is.
+
+  It backfills `applicant_company_id` for the permits the old backend
+  wrote during the deployment overlap - resolving `applicant_company_code`
+  against `companies.code`, inventing nothing - refuses to run if any code
+  does not resolve to exactly one company, proves no completed identity is
+  left without its company, and only then requires the column in
+  `permits_applicant_identity_complete`.
+
+  **It requires NO `app_runtime` privilege change.** 0036 creates no
+  table, function, trigger, sequence, policy or grant, and writes to no
+  organization table. The organization-management grants listed above
+  remain a PHASE 2 prerequisite and must not be applied as part of this
+  step.
+
+  **ROLLBACK PAST `dba7922` IS CLOSED ONCE THIS IS APPLIED.** A backend
+  older than `dba7922` writes `applicant_display_name`,
+  `applicant_company_code` and `applicant_company_name` and does not know
+  `applicant_company_id`. Against the contracted constraint that write
+  fails with SQLSTATE `23514` on `permits_applicant_identity_complete`, so
+  permit SUBMIT and RENEW both stop. Reading is unaffected - an older
+  backend's SELECT lists never name the column - so it is specifically the
+  two identity-freezing writes that break.
+
+  If a rollback past `dba7922` ever becomes necessary, a forward migration
+  relaxing this constraint must be applied FIRST. There is no ordering in
+  which the old backend and the contracted constraint coexist.
 
 ## Rate limiting - production scaling constraint
 

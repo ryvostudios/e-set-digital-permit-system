@@ -256,7 +256,7 @@ Versioned, plain SQL migration files, applied in filename order by
   `WTG-1`, `CS-1` were all observed. The JSA series remains one
   independent global sequence.
 
-- `0035_dynamic_organization_management.sql`: **NOT YET APPLIED. EXPAND
+- `0035_dynamic_organization_management.sql`: **APPLIED / LIVE. EXPAND
   STEP of an EXPAND -> DEPLOY -> CONTRACT rollout** - it is compatible
   with BOTH the currently deployed backend and the new one, so it is
   applied FIRST, with no outage. It adds `permits.applicant_company_id`
@@ -311,6 +311,42 @@ Versioned, plain SQL migration files, applied in filename order by
   `app_runtime` privilege delta documented in DEPLOYMENT.md - which is a
   PHASE 2 prerequisite, not a Phase 1 one, without
   which the new domain code cannot write.
+
+- `0036_permit_applicant_company_contract.sql`: **NOT YET APPLIED.
+  CONTRACT STEP** of the rollout 0035 began. 0035 is live and the
+  `dba7922` backend is deployed, so the compatibility window it opened
+  can now be closed. 0036:
+
+  1. refuses to run if any permit's `applicant_company_code` does not
+     resolve to EXACTLY ONE `companies` row - checked before anything is
+     written, so an unresolvable code aborts with a clear message rather
+     than being silently skipped by the backfill's join;
+  2. backfills `applicant_company_id` for the deployment-overlap rows,
+     resolving by code and inventing nothing;
+  3. fails if any completed applicant identity still lacks its
+     authoritative company;
+  4. tightens `permits_applicant_identity_complete` so a COMPLETED
+     identity must carry all four columns, `applicant_company_id`
+     included. A permit with NO applicant identity - every DRAFT - keeps
+     all four NULL and remains valid; nothing here forces a draft to
+     have an applicant.
+
+  It rewrites no frozen snapshot: `applicant_company_code` and
+  `applicant_company_name` keep exactly the values 0024 froze, and only
+  the missing id is filled. It touches no organization object, creates
+  no table, function, trigger, sequence, policy or grant, and therefore
+  needs NO `app_runtime` privilege change. The organization-management
+  grants remain a Phase 2 prerequisite.
+
+  **ROLLBACK IS CLOSED AFTER THIS MIGRATION.** A backend older than
+  `dba7922` writes the three legacy snapshot columns and not
+  `applicant_company_id`; against the contracted constraint that write
+  fails with `23514`, so permit SUBMIT and RENEW both break. Reads are
+  unaffected (an older SELECT list never names the column). Rolling back
+  past `dba7922` therefore requires a forward migration relaxing the
+  constraint, deployed first. Verified by
+  `backend/src/db/migration0036.test.ts`, which runs the real 0035 and
+  0036 SQL in sequence.
 
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
