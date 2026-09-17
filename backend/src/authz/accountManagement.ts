@@ -105,6 +105,18 @@ export async function isManageableTarget(
 }
 
 /**
+ * NARROW CHECK - NOT SUFFICIENT FOR PROVISIONING ON ITS OWN.
+ *
+ * This answers only "does this combination carry the assignable flag?".
+ * It says nothing about WHICH company owns it, and nothing about whether
+ * the combination, its team or that company is still active - so on its
+ * own it would accept a retired assignment, or one belonging to a
+ * different company than the request named.
+ *
+ * Employee provisioning and transfer therefore use
+ * `domain/accounts/companies.ts::resolveProvisioningDestination`, which
+ * proves the whole chain in one statement. Reach for that, not this.
+ *
  * Whether a Team + Position is explicitly approved for ordinary employee
  * provisioning by a Site Manager. Existence alone is intentionally
  * insufficient: an existing assignment may carry security-sensitive

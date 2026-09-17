@@ -2,7 +2,6 @@ import { Router, type Request, type Response } from 'express';
 import {
   authorizeAccountManagement,
   isManageableTarget,
-  teamPositionIsSiteManagerAssignable,
 } from '../authz/accountManagement.js';
 import { createSupabaseAccountAdmin } from '../domain/accounts/admin.js';
 import {
@@ -29,7 +28,10 @@ import {
   type DeactivationOutcome,
 } from '../domain/accounts/organization.js';
 import { setUserCapabilityGrant } from '../domain/accounts/userPermissions.js';
-import { resolveProvisioningCompany } from '../domain/accounts/companies.js';
+import {
+  resolveProvisioningCompany,
+  resolveProvisioningDestination,
+} from '../domain/accounts/companies.js';
 import {
   createSiteManagerAccount,
   grantSiteManager,
@@ -228,35 +230,43 @@ accountsRouter.post(
       return;
     }
 
-    // The client supplies only a strict V1 code. Resolve the authoritative
-    // id/name before the privileged Auth client, so missing or unknown company
-    // data cannot leave an Auth identity behind.
-    const company = await resolveProvisioningCompany(body.data.companyCode);
-    if (!company) {
-      res.status(400).json({
-        error: 'invalid_request',
-        reason: 'company_not_found',
-        message: 'The requested company is not available for employee provisioning',
-      });
+    // ONE authoritative question, asked before the privileged Auth
+    // client is even resolved: may an employee be placed at this
+    // Company + Team + Position right now?
+    //
+    // Asked as a single join rather than as two independent checks,
+    // because "the company exists" and "the combination is assignable"
+    // are both true for a Team + Position belonging to a DIFFERENT
+    // company. It proves the company is active, the combination is
+    // active and assignable, and its team is active and owned by that
+    // company - so an invalid destination never reaches Supabase Auth
+    // and can never leave a half-provisioned identity behind.
+    //
+    // The database remains the final authority: migration 0035's
+    // triggers re-check the same chain inside the writing transaction.
+    const destination = await resolveProvisioningDestination(
+      body.data.companyCode,
+      body.data.teamPositionId,
+    );
+    if (!destination.ok) {
+      // The two refusals keep their existing reasons and wording, so a
+      // client that already handled them is unaffected.
+      res.status(400).json(
+        destination.reason === 'company_not_found'
+          ? {
+              error: 'invalid_request',
+              reason: 'company_not_found',
+              message: 'The requested company is not available for employee provisioning',
+            }
+          : {
+              error: 'invalid_request',
+              reason: 'team_position_not_assignable',
+              message: 'The requested Team + Position is not available for employee provisioning',
+            },
+      );
       return;
     }
-
-    // The Team + Position must genuinely exist AND carry the operator-
-    // controlled site_manager_assignable flag. Checked BEFORE the Auth
-    // Admin credential is even resolved, so an invalid request never
-    // reaches the privileged client at all. This endpoint never creates
-    // a Team + Position, and never writes `team_position_capabilities`
-    // or `privileged_access_events` - so provisioning can only ever
-    // place a new employee into an assignment the organization HAS
-    // explicitly approved for this provisioning flow.
-    if (!(await teamPositionIsSiteManagerAssignable(body.data.teamPositionId))) {
-      res.status(400).json({
-        error: 'invalid_request',
-        reason: 'team_position_not_assignable',
-        message: 'The requested Team + Position is not available for employee provisioning',
-      });
-      return;
-    }
+    const company = destination.company;
 
     const deps = resolveDeps();
     if (!deps) {

@@ -32,13 +32,6 @@ import { useOrganization } from './useOrganization';
  * in this component's state only until the request completes, and is
  * cleared immediately afterwards. The backend never returns it.
  */
-
-const COMPANIES = [
-  { code: 'E_SET', name: 'E-SET' },
-  { code: 'ZPL', name: 'ZPL' },
-  { code: 'SGRE', name: 'SGRE' },
-] as const;
-
 const MIN_PASSWORD_LENGTH = 12;
 
 export function CreateEmployeePage() {
@@ -182,7 +175,6 @@ export function CreateEmployeePage() {
               <div className="grid-2">
                 <OrganizationAssignmentFields
                   organization={organization}
-                  companies={COMPANIES}
                   disabled={submitting}
                   issues={issues}
                   value={{ companyCode, teamName, teamPositionId }}

@@ -437,13 +437,25 @@ export async function transferEmployee(
       }
       if (target.state === 'DELETED') return { outcome: 'refused', reason: 'account_deleted' };
 
-      // The destination must be an operator-approved combination AND its
-      // team must belong to the destination company.
+      // The destination must be an operator-approved combination, its
+      // team must belong to the destination company, and the WHOLE
+      // chain must still be active.
+      //
+      // The active filters matter as much as the assignable flag:
+      // Organization Management can retire a company, a team or a
+      // single association at any time, and a retired destination is
+      // exactly what migration 0035's trigger refuses inside this
+      // transaction. Checking here turns that into a typed refusal
+      // instead of a raw database error.
       const destination = await client.query<{ company_id: string; assignable: boolean }>(
         `SELECT t.company_id, tp.site_manager_assignable AS assignable
            FROM team_positions tp
            JOIN teams t ON t.id = tp.team_id
-          WHERE tp.id = $1`,
+           JOIN companies c ON c.id = t.company_id
+          WHERE tp.id = $1
+            AND tp.deactivated_at IS NULL
+            AND t.deactivated_at IS NULL
+            AND c.deactivated_at IS NULL`,
         [input.teamPositionId],
       );
       const target_tp = destination.rows[0];

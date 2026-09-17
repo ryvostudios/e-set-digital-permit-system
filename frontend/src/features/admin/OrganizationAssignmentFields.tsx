@@ -35,8 +35,16 @@ export interface AssignmentSelection {
 }
 
 interface Props {
+  /**
+   * The authoritative organization, from GET /admin/organization.
+   *
+   * The Company options come from THIS and nothing else. There is
+   * deliberately no `companies` prop: a caller-supplied list was how
+   * a hardcoded three-company array reached this control, which made
+   * companies created at runtime invisible to employee
+   * administration even though the API already returned them.
+   */
   organization: ReturnType<typeof useOrganization>;
-  companies: readonly { readonly code: string; readonly name: string }[];
   value: AssignmentSelection;
   onChange: (next: AssignmentSelection) => void;
   disabled?: boolean;
@@ -45,12 +53,14 @@ interface Props {
 
 export function OrganizationAssignmentFields({
   organization,
-  companies,
   value,
   onChange,
   disabled = false,
   issues = {},
 }: Props) {
+  // Every ACTIVE, assignable company the server returned - including
+  // any created since this build shipped.
+  const companies = organization.companies;
   const showTeam = value.companyCode ? organization.hasTeamChoice(value.companyCode) : false;
   const teams = value.companyCode ? organization.teamsFor(value.companyCode) : [];
   const positions = value.companyCode ? organization.positionsFor(value.companyCode, value.teamName) : [];

@@ -53,12 +53,6 @@ import { useOrganization } from './useOrganization';
 
 const MIN_PASSWORD_LENGTH = 12;
 
-const COMPANIES = [
-  { code: 'E_SET', name: 'E-SET' },
-  { code: 'ZPL', name: 'ZPL' },
-  { code: 'SGRE', name: 'SGRE' },
-] as const;
-
 type DialogId = 'rename' | 'transfer' | 'email' | 'reset' | 'disable' | 'enable' | 'delete' | 'viewAll' | null;
 
 /** One labelled administrative action: what it is, what it does, and the control that starts it. */
@@ -410,7 +404,6 @@ export function EmployeeDetailPage() {
         {organization.error ? <ErrorState error={organization.error} onRetry={organization.reload} /> : null}
         <OrganizationAssignmentFields
           organization={organization}
-          companies={COMPANIES}
           disabled={busy}
           issues={issues}
           value={{ companyCode, teamName, teamPositionId }}
