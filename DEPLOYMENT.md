@@ -717,6 +717,27 @@ non-negotiable requirement:
   the Phase 2 API ahead of its frontend cannot cause a production
   failure, because no client calls it.
 
+  **Preflight finding, recorded so it is not re-investigated.** The first
+  0037 preflight failed transactionally against production because the
+  migration asserted that `app_runtime` holds no INSERT on
+  `privileged_identities`. It does hold that INSERT - and correctly so:
+  it is the applied 0019 delta documented above, and the CEO-only
+  `POST /admin/site-managers` endpoint depends on it
+  (`privilegedManagement.ts` writes the identity row on the ORDINARY
+  connection; only the GRANT itself uses `privileged_runtime`). The
+  assertion was wrong, not the database. 0037 now:
+
+  * PRESERVES `SELECT` and `INSERT` on `privileged_identities`;
+  * REVOKES `UPDATE`, `DELETE`, `TRUNCATE` there, matching the standing
+    rule below that an existing privileged identity must never be
+    rewritten or removed by the ordinary login;
+  * REVOKES every mutation on `privileged_access_events` while keeping
+    `SELECT`, which authorization resolution reads on every request.
+
+  Privileged authority mutations remain restricted to the
+  `privileged_runtime` path via `record_site_manager_grant()`, which
+  `app_runtime` still cannot execute.
+
   **REQUIRED PREFLIGHT - run this before applying 0037:**
 
   ```sql

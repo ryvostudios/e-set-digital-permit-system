@@ -86,11 +86,18 @@ async function withRuntimeRole(): Promise<PGlite> {
     REVOKE ALL ON FUNCTION public.grant_baseline_applicant_capabilities(UUID)
       FROM PUBLIC, anon, authenticated;
 
-    -- The runtime role's pre-Phase-2 surface: reads only.
+    -- The runtime role's REAL pre-Phase-2 surface, as observed in
+    -- production during the 0037 preflight.
     GRANT SELECT ON public.companies, public.teams, public.positions,
                     public.team_positions, public.team_position_capabilities,
-                    public.capabilities, public.privileged_access_events,
-                    public.privileged_identities TO app_runtime;
+                    public.capabilities, public.privileged_access_events TO app_runtime;
+
+    -- privileged_identities carries SELECT *and* INSERT. That is not
+    -- drift: DEPLOYMENT.md records it as the applied 0019 delta, and
+    -- the CEO-only Site Manager creation endpoint writes this row on
+    -- the ordinary connection. Modelling it SELECT-only is what made
+    -- an earlier version of this fixture disagree with production.
+    GRANT SELECT, INSERT ON public.privileged_identities TO app_runtime;
   `);
   return db;
 }
@@ -405,14 +412,57 @@ test('a column-level grant on site_manager_assignable is revoked', async () => {
 // The privileged authority channel
 // =====================================================================
 
-test('app_runtime has NO mutation path to privileged authority', async () => {
+test('app_runtime has NO mutation path to the privileged AUTHORITY LOG', async () => {
   const db = await applied();
-  for (const table of ['privileged_access_events', 'privileged_identities']) {
-    for (const priv of ['INSERT', 'DELETE', 'TRUNCATE']) {
-      assert.equal(await tablePriv(db, table, priv), false, `${table} ${priv}`);
-    }
-    assert.deepEqual(await updatableColumns(db, table), [], `${table} UPDATE`);
+  // privileged_access_events is authority itself: no write of any
+  // kind. Grants travel over the separate privileged_runtime login.
+  for (const priv of ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) {
+    assert.equal(await tablePriv(db, 'privileged_access_events', priv), false, priv);
   }
+  assert.deepEqual(await updatableColumns(db, 'privileged_access_events'), []);
+});
+
+test('privileged_identities keeps SELECT and INSERT, and loses UPDATE/DELETE/TRUNCATE', async () => {
+  const db = await applied();
+  // INSERT is the DOCUMENTED 0019 contract - the CEO-only
+  // `POST /admin/site-managers` endpoint creates this row on the
+  // ordinary connection. Revoking it would break Site Manager
+  // creation with 42501.
+  assert.equal(await tablePriv(db, 'privileged_identities', 'SELECT'), true);
+  assert.equal(await tablePriv(db, 'privileged_identities', 'INSERT'), true,
+    'Site Manager creation depends on this INSERT');
+
+  // Rewriting or removing an EXISTING privileged identity is what must
+  // never be possible from the ordinary login.
+  for (const priv of ['UPDATE', 'DELETE', 'TRUNCATE']) {
+    assert.equal(await tablePriv(db, 'privileged_identities', priv), false, priv);
+  }
+  assert.deepEqual(await updatableColumns(db, 'privileged_identities'), []);
+});
+
+test('a stale UPDATE/DELETE grant on privileged_identities is REPAIRED, INSERT is not', async () => {
+  const db = await withRuntimeRole();
+  await db.exec(`GRANT UPDATE, DELETE ON public.privileged_identities TO app_runtime;`);
+  assert.equal(await tablePriv(db, 'privileged_identities', 'UPDATE'), true, 'setup');
+
+  await db.exec(await readFile(migration0037Url, 'utf8'));
+
+  assert.equal(await tablePriv(db, 'privileged_identities', 'UPDATE'), false);
+  assert.equal(await tablePriv(db, 'privileged_identities', 'DELETE'), false);
+  assert.equal(await tablePriv(db, 'privileged_identities', 'INSERT'), true,
+    'the documented INSERT must survive the repair');
+  assert.equal(await tablePriv(db, 'privileged_identities', 'SELECT'), true);
+});
+
+test('a stale mutation grant on the AUTHORITY LOG is repaired', async () => {
+  const db = await withRuntimeRole();
+  await db.exec(`GRANT INSERT, UPDATE ON public.privileged_access_events TO app_runtime;`);
+  await db.exec(await readFile(migration0037Url, 'utf8'));
+  for (const priv of ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) {
+    assert.equal(await tablePriv(db, 'privileged_access_events', priv), false, priv);
+  }
+  assert.equal(await tablePriv(db, 'privileged_access_events', 'SELECT'), true,
+    'authorization resolution must keep reading the log');
 });
 
 test('the SELECT that resolvePrivilegedAccess() depends on is NOT revoked', async () => {

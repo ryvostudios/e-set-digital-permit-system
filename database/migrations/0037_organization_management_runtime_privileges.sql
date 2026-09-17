@@ -155,6 +155,17 @@ BEGIN
   EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON TABLE public.organization_audit_events FROM app_runtime';
 
   -- ---------------------------------------------------------------
+  -- Privileged authority objects: remove the ability to REWRITE or
+  -- REMOVE a privileged identity, while preserving the SELECT that
+  -- authorization resolution depends on and the INSERT that the
+  -- CEO-only Site Manager creation endpoint requires (DEPLOYMENT.md's
+  -- applied 0019 delta). See the verification block for why INSERT
+  -- stays and UPDATE/DELETE/TRUNCATE go.
+  -- ---------------------------------------------------------------
+  EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON TABLE public.privileged_identities FROM app_runtime';
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.privileged_access_events FROM app_runtime';
+
+  -- ---------------------------------------------------------------
   -- Companies: create, and retire. Never rename, never re-code.
   -- ---------------------------------------------------------------
   EXECUTE 'GRANT INSERT ON TABLE public.companies TO app_runtime';
@@ -373,24 +384,62 @@ BEGIN
   END LOOP;
 
   -- -------------------------------------------------------------
-  -- 5. The privileged authority channel stays closed
+  -- 5. The privileged authority channel
   -- -------------------------------------------------------------
   --
-  -- SELECT is deliberately NOT asserted against here:
+  -- SELECT is deliberately NOT asserted against on either table:
   -- `resolvePrivilegedAccess()` reads `privileged_access_events` on
-  -- every authorized request, and that read is exactly how CEO and
-  -- SITE_MANAGER authority is resolved. What must never exist is a
-  -- MUTATION path.
-  FOR col IN SELECT unnest(ARRAY['privileged_access_events', 'privileged_identities'])
+  -- every authorized request - that read IS how CEO and SITE_MANAGER
+  -- authority is resolved - and `privilegedIdentities.ts` /
+  -- `directory.ts` read `privileged_identities` to name those accounts.
+  -- Revoking either would break every admin endpoint in the
+  -- application.
+  --
+  -- `privileged_access_events` is the AUTHORITY LOG: `app_runtime` must
+  -- hold no mutation privilege on it whatsoever. Writing a grant is
+  -- reserved to the separate `privileged_runtime` login through
+  -- `record_site_manager_grant()` (0019/0021/0022), and that boundary is
+  -- what stops possession of `DATABASE_URL` alone from manufacturing
+  -- SITE_MANAGER.
+  FOR col IN SELECT unnest(ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'])
   LOOP
-    IF has_table_privilege('app_runtime', 'public.' || col, 'INSERT')
-       OR has_table_privilege('app_runtime', 'public.' || col, 'DELETE')
-       OR has_table_privilege('app_runtime', 'public.' || col, 'TRUNCATE') THEN
+    IF has_table_privilege('app_runtime', 'public.privileged_access_events', col) THEN
       RAISE EXCEPTION
-        '0037: app_runtime holds a mutation privilege on % - privileged authority must stay on the privileged_runtime channel', col;
+        '0037: app_runtime holds % on privileged_access_events - the authority log is written only through the privileged_runtime channel', col;
     END IF;
   END LOOP;
 
+  -- `privileged_identities` is DIFFERENT, and the difference is
+  -- deliberate. It is the NAME of a privileged account, not its
+  -- authority: migration 0019's comment is explicit that "IDENTITY IS
+  -- NOT AUTHORITY - a row there confers nothing". The CEO-only endpoint
+  -- `POST /admin/site-managers` creates that row on the ORDINARY
+  -- connection (`domain/accounts/privilegedManagement.ts` ->
+  -- `deps.withTransaction` -> `db/pool.ts` -> `DATABASE_URL`), and
+  -- DEPLOYMENT.md records the corresponding 0019 delta as applied:
+  --
+  --   GRANT SELECT, INSERT ON TABLE public.privileged_identities TO app_runtime;
+  --
+  -- So INSERT here is a REQUIRED, DOCUMENTED, LIVE privilege - not
+  -- drift. Revoking it would break Site Manager creation with 42501,
+  -- and that endpoint's failure path deletes the Auth user it had just
+  -- created, so every attempt would also churn a Supabase identity.
+  --
+  -- What must NOT exist is the ability to REWRITE or REMOVE an existing
+  -- privileged identity - renaming a CEO, or deleting the row a grant
+  -- depends on. DEPLOYMENT.md states the same rule in the same terms:
+  -- "Do NOT grant `app_runtime` UPDATE or DELETE on
+  -- `privileged_identities`". Those are revoked above and asserted here.
+  FOR col IN SELECT unnest(ARRAY['UPDATE', 'DELETE', 'TRUNCATE'])
+  LOOP
+    IF has_table_privilege('app_runtime', 'public.privileged_identities', col) THEN
+      RAISE EXCEPTION
+        '0037: app_runtime holds % on privileged_identities - an existing privileged identity must never be rewritten or removed by the ordinary login', col;
+    END IF;
+  END LOOP;
+
+  -- Column-level UPDATE, which a table-level check would miss. INSERT is
+  -- intentionally absent from this loop: it is the documented contract.
   FOR col IN
     SELECT c.table_name || '.' || c.column_name
       FROM information_schema.columns c

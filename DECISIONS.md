@@ -743,6 +743,16 @@ confirmed.
   what distinguishes minting from reusing the shared row; an audit that
   claimed a position was created every time an association was made
   would be describing something that did not happen.
+- `app_runtime` INSERT on `privileged_identities` is a REQUIRED contract,
+  not drift. A 0037 preflight flagged it as stale; it is not. Migration
+  0019's applied delta grants it (DEPLOYMENT.md), and the CEO-only
+  `POST /admin/site-managers` endpoint writes that row on the ordinary
+  connection - only the GRANT travels over `privileged_runtime`. The
+  distinction 0019 drew still holds: a `privileged_identities` row is a
+  NAME and confers nothing, while `privileged_access_events` IS
+  authority. So the ordinary login may CREATE an identity but must never
+  rewrite or remove one, and may not touch the authority log at all.
+  0037 enforces exactly that split.
 - 0037's self-verification proves the EFFECTIVE privilege surface, column
   by column from the catalogue, because `has_table_privilege(...,
   'UPDATE')` is FALSE when only a column-level grant exists and would
