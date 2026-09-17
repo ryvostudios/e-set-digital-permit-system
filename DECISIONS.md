@@ -554,6 +554,147 @@ confirmed.
   assignment, privileged identity, or privileged grant is created by
   0019 or 0020.
 
+### Runtime Organization Management (Phase 1 implemented; migration 0035 NOT yet applied)
+- **The "organization structure is operator-owned" decision above is
+  INTENTIONALLY SUPERSEDED.** That entry records the launch structure as
+  seeded "by migration 0020 and by nothing else", and 0020 itself states
+  that no runtime endpoint may invent a team, a position or a Team +
+  Position combination. A confirmed product requirement now says the CEO
+  and an authorized E-SET System Site Manager must manage Companies,
+  Teams and Team + Position associations at runtime - for E-SET, ZPL and
+  SGRE as well as for companies created later. The earlier entry is left
+  intact as the record of what was true then; this entry is what holds
+  now.
+- The hierarchy stays exactly as 0002/0019/0020 built it: Company -> Team
+  -> Team + Position association -> capabilities. `teams.company_id` is
+  NOT NULL, so an association reaches a company only through its team and
+  can never span two. No default team is created: a company legitimately
+  exists with zero teams until an administrator adds them.
+- `positions.name` remains a globally unique SHARED vocabulary. Adding
+  "Supervisor" to a second team reuses the one row; retiring a
+  designation for one team deactivates that team's ASSOCIATION, never the
+  shared row. `positions` therefore has no `deactivated_at` at all -
+  lifecycle belongs to companies, teams and team_positions.
+- **THE BASELINE CAPABILITY POLICY, IN FULL:** *Runtime organization
+  management may automatically grant only the standard applicant
+  capabilities `permit.create` and `permit.submit` to a newly created
+  Team + Position association. It never grants privileged workflow or
+  administrative authority. Privileged authority remains explicitly
+  controlled by the existing authoritative capability/access model.*
+- That IS an automatic grant, and it is deliberate: 0020 gave those two
+  capabilities to 17 of the 18 launch combinations, so "can apply for a
+  permit" is the normal state of an employee rather than a privilege.
+  Without it a new company's employees could log in and do nothing.
+- The grant is bounded by construction, not by convention. It travels
+  through `grant_baseline_applicant_capabilities()` - a SECURITY DEFINER
+  function whose two capability names are LITERALS in database code,
+  modelled on 0019's `record_site_manager_grant()`, which hardcodes its
+  role for the same reason. The function takes only a team_position id:
+  there is no parameter through which a caller could request
+  `permit.cro_review`, `permit.hse_review` or `employee.create`, and
+  `app_runtime` receives NO INSERT/UPDATE/DELETE on
+  `team_position_capabilities`, so the function cannot be bypassed
+  either. It raises rather than creating a half-capable association when
+  either baseline capability is missing.
+- A NAME IS NEVER AUTHORITY, unchanged. A Position named CRO, HSE
+  Officer, Site Manager or CEO receives the same two baseline
+  capabilities as one named Electrician. Capability resolution joins
+  `team_position_capabilities` and never reads a name; privileged
+  CEO/SITE_MANAGER status still comes only from
+  `privileged_access_events`, which no organization code path touches.
+- `site_manager_assignable` becomes API-writable, which 0017 said no API
+  could do. It is set TRUE only on INSERT of a brand-new association the
+  same authorized administrator just created - never by UPDATE of an
+  existing one, and never from a request field. The flag means only "a
+  manager may place an employee here" and grants nothing.
+- **Deactivation is the only removal; there is no hard delete.** It never
+  cascades. It is refused while an ACTIVE employee depends on the record
+  (the administrator reassigns or disables the person first), and refused
+  when it would push a REQUIRED capability below its coverage minimum.
+- **Required coverage is a short explicit list, NOT a global rule.** Only
+  `permit.cro_review` and `permit.hse_review` are protected, each with a
+  minimum of ONE active holder. There is deliberately no invariant that
+  every capability must always have a holder: an optional capability may
+  legitimately fall to zero, and organization lifecycle operations must
+  not become permanently blocked because one did.
+- **A degraded requirement must not freeze the organization either.** The
+  bar is `LEAST(minimum, current)`, not the minimum alone: an action is
+  refused only when it NEWLY breaks a minimum, or REDUCES coverage that
+  is already short. An action that leaves the count untouched is always
+  allowed, however degraded the state - otherwise a requirement that had
+  fallen below its minimum would block every unrelated retirement,
+  including the reassignments needed to restore it. With both configured
+  minimums at 1 the "already short but above zero" case is unreachable
+  today; the rule is written for a minimum raised later.
+- Both the list and the minimum are DERIVED FROM THE WORKFLOW, not
+  chosen. `domain/permits/workflowSideEffects.ts` fails closed in exactly
+  two places: `onPermitSubmittedOrResubmitted` / `onHseSentBackToCro`
+  throw `ResponsibilityRecipientUnavailableError('CRO')` when
+  `resolveCroRecipients()` returns none, and `onForwardedToHse` throws
+  the HSE equivalent. With no CRO an applicant cannot submit at all; with
+  no HSE a CRO cannot forward. Both tests are `length === 0` - AT LEAST
+  ONE - so the minimum is 1, never a specific count.
+- Migration 0020's `exactly 1 permit.cro_review holder` and `exactly 2
+  permit.hse_review holders` are **launch-data SHAPE assertions, not
+  permanent required counts.** That block's own stated purpose is that
+  "the seed asserts its own shape, so a silently mis-joined INSERT fails
+  the migration"; it runs once at migration time and nothing re-checks a
+  count at runtime. 0035 re-asserts the same two numbers for the same
+  shape-checking reason - to prove it changed no seeded data - and that
+  is explicitly NOT the runtime rule.
+- The required list is hardcoded as literals in
+  `organization_required_coverage_gap()` rather than expressed as a new
+  capability-policy column. There is no existing authoritative mechanism
+  for marking required coverage (`individually_grantable` from 0023 is a
+  different axis), and literals in trusted database code is the idiom
+  this schema already uses to bound authority. Coverage is never derived
+  from a capability NAMING heuristic.
+- The permit applicant company is now authoritative:
+  `permits.applicant_company_id` is a foreign key to `companies`.
+  `applicant_company_code`/`applicant_company_name` keep exactly the role
+  0024 gave them - a frozen display snapshot - and stop being a closed
+  vocabulary. `permits.company` is untouched: it is the printed FORM
+  field, and a company outside the three printed options renders through
+  the `OTHER` + `company_other` escape hatch the form has always had.
+  That mapping is generic, so adding a company never needs a code change.
+
+### Organization Rollout: EXPAND -> DEPLOY -> CONTRACT (0035 is the EXPAND step)
+- A deployment compatibility audit proved that a single all-at-once 0035
+  would have required a maintenance window. With the final
+  `applicant_company_id` requirement in place, the CURRENTLY DEPLOYED
+  backend fails every permit SUBMIT and RENEW with `23514` on
+  `permits_applicant_identity_complete`, because it does not write that
+  column. In the other direction the new backend fails with `42703` on a
+  0034 database - and not only on writes: `applicant_company_id` is in
+  `PERMIT_SUMMARY_COLUMNS`, so every permit LIST read breaks too.
+- 0035 is therefore the EXPAND step. It adds the column, its foreign key,
+  its index and its deterministic backfill, and relaxes the closed
+  `IN ('E_SET','ZPL','SGRE')` code list - but does NOT yet require
+  `applicant_company_id` in the complete branch. Both backends satisfy
+  it, so it can be applied before the deploy with no outage. This is
+  TRANSITIONAL: until the contract migration runs,
+  `applicant_company_id` is best-effort, not authoritative, and nothing
+  may be built on the assumption that it is always present.
+- BACKEND-FIRST REMAINS UNSUPPORTED, deliberately. The new backend
+  requires 0035; there is no ordering in which it may be deployed first.
+- The CONTRACT migration is deliberately NOT in the repository yet.
+  `npm run migrate` (backend/src/db/migrate.ts) reads every `.sql` file,
+  sorts it, filters to unapplied and applies ALL of them in one loop. It
+  accepts no target argument, so a `0036` present in the directory would
+  be applied in the same batch as 0035 and would close the compatibility
+  window at once. It is added only after the new backend is live-verified.
+- Rollout order: apply 0035 -> deploy the backend -> live-verify submit /
+  renew / read / organization directory -> add and apply the contract
+  migration, which backfills anything the old backend wrote during the
+  overlap, proves nothing is left, and only then makes the column
+  mandatory.
+- PHASE 1 NEEDS NO `app_runtime` ORGANIZATION GRANT. No Organization
+  Management mutation route is mounted in Phase 1, so nothing writes a
+  company, team, position, association or organization audit row, and the
+  existing permit workflow needs none of those privileges. The grants are
+  a Phase 2 prerequisite; `UPDATE (name)` on `companies`/`teams` is
+  deferred further still, until rename endpoints actually exist.
+
 ### Privileged System Identities (implemented; migration 0019 applied and live-verified)
 - `privileged_identities` (migration 0019) is the authoritative home for
   a CEO's or E-SET SITE_MANAGER's personal display name - the one

@@ -148,19 +148,38 @@ test('loadOrganization exposes no capability mapping', async () => {
   assert.ok(!captured[0]?.sql.includes('team_position_capabilities'), 'authorization data is not directory data');
 });
 
-test('loadOrganization drops any company outside the provisioning set', async () => {
+test('loadOrganization surfaces EVERY company the query returns, not a fixed set of three', async () => {
+  // Companies are managed at runtime (migration 0035). A closed allowlist
+  // here would silently hide a company an administrator had just
+  // created, which is exactly the bug this replaced.
   const companies = await loadOrganization(
     stubQuery(
       [
         [
           { company_code: 'ZPL', company_name: 'ZPL', team_name: 'ZPL', position_name: 'Engineer', team_position_id: 'tp-1' },
-          { company_code: 'UNKNOWN', company_name: 'Unknown', team_name: 'X', position_name: 'Y', team_position_id: 'tp-2' },
+          { company_code: 'ABC_CONTRACTORS', company_name: 'ABC Contractors', team_name: 'Electrical', position_name: 'Electrician', team_position_id: 'tp-2' },
         ],
       ],
       [],
     ),
   );
-  assert.deepEqual(companies.map((company) => company.code), ['ZPL']);
+  assert.deepEqual(companies.map((company) => company.code), ['ZPL', 'ABC_CONTRACTORS']);
+  assert.deepEqual(companies[1]?.teams[0]?.positions, [
+    { teamPositionId: 'tp-2', positionName: 'Electrician' },
+  ]);
+});
+
+test('loadOrganization offers only structure whose whole chain is active', async () => {
+  const captured: Captured[] = [];
+  await loadOrganization(stubQuery([[]], captured));
+  const sql = captured[0]?.sql ?? '';
+  // An association under a retired team or company is exactly what the
+  // database refuses to accept a new employee assignment into, so it
+  // must not be offered as a choice.
+  assert.match(sql, /tp\.deactivated_at IS NULL/);
+  assert.match(sql, /t\.deactivated_at IS NULL/);
+  assert.match(sql, /c\.deactivated_at IS NULL/);
+  assert.match(sql, /tp\.site_manager_assignable = TRUE/);
 });
 
 test('listSiteManagers reports the current grant state and excludes the CEO tier', async () => {

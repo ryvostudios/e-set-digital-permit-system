@@ -234,6 +234,7 @@ class FakeDb {
   // profile" and "this user's primary assignment is not one they hold".
   workforceProfiles = new Map<string, {
     display_name: string;
+    company_id: string;
     company_code: string;
     company_name: string;
     primary_team_position_id: string;
@@ -279,7 +280,8 @@ class FakeDb {
     userId: string,
     profile: { display_name: string; primary_team_position_id: string; team_name: string; position_name: string },
   ): void {
-    this.workforceProfiles.set(userId, { company_code: 'E_SET', company_name: 'E-SET', ...profile });
+    this.workforceProfiles.set(userId,
+      { company_id: 'company-eset', company_code: 'E_SET', company_name: 'E-SET', ...profile });
   }
 
   /** Test fixture setup: removes a signing identity, so any signing action by that user must fail closed. Covers both "no profile row" and "the profile's primary assignment is not one this user holds" - the resolver's join returns no row either way. */
@@ -372,6 +374,7 @@ class FakeDb {
         companyOther,
         applicantIdentityKind,
         applicantDisplayName,
+        applicantCompanyId,
         applicantCompanyCode,
         applicantCompanyName,
         permitType,
@@ -390,6 +393,7 @@ class FakeDb {
         string | null,
         PermitRow['applicant_identity_kind'],
         string | null,
+        PermitRow['applicant_company_id'],
         PermitRow['applicant_company_code'],
         string | null,
         PermitRow['permit_type'],
@@ -428,6 +432,9 @@ class FakeDb {
         company_other: companyOther,
         applicant_identity_kind: applicantIdentityKind,
         applicant_display_name: applicantDisplayName,
+        // Carried over from the permit being renewed, authoritative
+        // company included (migration 0035).
+        applicant_company_id: applicantCompanyId,
         applicant_company_code: applicantCompanyCode,
         applicant_company_name: applicantCompanyName,
         submitted_at: null,
@@ -699,12 +706,15 @@ class FakeDb {
       const updated: PermitRow = {
         ...existing,
         ...(sql.includes('applicant_identity_kind') ? {
+          // $1 id, $2 company, $3 company_other, $4 kind, $5 name,
+          // $6 authoritative company id, $7 code, $8 company name.
           company: (params[1] as PermitRow['company']),
-          company_other: null,
-          applicant_identity_kind: params[2] as 'NORMAL' | 'PRIVILEGED',
-          applicant_display_name: params[3] as string,
-          applicant_company_code: params[4] as 'E_SET' | 'ZPL' | 'SGRE',
-          applicant_company_name: params[5] as string,
+          company_other: params[2] as string | null,
+          applicant_identity_kind: params[3] as 'NORMAL' | 'PRIVILEGED',
+          applicant_display_name: params[4] as string,
+          applicant_company_id: params[5] as string,
+          applicant_company_code: params[6] as string,
+          applicant_company_name: params[7] as string,
         } : {}),
         status: 'PENDING_CRO',
         version: existing.version + 1,
@@ -897,6 +907,12 @@ class FakeDb {
     if (sql.includes('FROM privileged_access_events') && sql.includes('JOIN privileged_identities')) {
       return { rows: [] };
     }
+    // The authoritative E-SET row a privileged applicant is described
+    // by (migration 0035): the company is READ, never hardcoded into
+    // the permit.
+    if (sql.includes('FROM companies') && sql.includes("code = 'E_SET'")) {
+      return { rows: [{ id: 'company-eset', code: 'E_SET', name: 'E-SET' }] };
+    }
     // Checked BEFORE recipient resolution below: both queries mention
     // `user_team_positions`, and this one is the more specific shape.
     if (sql.includes('FROM workforce_profiles')) {
@@ -904,6 +920,7 @@ class FakeDb {
       if (this.usersWithoutSigningIdentity.has(userId)) return { rows: [] };
       const profile = this.workforceProfiles.get(userId) ?? {
         display_name: `Display Name of ${userId}`,
+        company_id: 'company-eset',
         company_code: 'E_SET',
         company_name: 'E-SET',
         primary_team_position_id: `tp-${userId}`,

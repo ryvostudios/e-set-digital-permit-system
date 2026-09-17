@@ -330,6 +330,107 @@ they depend on the actual deployment topology:
   privileged grants/functions/sequences, schema creation, bootstrap state,
   and the migration ledger are all denied to `app_runtime`.
 
+  ### 0035 — runtime Organization Management, EXPAND step (NOT YET APPLIED)
+
+  **0035 is the EXPAND half of an EXPAND → DEPLOY → CONTRACT rollout.**
+  It is deliberately compatible with BOTH the currently deployed backend
+  and the new one, so the ordinary order works with no outage:
+
+  1. **Apply 0035.** The running backend keeps submitting and renewing
+     permits: 0035 adds `permits.applicant_company_id` but does not yet
+     require it, so a backend that does not write the column is still
+     satisfied by `permits_applicant_identity_complete`.
+  2. **Deploy the backend** that populates `applicant_company_id`.
+  3. **Live-verify** submit, renew, permit reads, organization directory.
+  4. **Contract, later:** a separate migration backfills anything the old
+     backend wrote during the overlap and only then makes the column
+     mandatory.
+
+  The reverse order is NOT supported and must not be attempted: the new
+  backend names `applicant_company_id` in every permit list query and
+  reads `deactivated_at` in the organization directory, so without 0035
+  it fails with `42703` on reads as well as writes.
+
+  The contract migration is deliberately **not in the repository yet**.
+  `npm run migrate` applies every pending file in one batch and cannot
+  target a single migration (`backend/src/db/migrate.ts`), so a `0036`
+  sitting in the directory would be applied in the same run as 0035 and
+  would close the compatibility window immediately.
+
+  #### Phase 1 deployment — NO grant is required
+
+  **The Phase 1 backend needs none of the privileges below to run.**
+  Phase 1 ships the schema and domain foundation only: no Organization
+  Management mutation route is mounted, so no code path inserts a
+  company, a team, a position, an association or an organization audit
+  row, and none calls the baseline grant function. The existing permit
+  workflow needs no organization write privilege whatsoever and is
+  unaffected either way.
+
+  Applying the grants early is harmless but pointless, and it widens the
+  runtime role before anything can use it. Prefer least privilege: leave
+  them unapplied until Phase 2 is ready to deploy.
+
+  #### Phase 2 prerequisite — the minimum the mutation API needs
+
+  Apply these immediately before the Phase 2 backend that exposes the
+  Organization Management endpoints. Each one maps to a statement that
+  actually exists in `domain/accounts/organization.ts` /
+  `organizationAudit.ts`:
+
+  ```sql
+  GRANT INSERT ON TABLE public.companies TO app_runtime;
+  GRANT UPDATE (deactivated_at) ON TABLE public.companies TO app_runtime;
+  GRANT INSERT ON TABLE public.teams TO app_runtime;
+  GRANT UPDATE (deactivated_at) ON TABLE public.teams TO app_runtime;
+  GRANT INSERT ON TABLE public.positions TO app_runtime;
+  GRANT INSERT ON TABLE public.team_positions TO app_runtime;
+  GRANT UPDATE (deactivated_at) ON TABLE public.team_positions TO app_runtime;
+  GRANT INSERT ON TABLE public.organization_audit_events TO app_runtime;
+  GRANT USAGE ON SEQUENCE public.organization_audit_events_ordinal_seq TO app_runtime;
+  GRANT EXECUTE ON FUNCTION public.grant_baseline_applicant_capabilities(UUID) TO app_runtime;
+  ```
+
+  #### Deferred until rename endpoints actually exist
+
+  ```sql
+  -- NOT required by Phase 1 or by the Phase 2 create/deactivate API.
+  -- Apply only when a rename endpoint is implemented.
+  GRANT UPDATE (name) ON TABLE public.companies TO app_runtime;
+  GRANT UPDATE (name) ON TABLE public.teams TO app_runtime;
+  ```
+
+  No code renames a company or a team today. Granting `UPDATE (name)`
+  now would hand the runtime role a capability nothing exercises, which
+  is exactly the kind of drift least privilege exists to prevent.
+
+  #### Why the UPDATE grants are column-level
+
+  For the same reason as the `workforce_profiles` and `jsas` deltas
+  above: do not replace them with table-level UPDATE. In particular
+  `app_runtime` must never hold UPDATE on `companies.code` or
+  `companies.id` - a rewritten code would silently re-point permits,
+  audit rows and employee profiles, and migration 0035 adds a trigger
+  that refuses it even if the grant were widened by mistake.
+
+  **`app_runtime` must NOT receive:** INSERT, UPDATE or DELETE on
+  `team_position_capabilities`; DELETE or TRUNCATE on any organization
+  table; UPDATE on `positions` (which has no lifecycle column by design).
+  The bounded `grant_baseline_applicant_capabilities()` function is the
+  ONLY write path to capability data, and its two capability names are
+  literals inside the function body - granting the table directly would
+  remove the boundary the whole design depends on.
+
+  `permits` needs nothing new: `app_runtime` already holds table-level
+
+  SELECT/INSERT/UPDATE there (0024), which covers
+  `applicant_company_id`.
+
+  Unlike `record_site_manager_grant()`, this SECURITY DEFINER function IS
+  meant for the ordinary runtime login: it grants the applicant baseline,
+  which is not privileged authority. It is revoked from PUBLIC, `anon`,
+  `authenticated` and `service_role` by the migration.
+
   Migrations 0029-0030 are **APPLIED / LIVE-VERIFIED**. 0029 widens two
   CHECKs so the authoritative V2 form contract is storable and grants
   nothing. 0030 carries the only new `app_runtime` privilege of this

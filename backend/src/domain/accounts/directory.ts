@@ -1,5 +1,4 @@
 import type { QueryFn } from '../../db/pool.js';
-import { COMPANY_CODES, type CompanyCode } from './companies.js';
 
 /**
  * READ-ONLY administrative directory queries.
@@ -45,7 +44,13 @@ export interface EmployeeListFilters {
   /** Case-insensitive substring match on the authoritative display name. */
   search?: string | undefined;
   state?: 'ACTIVE' | 'DISABLED' | 'DELETED' | undefined;
-  companyCode?: CompanyCode | undefined;
+  /**
+   * Filters on the authoritative `companies.code`. Typed as `string`
+   * because the set of companies is managed at runtime (migration
+   * 0035); the value is still BOUND as a parameter, never interpolated,
+   * so an unknown code simply matches nothing.
+   */
+  companyCode?: string | undefined;
 }
 
 export interface DirectoryPageParams {
@@ -171,8 +176,15 @@ export interface OrganizationCompany {
  * before a create/transfer is allowed, read from the same table, so a
  * combination offered here is exactly a combination the mutation would
  * accept - and one that is not offered is one the mutation refuses.
- * Nothing here decides assignability; migration 0020 does, and no
- * endpoint can change it.
+ * Nothing here decides assignability: migration 0020 set it for the
+ * launch structure, and `domain/accounts/organization.ts` sets it on
+ * INSERT of a brand-new association it has just created - never by
+ * UPDATE of an existing one, and never from a request field.
+ *
+ * ONLY ACTIVE STRUCTURE IS OFFERED. A combination whose association,
+ * team or company has been deactivated is withheld here, because it is
+ * exactly what the database now refuses to accept a new employee
+ * assignment into.
  *
  * Capability mappings are deliberately NOT exposed: which permissions a
  * Team + Position carries is authorization data, and a management screen
@@ -193,7 +205,10 @@ export async function loadOrganization(queryFn: QueryFn): Promise<OrganizationCo
        JOIN companies c ON c.id = t.company_id
        JOIN positions p ON p.id = tp.position_id
       WHERE tp.site_manager_assignable = TRUE
-      ORDER BY c.code ASC, t.name ASC, p.name ASC`,
+        AND tp.deactivated_at IS NULL
+        AND t.deactivated_at IS NULL
+        AND c.deactivated_at IS NULL
+      ORDER BY c.name ASC, t.name ASC, p.name ASC`,
   );
 
   const companies: OrganizationCompany[] = [];
@@ -210,10 +225,14 @@ export async function loadOrganization(queryFn: QueryFn): Promise<OrganizationCo
     }
     team.positions.push({ teamPositionId: row.team_position_id, positionName: row.position_name });
   }
-  // Only the three known provisioning companies are ever surfaced, so an
-  // unexpected row could never be presented as a company a manager may
-  // provision into.
-  return companies.filter((company) => (COMPANY_CODES as readonly string[]).includes(company.code));
+  // Every ACTIVE company is surfaced, not a fixed set of three. The
+  // organization is managed at runtime (migration 0035), so a closed
+  // allowlist here would silently hide a company an administrator had
+  // just created - while adding nothing, because the query already
+  // restricts rows to explicitly assignable combinations whose whole
+  // company/team/association chain is active, which is exactly what the
+  // mutating endpoints independently re-check.
+  return companies;
 }
 
 export interface SiteManagerListItem {

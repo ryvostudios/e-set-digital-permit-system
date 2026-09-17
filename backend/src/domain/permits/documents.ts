@@ -42,7 +42,13 @@ export interface IssuedPermitSnapshot {
   applicantIdentity?: {
     kind: 'NORMAL' | 'PRIVILEGED';
     displayName: string;
-    companyCode: 'E_SET' | 'ZPL' | 'SGRE';
+    /**
+     * The applicant company's code as it was AT ISSUE. A frozen display
+     * snapshot, not a closed set: companies are managed at runtime
+     * (migration 0035), and a historical snapshot keeps exactly the
+     * value it was written with.
+     */
+    companyCode: string;
     companyName: string;
   } | undefined;
   createdBy: string;

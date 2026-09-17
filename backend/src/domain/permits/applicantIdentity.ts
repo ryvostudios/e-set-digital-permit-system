@@ -12,8 +12,24 @@ export type PrivilegedApplicantRole = (typeof PRIVILEGED_APPLICANT_ROLE_LABELS)[
 export interface PermitApplicantIdentity {
   kind: 'NORMAL' | 'PRIVILEGED';
   displayName: string;
-  companyCode: 'E_SET' | 'ZPL' | 'SGRE';
-  companyName: 'E-SET' | 'ZPL' | 'SGRE';
+  /**
+   * The AUTHORITATIVE applicant company: the `companies` row itself.
+   *
+   * Migration 0035 made this a real foreign key on the permit
+   * (`applicant_company_id`) so a company created at runtime is a
+   * first-class applicant company rather than a string the schema has to
+   * recognise. It is what the completeness CHECK now requires.
+   */
+  companyId: string;
+  /**
+   * The company's code and display name AT THE TIME, frozen alongside
+   * the identity. Migration 0024 froze the name so a later rename cannot
+   * alter an issued document, and that remains exactly their role: they
+   * are the display snapshot, no longer a closed vocabulary. Typed as
+   * `string` because the set of companies is now dynamic.
+   */
+  companyCode: string;
+  companyName: string;
   /**
    * PRIVILEGED applicants only: the role that stands in for a job title,
    * because a privileged account holds no team or position and must
@@ -56,23 +72,36 @@ export async function resolvePermitApplicantAuthority(
     const role = privileged.rows.some((row) => row.role === 'CEO')
       ? PRIVILEGED_APPLICANT_ROLE_LABELS.CEO
       : PRIVILEGED_APPLICANT_ROLE_LABELS.SITE_MANAGER;
+    // A privileged system account holds no company membership, so E-SET
+    // is derived server-side exactly as migration 0024 specified. The
+    // row is READ rather than the code hardcoded into the permit,
+    // because the permit now stores the authoritative company id and a
+    // fabricated one would not reference a real company.
+    const eset = await queryFn<{ id: string; code: string; name: string }>(
+      `SELECT id, code, name FROM companies WHERE code = 'E_SET'`,
+    );
+    const esetRow = eset.rows[0];
+    // Fail closed: without the authoritative company row there is no
+    // complete applicant identity to freeze.
+    if (!esetRow) return { allowed: false };
     return {
       allowed: true,
       identity: {
         kind: 'PRIVILEGED',
         displayName: privilegedName,
-        companyCode: 'E_SET',
-        companyName: 'E-SET',
+        companyId: esetRow.id,
+        companyCode: esetRow.code,
+        companyName: esetRow.name,
         privilegedRole: role,
       },
     };
   }
 
   const normal = await queryFn<{
-    display_name: string; company_code: 'E_SET' | 'ZPL' | 'SGRE'; company_name: 'E-SET' | 'ZPL' | 'SGRE';
+    display_name: string; company_id: string; company_code: string; company_name: string;
     team_name: string; position_name: string;
   }>(
-    `SELECT wp.display_name, c.code AS company_code, c.name AS company_name,
+    `SELECT wp.display_name, c.id AS company_id, c.code AS company_code, c.name AS company_name,
             t.name AS team_name, p.name AS position_name
        FROM workforce_profiles wp
        JOIN companies c ON c.id = wp.company_id
@@ -92,7 +121,8 @@ export async function resolvePermitApplicantAuthority(
   return {
     allowed: true,
     identity: {
-      kind: 'NORMAL', displayName, companyCode: row.company_code, companyName: row.company_name,
+      kind: 'NORMAL', displayName,
+      companyId: row.company_id, companyCode: row.company_code, companyName: row.company_name,
       // A normal employee's job title is their real workforce assignment,
       // never a privileged role.
       privilegedRole: null,

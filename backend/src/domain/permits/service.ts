@@ -62,6 +62,46 @@ export type PermitStatus =
   | 'CLOSED';
 export type Company = 'ESET' | 'SGRE' | 'ZPL' | 'OTHER';
 
+/**
+ * Renders an authoritative applicant company into the PRINTED FORM's
+ * company field.
+ *
+ * `permits.company` is not identity. It is the form control migration
+ * 0006 describes - "Company field includes ESET, SGRE, ZPL, Other;
+ * choosing Other allows free-text entry" - and it keeps that closed
+ * vocabulary because it is a printed checkbox, not an authorization
+ * boundary. The AUTHORITATIVE applicant company is
+ * `applicant_company_id`, a real foreign key to `companies` since
+ * migration 0035.
+ *
+ * So a company created at runtime is a first-class applicant - it has a
+ * real `companies` row, a real foreign key on the permit, and its own
+ * frozen name snapshot - while the paper form renders it through the
+ * escape hatch the form has always had. That mapping is GENERIC: adding
+ * another company never requires a change here, because anything that
+ * is not one of the three printed options takes the `OTHER` branch and
+ * supplies its own display name.
+ *
+ * `company_other` must be non-blank exactly when `company` is `OTHER`
+ * and NULL otherwise (`permits_company_other_exclusive`, migration
+ * 0015), which is why both values are returned together.
+ */
+export function toPermitFormCompany(identity: { companyCode: string; companyName: string }): {
+  company: Company;
+  companyOther: string | null;
+} {
+  switch (identity.companyCode) {
+    case 'E_SET':
+      return { company: 'ESET', companyOther: null };
+    case 'ZPL':
+      return { company: 'ZPL', companyOther: null };
+    case 'SGRE':
+      return { company: 'SGRE', companyOther: null };
+    default:
+      return { company: 'OTHER', companyOther: identity.companyName };
+  }
+}
+
 export interface PermitRow {
   id: string;
   // Raw, authoritative numbering value (from permit_number_seq via the
@@ -85,7 +125,10 @@ export interface PermitRow {
   company_other: string | null;
   applicant_identity_kind?: 'NORMAL' | 'PRIVILEGED' | null | undefined;
   applicant_display_name?: string | null | undefined;
-  applicant_company_code?: 'E_SET' | 'ZPL' | 'SGRE' | null | undefined;
+  /** The authoritative applicant company (migration 0035). */
+  applicant_company_id?: string | null | undefined;
+  /** Frozen display snapshot of that company at submission; no longer a closed set. */
+  applicant_company_code?: string | null | undefined;
   applicant_company_name?: string | null | undefined;
   submitted_at: string | null;
   // Set together, DB-side, by forwardToHseReview - the authoritative
@@ -152,6 +195,7 @@ export const PERMIT_SUMMARY_COLUMNS = [
   'company_other',
   'applicant_identity_kind',
   'applicant_display_name',
+  'applicant_company_id',
   'applicant_company_code',
   'applicant_company_name',
   'submitted_at',
@@ -904,18 +948,19 @@ export async function submitPermit(
 
     const applicant = await resolvePermitApplicantAuthority(client.query.bind(client), actorUserId);
     if (!applicant.allowed || !applicant.identity) throw new SigningIdentityUnavailableError(actorUserId);
-    const legacyCompany = applicant.identity.companyCode === 'E_SET' ? 'ESET' : applicant.identity.companyCode;
+    const formCompany = toPermitFormCompany(applicant.identity);
 
     const updateResult = await client.query<PermitRow>(
       `UPDATE permits
           SET status = 'PENDING_CRO', version = version + 1, submitted_at = now(), updated_at = now(),
-              company = $2, company_other = NULL,
-              applicant_identity_kind = $3, applicant_display_name = $4,
-              applicant_company_code = $5, applicant_company_name = $6
+              company = $2, company_other = $3,
+              applicant_identity_kind = $4, applicant_display_name = $5,
+              applicant_company_id = $6, applicant_company_code = $7, applicant_company_name = $8
         WHERE id = $1
         RETURNING *`,
-      [permitId, legacyCompany, applicant.identity.kind, applicant.identity.displayName,
-        applicant.identity.companyCode, applicant.identity.companyName],
+      [permitId, formCompany.company, formCompany.companyOther,
+        applicant.identity.kind, applicant.identity.displayName,
+        applicant.identity.companyId, applicant.identity.companyCode, applicant.identity.companyName],
     );
     const permit = requireRow(updateResult.rows);
 
@@ -988,6 +1033,7 @@ export async function resubmitPermit(
     }
 
     if (!existing.applicant_identity_kind || !existing.applicant_display_name ||
+        !existing.applicant_company_id ||
         !existing.applicant_company_code || !existing.applicant_company_name) {
       return { outcome: 'invalid', reason: 'missing_required_fields' };
     }
@@ -1772,11 +1818,12 @@ export async function renewPermit(
       const insertResult = await client.query<PermitRow>(
         `INSERT INTO permits (
            jsa_id, created_by, previous_permit_id, site_timezone, company, company_other,
-           applicant_identity_kind, applicant_display_name, applicant_company_code, applicant_company_name,
+           applicant_identity_kind, applicant_display_name,
+           applicant_company_id, applicant_company_code, applicant_company_name,
            permit_type, form_version, form_payload, wind_farm, wtg_number, work_description, loto_number,
            status, issued_at, hse_review_started_at, hse_review_deadline_at
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15, $16, $17, 'ISSUED', now(), NULL, NULL)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18, 'ISSUED', now(), NULL, NULL)
          RETURNING *`,
         [
           existing.jsa_id,
@@ -1787,6 +1834,11 @@ export async function renewPermit(
           existing.company_other,
           existing.applicant_identity_kind,
           existing.applicant_display_name,
+          // The renewed permit carries the ORIGINAL applicant's frozen
+          // identity forward unchanged, authoritative company included -
+          // it is the same work continuing, and a later company rename
+          // or deactivation must not alter it.
+          existing.applicant_company_id,
           existing.applicant_company_code,
           existing.applicant_company_name,
           // The renewed permit is the same work continuing: it carries

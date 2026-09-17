@@ -256,6 +256,62 @@ Versioned, plain SQL migration files, applied in filename order by
   `WTG-1`, `CS-1` were all observed. The JSA series remains one
   independent global sequence.
 
+- `0035_dynamic_organization_management.sql`: **NOT YET APPLIED. EXPAND
+  STEP of an EXPAND -> DEPLOY -> CONTRACT rollout** - it is compatible
+  with BOTH the currently deployed backend and the new one, so it is
+  applied FIRST, with no outage. It adds `permits.applicant_company_id`
+  but does NOT yet require it, so a backend that does not write the
+  column still satisfies `permits_applicant_identity_complete`. The
+  CONTRACT migration that makes the column mandatory is deliberately
+  NOT in this directory yet: `npm run migrate` applies every pending
+  file in one batch and cannot target a single migration, so a `0036`
+  here would be applied in the same run and close the compatibility
+  window immediately. Phase 1
+  of runtime Organization Management. Adds `deactivated_at` to
+  `companies`, `teams` and `team_positions` (deliberately NOT to
+  `positions`, which is a globally shared vocabulary row); normalized
+  unique name indexes on all three of companies/teams/positions; a
+  `companies_code_format` CHECK and a trigger making `companies.id` and
+  `companies.code` immutable; deactivation guards that refuse to retire a
+  record while an ACTIVE employee depends on it and refuse any
+  deactivation that would push a REQUIRED capability below its coverage
+  minimum - an explicit two-entry list (`permit.cro_review`,
+  `permit.hse_review`, minimum 1 each, derived from the two places
+  `workflowSideEffects.ts` fails closed), NOT a global "every capability
+  needs a holder" rule, and bounded by `LEAST(minimum, current)` so an
+  already-degraded requirement blocks only actions that reduce it
+  further, never unrelated ones;
+  insert guards so an inactive company/team/association accepts no new
+  structure and no new assignment; the append-only
+  `organization_audit_events` table; and
+  `grant_baseline_applicant_capabilities()` - a bounded SECURITY DEFINER
+  function whose capability names are LITERALS, so runtime organization
+  management can attach `permit.create` + `permit.submit` and nothing
+  else.
+
+  It also makes the permit applicant company authoritative:
+  `permits.applicant_company_id` is a real foreign key to `companies`,
+  backfilled deterministically from the frozen `applicant_company_code`,
+  and the completeness CHECK's closed `IN ('E_SET','ZPL','SGRE')` list
+  becomes "present and non-blank" plus that foreign key. The freeze
+  trigger is extended to the new column. `permits.company` /
+  `company_other` and their CHECKs are NOT touched - that column is the
+  printed FORM field (0006), not identity, and 0024 already settled that
+  it stays as it is.
+
+  It seeds no organization data and deactivates nothing. A
+  self-verification block re-asserts the launch shape afterwards: 3
+  companies with unchanged codes/names, 7 teams, 12 positions, 18
+  associations, exactly 1 `permit.cro_review` holder and exactly 2
+  `permit.hse_review` holders. Verified by
+  `backend/src/db/migration0035.test.ts`, which runs the real SQL.
+
+  This migration INTENTIONALLY SUPERSEDES 0020's "organization structure
+  is operator-owned" decision; see DECISIONS.md. It needs the
+  `app_runtime` privilege delta documented in DEPLOYMENT.md - which is a
+  PHASE 2 prerequisite, not a Phase 1 one, without
+  which the new domain code cannot write.
+
 Migrations are added section by section as each is implemented. Permit
 and JSA business schema (permits, JSAs, audit tables, etc.) is added in
 later, scoped implementation sections — not here.

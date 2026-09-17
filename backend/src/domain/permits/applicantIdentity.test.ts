@@ -11,6 +11,10 @@ function queryFor(options: {
   return (async <T>(sql: string) => {
     if (sql.includes('privileged_access_events')) return { rows: options.privilegedName
       ? (options.privilegedRoles ?? ['CEO']).map((role) => ({ role, display_name: options.privilegedName })) : [] } as { rows: T[] };
+    if (sql.includes('FROM companies')) {
+      // The authoritative E-SET row a privileged applicant is described by.
+      return { rows: [{ id: 'company-eset', code: 'E_SET', name: 'E-SET' }] } as { rows: T[] };
+    }
     if (sql.includes('workforce_profiles')) return { rows: options.normal ? [options.normal] : [] } as { rows: T[] };
     throw new Error('unexpected query');
   }) as QueryFn;
@@ -18,17 +22,20 @@ function queryFor(options: {
 
 test('normal applicant identity is authoritative workforce/company data', async () => {
   const identity = await resolvePermitApplicantAuthority(queryFor({ normal: {
-    display_name: 'Ali Khan', company_code: 'ZPL', company_name: 'ZPL', team_name: 'ZPL', position_name: 'Engineer',
+    display_name: 'Ali Khan', company_id: 'company-zpl', company_code: 'ZPL', company_name: 'ZPL',
+    team_name: 'ZPL', position_name: 'Engineer',
   } }), 'user');
   assert.deepEqual(identity.identity, {
-    kind: 'NORMAL', displayName: 'Ali Khan', companyCode: 'ZPL', companyName: 'ZPL', privilegedRole: null,
+    kind: 'NORMAL', displayName: 'Ali Khan', companyId: 'company-zpl',
+    companyCode: 'ZPL', companyName: 'ZPL', privilegedRole: null,
   });
 });
 
 test('privileged applicant uses only privileged personal name and internal E_SET context', async () => {
   const identity = await resolvePermitApplicantAuthority(queryFor({ privilegedName: 'Sana Iqbal' }), 'ceo');
   assert.deepEqual(identity.identity, {
-    kind: 'PRIVILEGED', displayName: 'Sana Iqbal', companyCode: 'E_SET', companyName: 'E-SET', privilegedRole: 'CEO',
+    kind: 'PRIVILEGED', displayName: 'Sana Iqbal', companyId: 'company-eset',
+    companyCode: 'E_SET', companyName: 'E-SET', privilegedRole: 'CEO',
   });
 });
 
@@ -63,6 +70,9 @@ test('a privileged applicant needs no workforce profile at all', async () => {
     if (sql.includes('privileged_access_events')) {
       return { rows: [{ role: 'CEO', display_name: 'Sana Iqbal' }] } as { rows: T[] };
     }
+    if (sql.includes('FROM companies')) {
+      return { rows: [{ id: 'company-eset', code: 'E_SET', name: 'E-SET' }] } as { rows: T[] };
+    }
     workforceConsulted = true;
     return { rows: [] } as { rows: T[] };
   }) as QueryFn;
@@ -79,7 +89,7 @@ test('the role comes from the grant log, never from anything a caller supplies',
   // and a ZPL "Site Manager" POSITION resolves as a normal employee -
   // never as the privileged System Site Manager role.
   const zplSiteManager = await resolvePermitApplicantAuthority(queryFor({ normal: {
-    display_name: 'Bilal Ahmed', company_code: 'ZPL', company_name: 'ZPL',
+    display_name: 'Bilal Ahmed', company_id: 'company-zpl', company_code: 'ZPL', company_name: 'ZPL',
     team_name: 'ZPL', position_name: 'Site Manager',
   } }), 'employee');
   assert.equal(zplSiteManager.identity?.kind, 'NORMAL');
