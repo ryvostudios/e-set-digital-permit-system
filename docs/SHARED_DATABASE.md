@@ -7,9 +7,10 @@ repository (`docs/PLATFORM_DATABASE_ARCHITECTURE.md` and
 `docs/PLATFORM_MIGRATION_PLAN.md`). This document covers only what the Permit
 repository implements for it.
 
-**Status:** the namespace foundation (plan Phase 2) is built and verified
-on disposable local databases only. Nothing has been installed in any real
-database. Supabase Auth is still in use; replacing it is a separate phase.
+**Status:** the namespace foundation (Phase 2) and Permit-owned authentication
+(Phase 3 branch) are built and verified on disposable local databases only.
+Nothing has been installed in any real database. Standalone production still
+uses Supabase Auth; the Phase 3 branch does not.
 The standalone Permit database keeps using its historical ledger
 (`public.schema_migrations`) and is not touched by this change. The runner in
 this change only operates on schema `permit` and refuses to run against the
@@ -25,11 +26,13 @@ environment. Any standalone hotfix migration needs the previous runner.
   `search_path = pg_catalog, permit, pg_temp`. `public` is never on the path,
   so an ESDMS object such as `public.positions` (a different table from
   Permit's `positions`) can never be picked up by accident.
-- The one explicitly qualified call is `permit.record_site_manager_grant`
+- The privileged calls are explicitly qualified as
+  `permit.record_site_manager_grant` and `permit.provision_site_manager`
   (`backend/src/db/privilegedPool.ts`).
 - There are no cross-schema references to ESDMS. The only external reference
-  is transitional: the user foreign keys to Supabase `auth.users`, which
-  are removed when Permit-owned authentication replaces Supabase Auth.
+  was transitional: the 20 user foreign keys to Supabase `auth.users` are
+  deferred from the fresh baseline and recreated against `permit.users` by
+  Phase 3 migration 0039. See [PERMIT_OWNED_AUTH.md](PERMIT_OWNED_AUTH.md).
 
 ## Roles
 
@@ -41,8 +44,8 @@ NOCREATEROLE NOREPLICATION NOINHERIT` with no role memberships.
 | Role | Used by | Privileges |
 | --- | --- | --- |
 | `permit_migrator` | `npm run migrate` (`MIGRATION_DATABASE_URL`) | Owns schema `permit` and every Permit object. Nothing outside it. |
-| `permit_runtime` | API (`DATABASE_URL`) | The explicit set in `database/baseline/0038_permit_privileges.sql`, plus one `permit_runtime_access` RLS policy per table it uses. No DDL, no ledger, no bootstrap state. |
-| `permit_privileged` | CEO Site Manager grants (`PRIVILEGED_DATABASE_URL`) | `EXECUTE` on `permit.record_site_manager_grant` only. Still required: it is the only path that can write privileged authority. |
+| `permit_runtime` | API (`DATABASE_URL`) | The explicit set in `database/baseline/0038_permit_privileges.sql` plus 0039's narrow user/session column grants, with RLS policies on the tables it uses. No DDL, no ledger, no bootstrap state. |
+| `permit_privileged` | CEO Site Manager grants and provisioning (`PRIVILEGED_DATABASE_URL`) | `EXECUTE` on `permit.record_site_manager_grant` and `permit.provision_site_manager` only. No table DML. |
 
 **BYPASSRLS is gone.** The standalone `app_runtime` had BYPASSRLS with RLS
 enabled and no policies. BYPASSRLS applies to the whole database, so in a
@@ -236,6 +239,6 @@ Never point either tool at a real database. Both refuse a non-localhost
   the shared database it aborts at its first `public.<table>` existence
   check, before deleting anything. It is not ported to `permit` and must
   never be used in production.
-- **Transitional Supabase Auth foreign keys:** `PERMIT_TRANSITIONAL_AUTH_FK=yes`
-  grants `REFERENCES` on `auth.users`. The auth-replacement phase removes
-  both the grant and the foreign keys.
+- **Identity foreign keys:** the 20 historical `auth.users` references are
+  deferred from the fresh baseline and recreated against `permit.users` by
+  0039. The role provisioning script grants no `auth` schema access.

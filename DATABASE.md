@@ -8,7 +8,9 @@ and by the accepted decisions in `DECISIONS.md`.
 ## Platform
 
 - PostgreSQL, hosted on Supabase infrastructure.
-- Supabase Auth may be used for identity/authentication.
+- The standalone production installation uses Supabase Auth. The Phase 3
+  shared-database branch owns identity in `permit.users`; see
+  `docs/PERMIT_OWNED_AUTH.md`.
 - Application database access is mediated through the backend
   (Express) application layer — the frontend never queries the database
   directly, and privileged/service-role credentials are never exposed to

@@ -17,6 +17,12 @@ Versioned, plain SQL migration files, applied in filename order by
   runner enforces before each commit.
 - Migrations are never edited or renamed after being applied to any
   shared environment — a mistake is corrected with a new migration.
+- `0039_permit_owned_authentication.sql` is Phase 3 branch work for a fresh
+  shared-database install. It creates Permit-owned users and sessions,
+  replaces the 20 deferred Auth foreign keys, and adds session-bound
+  privileged operations. It refuses existing identity-reference data. It is
+  **not applied to standalone production**; see
+  `../../docs/PERMIT_OWNED_AUTH.md` for the later data-import boundary.
 - No down/rollback files: forward-only migrations, consistent with this
   project's append-only/immutable-history principles (see `DATABASE.md`).
 

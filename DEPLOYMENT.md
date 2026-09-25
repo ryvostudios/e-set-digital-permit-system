@@ -8,6 +8,13 @@
 > the current production database. The shared-database migration runner
 > operates only on schema `permit` and refuses to run against the
 > standalone database, so do not deploy it there.
+>
+> The Phase 3 branch removes runtime Supabase Auth. Its new auth design and
+> fresh-versus-existing-data boundary are in
+> [docs/PERMIT_OWNED_AUTH.md](docs/PERMIT_OWNED_AUTH.md). The legacy Auth
+> variables, grants and bootstrap instructions below describe the existing
+> standalone production deployment; they are **not** instructions for
+> deploying the Phase 3 branch.
 
 This document is deployment/operations reference, separate from the
 design-intent documents (`ARCHITECTURE.md`, `SECURITY.md`, `DATABASE.md`,

@@ -29,6 +29,7 @@ assuming anything below.
 - [`DATABASE.md`](./DATABASE.md) — database design principles (no schema yet)
 - [`DECISIONS.md`](./DECISIONS.md) — accepted decisions and open decisions log
 - [`DEPLOYMENT.md`](./DEPLOYMENT.md) — manual production configuration and deployment-time constraints
+- [`docs/PERMIT_OWNED_AUTH.md`](./docs/PERMIT_OWNED_AUTH.md) — Phase 3 branch authentication and migration boundary
 
 `backend/` is a working Node.js + Express + TypeScript application
 implementing the full agreed Permit workflow: draft creation/submission,
@@ -38,7 +39,9 @@ CRO fallback approval, Hold/Resume, Cancel, Close, and Renewal - plus
 paginated read APIs, permit search, filtered lifecycle/audit search,
 in-app notifications, a durable WhatsApp outbox foundation, and
 immutable issued Permit+JSA PDF generation - all under Team + Position ->
-Capabilities authorization with Supabase Auth token verification.
+Capabilities authorization. The standalone production deployment still uses
+Supabase Auth; the Phase 3 branch uses Permit-owned authentication as described
+in `docs/PERMIT_OWNED_AUTH.md`.
 Database migrations `0001`-`0034` are applied and live-verified against
 the live Supabase project, with **no outstanding migration** (see
 `database/migrations/README.md` for the per-migration ledger) - `0012` is
