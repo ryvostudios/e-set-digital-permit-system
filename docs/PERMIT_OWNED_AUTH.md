@@ -64,8 +64,10 @@ formats, and handle accounts without passwords only by an explicitly
 approved controlled reset. Import identities before Permit business rows,
 validate every user foreign key and row count, and compare the full identity
 set before allowing writes. `backend/src/domain/auth/legacyImport.ts` provides
-a synthetic-tested validation/import contract; it does not connect to the
-production Supabase Auth service. Production extraction, backup, object copy,
+the validation/import contract. `npm run data:import-standalone` (see
+SHARED_DATABASE.md) applies it inside the full data import. It was rehearsed
+on synthetic data only, and never connected to the production Supabase Auth
+service. Production extraction, backup, object copy,
 cutover, and rollback still require the separate migration phase.
 
 Document storage's `storage.buckets` readiness query is a known later-phase

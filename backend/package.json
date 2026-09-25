@@ -15,6 +15,7 @@
     "lint": "eslint .",
     "test": "tsx --import ./src/test/envIsolation.ts --test \"src/**/*.test.ts\"",
     "migrate": "tsx src/db/migrate.ts",
+    "data:import-standalone": "tsx src/scripts/importStandalone.ts",
     "bootstrap:ceo": "tsx src/scripts/bootstrapCeo.ts",
     "outbox:whatsapp:process": "tsx src/scripts/processWhatsappOutbox.ts",
     "documents:process": "tsx src/scripts/processDocumentJobs.ts",

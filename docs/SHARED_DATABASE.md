@@ -146,26 +146,85 @@ to `PUBLIC` or a browser role, or gives `permit_runtime` a table without its
 policy is rolled back and not recorded.
 
 The Permit advisory lock (`7298183340`) is unchanged and does not collide
-with ESDMS's node-pg-migrate lock. Run one application's migrator at a time.
+with ESDMS's node-pg-migrate lock. **Platform migration lock (Phase 6).**
+`npm run migrate` and `npm run data:import-standalone` also take the shared
+E-Set platform lock (`1163085140`). ESDMS `db:release` and the Attendance
+migration and import tools take the same key. It is a non-blocking try: while
+another application's release holds it, the Permit runner stops with
+"Another E-Set platform migration or release holds the platform lock"
+before any DDL. The API never takes it.
 
-## Moving existing data (later phase)
+## Moving existing data: `npm run data:import-standalone`
 
-`backend/src/db/permitDataCompatibility.test.ts` rehearses the import on a
-0038 replay. The import:
+**Order**
+1. Provision the roles.
+2. Run `npm run migrate -- --baseline-without-reference-data`. This installs
+   the baseline and 0039-0042 into an empty `permit` schema. 0039 refuses
+   if identity references already hold data, so the import comes after it.
+3. Run the import:
 
-1. Installs the baseline without reference data.
-2. As `permit_migrator`, in one transaction, disables user triggers on the
-   Permit tables.
-3. Copies every row with its original values, parents before children.
-4. Sets every sequence to its source position.
-5. Re-enables the triggers.
+```bash
+STANDALONE_DATABASE_URL=<standalone, read-only login> \
+MIGRATION_DATABASE_URL=<shared database, permit_migrator> \
+  npm run data:import-standalone                  # dry run (default)
+  npm run data:import-standalone -- --execute     # import, verify, commit
+  npm run data:import-standalone -- --verify      # re-reconcile, read-only
+```
 
-UUIDs, permit and JSA numbers, counters, timestamps, audit rows,
-signatures, issued snapshots and document references arrive unchanged, and
-numbering continues without reuse. The triggers must be disabled because the
-authoritative-timestamp and permit-numbering triggers stamp *new* rows and
-would otherwise rewrite historical values. Foreign keys stay enforced
-throughout.
+The tool is `backend/src/db/standaloneImport.ts`.
+
+**Transactions and locks**
+- The source is read in one read-only, repeatable-read snapshot.
+- The target is written in **one** transaction as `permit_migrator`,
+  holding the platform lock and the Permit migration lock.
+- The target must not already hold history. A second import is refused;
+  use `--verify` instead.
+
+**1. Identities**
+- `auth.users` is mapped to `permit.users` through the legacy-import
+  contract (`domain/auth/legacyImport.ts`): UUID kept, email normalized,
+  only supported bcrypt, and duplicates or unknown formats refused.
+- Every value in the 20 former `auth.users` reference columns must name an
+  imported identity (`missing_identity` otherwise).
+- Accounts without a password are refused unless
+  `--allow-accounts-without-password` is given for an approved controlled
+  reset.
+
+**2. Copy**
+- Every standalone table is copied parents first, with USER triggers
+  disabled for the transaction (they stamp new rows) and foreign keys
+  enforced. Renewals are copied oldest first.
+- Every sequence is set to its standalone position, then triggers are
+  re-enabled.
+
+**3. Verification, before commit**
+- per-table row count and an order-independent digest over every column
+  (timestamps in UTC);
+- the identity set (ids, normalized emails, imported hashes);
+- zero unresolved references in the 20 relationships;
+- sequence positions;
+- permit and JSA sequence ranges (the report samples).
+
+Rows that migrations after 0038 seed, such as 0041's CMS capability, are
+recognised and excluded from the comparison.
+
+**Modes and exit codes**
+- A dry run does all of it and rolls back.
+- The report holds counts, digests, ids of problem rows and hash-format
+  prefix counts, never emails, hashes or content.
+- The exit code is 2 when anything does not reconcile.
+
+After import, the first sign-in with a correct imported bcrypt password
+succeeds and is upgraded to Argon2id in the same transaction (see
+PERMIT_OWNED_AUTH.md).
+
+**Tests**
+- `src/db/standaloneImport.test.ts`: refusals, dry run, execute, all 20
+  relationships, first login and upgrade, verify, and refusal of a second
+  import.
+- `src/db/permitDataCompatibility.test.ts`: every row and sequence is
+  identical.
+- The synthetic standalone history is `src/test/standaloneHistory.ts`.
 
 ## Local disposable verification
 

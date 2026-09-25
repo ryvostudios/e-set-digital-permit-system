@@ -31,7 +31,14 @@ const RESET_SESSION = [
 // Serializes Permit migration runs via a session-level advisory lock held
 // on this dedicated client. It does not collide with node-pg-migrate's
 // fixed key used by ESDMS.
-const MIGRATION_LOCK_KEY = 7_298_183_340;
+export const MIGRATION_LOCK_KEY = 7_298_183_340;
+/**
+ * The E-Set PLATFORM migration lock, shared by ESDMS, Permit and Attendance
+ * migration tooling (ESDMS docs/PLATFORM_GO_LIVE_RUNBOOK.md): only one
+ * application may run DDL in the shared database at a time. Taken with a
+ * non-blocking try, so a second release fails fast. The API never takes it.
+ */
+export const PLATFORM_MIGRATION_LOCK_KEY = 1_163_085_140;
 
 const BASELINE_FILES = ['0038_permit_schema.sql', '0038_permit_reference_data.sql', '0038_permit_privileges.sql'] as const;
 
@@ -397,6 +404,10 @@ export async function runMigrations(options: MigrationOptions = {}): Promise<voi
 
   let lockAcquired = false;
   try {
+    const platform = await client.query<{ acquired: boolean }>('SELECT pg_try_advisory_lock($1) AS acquired', [PLATFORM_MIGRATION_LOCK_KEY]);
+    if (!platform.rows[0]?.acquired) {
+      throw new MigrationSafetyError('Another E-Set platform migration or release holds the platform lock; wait for it to finish.');
+    }
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY]);
     lockAcquired = true;
 

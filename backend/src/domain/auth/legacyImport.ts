@@ -42,7 +42,9 @@ export type LegacyImportProblemKind =
   | 'missing_email'
   | 'duplicate_email'
   | 'unsupported_hash'
-  | 'missing_password';
+  | 'missing_password'
+  /** A Permit row references a user id that has no source identity (data import). */
+  | 'missing_identity';
 
 export interface LegacyImportProblem {
   kind: LegacyImportProblemKind;
