@@ -76,6 +76,19 @@ test('refusals: unsupported hash, duplicate normalized email, unresolved identit
   assert.equal((await target.query<{ n: number }>('SELECT count(*)::int AS n FROM permit.permits')).rows[0]!.n, 0);
 });
 
+test('a source login that row-level security would filter is refused, never read as empty', async () => {
+  await source.exec(`CREATE ROLE rls_filtered_reader NOBYPASSRLS; GRANT USAGE ON SCHEMA public, auth TO rls_filtered_reader;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public, auth TO rls_filtered_reader; SET ROLE rls_filtered_reader`);
+  try {
+    await target.exec('SET ROLE permit_migrator; SET search_path = pg_catalog, permit, pg_temp');
+    await assert.rejects(importStandalone({ source: q(source), target: q(target) }, { mode: 'dry-run' }),
+      /row-level security/);
+  } finally {
+    await target.exec('RESET ROLE; SET search_path = pg_catalog');
+    await source.exec('RESET ROLE');
+  }
+});
+
 test('dry run performs and verifies the whole import, then rolls back', async () => {
   const { ok, report } = await run('dry-run');
   assert.equal(ok, true, JSON.stringify(report.problems));

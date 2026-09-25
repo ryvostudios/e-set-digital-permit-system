@@ -8,7 +8,9 @@ import type { QueryFn } from './pool.js';
  * `npm run data:import-standalone`; never runs by itself.
  *
  * Source: the standalone Permit database (`public` 0001-0038 plus Supabase
- * `auth.users`), read in ONE read-only repeatable-read snapshot.
+ * `auth.users`), read in ONE read-only repeatable-read snapshot, by a login
+ * that can read every row (BYPASSRLS or the owner): row_security is off, so
+ * a login that RLS would filter is refused rather than reading nothing.
  * Target: the shared database's `permit` schema, fully migrated with
  * `npm run migrate -- --baseline-without-reference-data`, connected as
  * permit_migrator (the schema owner). The Permit migration advisory lock is
@@ -147,6 +149,10 @@ export async function importStandalone(
   await target(options.mode === 'verify' ? 'BEGIN READ ONLY' : 'BEGIN');
   try {
     for (const q of [source, target]) await q("SET LOCAL TIME ZONE 'UTC'");
+    // The standalone tables have row-level security. A source login that RLS
+    // would filter must FAIL, never silently read fewer rows (0 = 0 would
+    // "reconcile"): with row_security off PostgreSQL raises instead.
+    await source('SET LOCAL row_security = off');
     const platform = await target<{ acquired: boolean }>('SELECT pg_try_advisory_xact_lock($1) AS acquired', [PLATFORM_MIGRATION_LOCK_KEY]);
     if (!platform.rows[0]?.acquired) throw new Error('another E-Set platform migration or release holds the platform lock');
     await target('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_KEY]);
