@@ -1,5 +1,14 @@
 # Deployment
 
+> **Shared E-Set database (in preparation).** Permit is being moved into the
+> company's shared database as schema `permit`, with `permit_migrator`,
+> `permit_runtime` (no BYPASSRLS) and `permit_privileged`. See
+> [docs/SHARED_DATABASE.md](docs/SHARED_DATABASE.md). The standalone-database
+> instructions below (`app_runtime`, `privileged_runtime`) still describe
+> the current production database. The shared-database migration runner
+> operates only on schema `permit` and refuses to run against the
+> standalone database, so do not deploy it there.
+
 This document is deployment/operations reference, separate from the
 design-intent documents (`ARCHITECTURE.md`, `SECURITY.md`, `DATABASE.md`,
 `DECISIONS.md`). It lists what an operator must actually configure or

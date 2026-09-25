@@ -8,7 +8,13 @@ Versioned, plain SQL migration files, applied in filename order by
 - Filename: `NNNN_description.sql`, e.g. `0001_create_users_table.sql`.
 - `NNNN` is a zero-padded, monotonically increasing sequence number.
 - Each file is applied exactly once, inside its own transaction, and
-  recorded in the `schema_migrations` table (created automatically).
+  recorded in the migration ledger (created automatically).
+- **Shared E-Set database:** Permit lives in schema `permit`. `0001`-`0038`
+  are historical and are never replayed there; the runner installs the
+  verified baseline in `database/baseline/` and records them in
+  `permit.schema_migrations`. Every migration from `0039` on operates only
+  on `permit` and follows the rules in `docs/SHARED_DATABASE.md`, which the
+  runner enforces before each commit.
 - Migrations are never edited or renamed after being applied to any
   shared environment — a mistake is corrected with a new migration.
 - No down/rollback files: forward-only migrations, consistent with this

@@ -1,0 +1,163 @@
+{
+  "baseline": "permit_0038_v1",
+  "representsThrough": "0038_organization_deactivation_runtime_privilege.sql",
+  "historicalMigrations": [
+    {
+      "name": "0001_revoke_execute_rls_auto_enable.sql",
+      "sha256": "6818c005a1375f8fcad68e9bd57855ac4d8d5b2902774d7da68691b0483e7a77"
+    },
+    {
+      "name": "0002_teams_positions_capabilities.sql",
+      "sha256": "55dbaf4a39cebec1489eb33833c7650db0fd147a9dcd53677b476e8f00e3f9da"
+    },
+    {
+      "name": "0003_harden_schema_migrations.sql",
+      "sha256": "4f709e23fc88a50e28889764eb38068eeeab04fba60f995a8289d4b1a4f03a41"
+    },
+    {
+      "name": "0004_privileged_access.sql",
+      "sha256": "2449a11a936d927b9a756e321a06ea48f217410cd920543eebde2596a62e95d7"
+    },
+    {
+      "name": "0005_permit_capabilities_seed.sql",
+      "sha256": "ae4daad807b19b8b96a0976d42bd33f3db1a4366128e2cab9495d004d8894fa1"
+    },
+    {
+      "name": "0006_permits_jsa_schema.sql",
+      "sha256": "2d5cc430525ac6e03ee21f7ecd942a6308926b4a4c0b24f2f044cb5e6f7dd653"
+    },
+    {
+      "name": "0007_harden_forbid_mutation_search_path.sql",
+      "sha256": "e8bc26c2104472758749e28ca088cb786340e9ec386c9ffa7d5a4ec626a73bc8"
+    },
+    {
+      "name": "0008_cro_hse_review_fallback.sql",
+      "sha256": "0345378abff2d924d17bc64dad9b2b36d53cea04f0e7456084bfc04c7b111638"
+    },
+    {
+      "name": "0009_hse_review_capability_seed.sql",
+      "sha256": "49600874cbdcf27d5ed11edc993a185290e1a3dd183980a472f930241204c457"
+    },
+    {
+      "name": "0010_permit_closure.sql",
+      "sha256": "19494a86039f90d91ce4b04690df12ae1d086c1756370c7ba2f0374652cda2c4"
+    },
+    {
+      "name": "0011_permit_status_index.sql",
+      "sha256": "bab81dcc20d5a272c8c2b029b28818412e3cae55fee94dd53f810cbce65d49a5"
+    },
+    {
+      "name": "0012_permit_workflow_completion.sql",
+      "sha256": "24a7fd9b643828abfa269e9f456d68c672ed080d49f2eacc0f73aa9993a0061b"
+    },
+    {
+      "name": "0013_notifications_outbox_documents.sql",
+      "sha256": "d603539250bb13abd7fcda79758143ec055d6ef6d48f10860831a944e38a312a"
+    },
+    {
+      "name": "0014_fix_trigger_function_search_paths.sql",
+      "sha256": "bb8442ba6e718399c53cb6d3465a6ef0b6bdebbf3ad4f9d7f6c79fedd3f690dc"
+    },
+    {
+      "name": "0015_backend_integrity_hardening.sql",
+      "sha256": "159e528677a26f5a1c61362c08d1914b96f52077c4e602ae6c75a52dd57938ba"
+    },
+    {
+      "name": "0016_permit_jsa_business_forms.sql",
+      "sha256": "381db6fe75024a26b884788e9f394702368c7cb7ba34099d1fed7838aca00cd3"
+    },
+    {
+      "name": "0017_employee_account_password_management.sql",
+      "sha256": "0f6658348c64cca40f8e9121978d2ca43448fe43d18c05aa690cade1b66b912a"
+    },
+    {
+      "name": "0018_employee_company_membership.sql",
+      "sha256": "9ba767b543dd56f7fe29f8d4b39ee247abae97a3ca6e463c7bfdddf985e757c1"
+    },
+    {
+      "name": "0019_privileged_identity_and_assignment_history.sql",
+      "sha256": "7d88777c60b8dd730324a7d84b7e1b146977f59443873ebce86d1134d4767dc6"
+    },
+    {
+      "name": "0020_organization_launch_seed.sql",
+      "sha256": "ed3bddd43eb2652403ee84bb00cd4d2bddc6adf59ca76cdcfbdd457e9015b8a9"
+    },
+    {
+      "name": "0021_privileged_function_execute_lockdown.sql",
+      "sha256": "480d3d2f85132774d5d8bc8cdf2bf5b8acb7ab9166020b47ad92eb6ef0fe5b1c"
+    },
+    {
+      "name": "0022_service_role_privilege_hardening.sql",
+      "sha256": "419bb0145d229c974d351fe55d736840b0e0412ca1271ca68483db8188a7c688"
+    },
+    {
+      "name": "0023_employee_lifecycle_and_user_permissions.sql",
+      "sha256": "efffc934dca2bc671fa3b3c95e4908a09d7487cf6c9f27b51b9eb79c954aee5a"
+    },
+    {
+      "name": "0024_permit_applicant_identity.sql",
+      "sha256": "6eddc3a34413b5211f0496e66a7226ee95c3b3131a393fc10e8b158e6201b0b2"
+    },
+    {
+      "name": "0025_service_role_application_hardening.sql",
+      "sha256": "6773de319861e8fa5de8a8ef195e88abdbd48c2e16ea1372bb86146d1ff5cd92"
+    },
+    {
+      "name": "0026_privileged_permit_applicant_signatures.sql",
+      "sha256": "c3c1cc77e35815234d55447132467dfb54287897aa22229321085128268e8268"
+    },
+    {
+      "name": "0027_service_role_function_hardening.sql",
+      "sha256": "49d0460b69aa4d43e4f63993647bca053bdaf4b1da3179958e9b12267dd1335b"
+    },
+    {
+      "name": "0028_ceo_forced_first_login_password_change.sql",
+      "sha256": "dbc5eca489522e219aaf65284435d59fa01ce1e727a817355f0fb6e8bbd60cba"
+    },
+    {
+      "name": "0029_permit_form_version_v2.sql",
+      "sha256": "82de08f057f8a6a4e7c843186043f922085b029f9a7470c9bb0d5c576ffd80cd"
+    },
+    {
+      "name": "0030_jsa_draft_write_authority.sql",
+      "sha256": "57e37f48b07709eeb06c03367af0138b2a70266628a182451d69b0cec000c97f"
+    },
+    {
+      "name": "0031_account_audit_read_authority.sql",
+      "sha256": "5542c7ae835f57d28a388c52eaf307a8fabeb89a6ec772f7d8b539091462c196"
+    },
+    {
+      "name": "0032_pdf_renderer_v3.sql",
+      "sha256": "045a82c51ad8246d92ed1e040a46c3c7f92c4f940d1fb48941db56ccaba0f9aa"
+    },
+    {
+      "name": "0033_per_permit_type_numbering.sql",
+      "sha256": "582a188626e17197f4cd8a2b6c31984db35f0baffd240c630c0bc194e8bc3f5d"
+    },
+    {
+      "name": "0034_permit_number_on_submission.sql",
+      "sha256": "2caec25a1ae237fb8fb0123fd1adb6792781294a2ccacfe81f5ece0f0fec36a3"
+    },
+    {
+      "name": "0035_dynamic_organization_management.sql",
+      "sha256": "eec14c81e9cee40a54043e3412005cfcc4525fc3a99ca7fc397a1eee6a484623"
+    },
+    {
+      "name": "0036_permit_applicant_company_contract.sql",
+      "sha256": "32e3af5c3815431987fbab4fbdda085a063e780be3b36f03c6a4d712550a46bd"
+    },
+    {
+      "name": "0037_organization_management_runtime_privileges.sql",
+      "sha256": "44dbdbacb0eb904686076d6d95dbdac72fd2df705c31c26b61c9c38890c575ae"
+    },
+    {
+      "name": "0038_organization_deactivation_runtime_privilege.sql",
+      "sha256": "2ffbfaa3b8c6159dce5df00864f1aabcb9bc093abf2ba5aa568d95f72254409f"
+    }
+  ],
+  "files": {
+    "0038_permit_schema.sql": "56f1be353476b3c88ed72e65469355527d53a97204331d07b666c2331f026b36",
+    "0038_permit_reference_data.sql": "85f37e5c0ba9454f7f40739b0b03403d3edab8dde3411ca6f60100f4e47e6181",
+    "0038_permit_privileges.sql": "154b96f256c271b31081fd204cbaa7aa1ae0be60b2627564490ccc291aacfda3"
+  }
+}

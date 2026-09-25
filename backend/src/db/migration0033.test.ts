@@ -661,7 +661,9 @@ test('the protected set names only tables that really exist after every migratio
   const sql = await readReset();
   const declared = declaredProtectedTables(sql);
 
-  // Every migration's DDL, plus the ledger table the runner itself creates.
+  // Every migration's DDL, plus the ledger table the runner itself creates
+  // (public.schema_migrations in the standalone database; the shared-database
+  // runner creates it as permit.schema_migrations).
   const migrationsDir = new URL('../../../database/migrations/', import.meta.url);
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith('.sql')).sort();
   let ddl = '';
@@ -669,7 +671,7 @@ test('the protected set names only tables that really exist after every migratio
   ddl += await readFile(new URL('../db/migrate.ts', import.meta.url), 'utf8');
 
   for (const table of declared) {
-    const created = new RegExp(`CREATE TABLE (IF NOT EXISTS )?(public\\.)?${table}\\b`).test(ddl);
+    const created = new RegExp(`CREATE TABLE (IF NOT EXISTS )?((public|permit)\\.)?${table}\\b`).test(ddl);
     assert.ok(created, `protected table "${table}" is never created by any migration`);
   }
 

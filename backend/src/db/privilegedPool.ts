@@ -69,7 +69,7 @@ export function isPrivilegedChannelConfigured(): boolean {
  * inside the database function, so no argument here - correct, buggy, or
  * hostile - can produce a CEO grant.
  */
-const RECORD_GRANT_SQL = 'SELECT public.record_site_manager_grant($1, $2, $3)';
+const RECORD_GRANT_SQL = 'SELECT permit.record_site_manager_grant($1, $2, $3)';
 
 export type PrivilegedGrantResult = { ok: true } | { ok: false; reason: 'unavailable' | 'refused' };
 
