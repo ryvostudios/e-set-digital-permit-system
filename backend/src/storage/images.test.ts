@@ -30,3 +30,15 @@ test('MIME spoofing, SVG, invalid bytes, oversize and image bombs fail closed', 
   const huge = await sharp({ create: { width: 4097, height: 64, channels: 3, background: '#ffffff' } }).png().toBuffer();
   await assert.rejects(validateBrandImage(huge, 'image/png', 'WEB_LOGO'));
 });
+
+test('a transparent PDF logo is flattened onto white at upload; website artwork keeps its transparency', async () => {
+  const transparent = await sharp({ create: { width: 300, height: 100, channels: 4, background: { r: 200, g: 0, b: 0, alpha: 0.25 } } }).png().toBuffer();
+  const pdfLogo = await validateBrandImage(transparent, 'image/png', 'PDF_LOGO');
+  const pdfMeta = await sharp(pdfLogo.bytes).metadata();
+  assert.equal(pdfMeta.hasAlpha, false, 'no alpha reaches the PDF renderer');
+  const { data } = await sharp(pdfLogo.bytes).raw().toBuffer({ resolveWithObject: true });
+  assert.ok(data[0]! > 200 && data[1]! > 150, 'composited onto white, not black');
+  assert.deepEqual(await validateBrandImage(transparent, 'image/png', 'PDF_LOGO'), pdfLogo, 'normalization is deterministic');
+  const webLogo = await validateBrandImage(transparent, 'image/png', 'WEB_LOGO');
+  assert.equal((await sharp(webLogo.bytes).metadata()).hasAlpha, true);
+});

@@ -222,6 +222,20 @@ Properties:
   interrupted one resumes on its reservation.
 - **Keyset-paginated.**
 - **Report contents:** counts and job ids only.
+- **Verification (Phase 6):** `npm run storage:migrate-legacy -- --verify`
+  re-reads every migrated copy through the registry. It is read-only and
+  reports any job whose Dropbox copy no longer matches its pinned hash; such
+  a copy is never served, because downloads fail closed. A copy altered
+  after migration is skipped by later copy runs, so this check is what
+  reports it. Restore it from Dropbox version history or re-upload the
+  legacy object.
+- Rehearsed end to end in
+  `src/scripts/migrateLegacyStorage.integration.test.ts`, using the real
+  registry and `DropboxProvider` over an in-memory Dropbox. It covers:
+  - a missing source, a network failure and a lost response;
+  - resume, including two overlapping runs;
+  - idempotency and registry reconciliation;
+  - an untouched source and a tampered destination.
 
 ## 6. CMS
 
@@ -306,8 +320,11 @@ reinstalled.
 
 ## 10. Open items
 
-- **Legacy copy not yet run:** run the old-storage migration during the
-  data-migration rehearsal.
+- **Legacy copy not yet run against real storage:** it is rehearsed with
+  fakes. The production run needs the approved cut-over window.
+- **Closed-permit PDF:** the `CLOSED_PDF` storage category is reserved, but
+  no closed-permit document is generated. Closure is recorded in the
+  lifecycle log, and the issued PDF stays immutable.
 - **Deployment requirement:** Permit's frontend and API must be same-site
   (same registrable domain or same origin via rewrite). The Phase 3
   cookie-session requirement also covers the OAuth callback.

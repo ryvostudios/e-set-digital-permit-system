@@ -13,6 +13,7 @@ import { PermitDocumentStorage } from '../storage/documentStorage.js';
  *
  *   npm run storage:migrate-legacy              # dry run (the default): reads and verifies only
  *   npm run storage:migrate-legacy -- --execute # copies
+ *   npm run storage:migrate-legacy -- --verify  # re-reads every migrated copy (read-only)
  *
  * For every GENERATED document job whose file still lives at its legacy
  * key (`permits/<permit>/<snapshot>.pdf`) and has no ready Dropbox copy:
@@ -88,6 +89,46 @@ export async function migrateLegacyDocuments(
   return report;
 }
 
+export interface MigratedVerificationReport {
+  examined: number;
+  verified: number;
+  /** Jobs whose Dropbox copy no longer matches the pinned file hash (never served: downloads fail closed). */
+  mismatched: string[];
+}
+
+/**
+ * Re-reads every migrated copy through the registry (which checks size and
+ * SHA-256 against its own record) and compares it with the job's pinned
+ * file hash. Detects a destination altered or lost after the copy: such a
+ * job is skipped by later copy runs (its registry row is ready), so this is
+ * the check that reports it. Read-only.
+ */
+export async function verifyMigratedDocuments(
+  deps: { query: QueryFn; target: DocumentStorageAdapter },
+  options: { batchSize?: number } = {},
+): Promise<MigratedVerificationReport> {
+  const report: MigratedVerificationReport = { examined: 0, verified: 0, mismatched: [] };
+  let after = '00000000-0000-0000-0000-000000000000';
+  for (;;) {
+    const batch = await deps.query<{ id: string; file_hash: string; file_id: string }>(
+      `SELECT j.id, j.file_hash, f.id AS file_id
+         FROM permit.permit_document_jobs j
+         JOIN permit.file_registry f ON f.document_job_id = j.id AND f.state = 'ready'
+        WHERE j.status = 'GENERATED' AND j.storage_path LIKE 'permits/%' AND j.id > $1
+        ORDER BY j.id
+        LIMIT $2`, [after, options.batchSize ?? 50]);
+    if (batch.rows.length === 0) break;
+    for (const job of batch.rows) {
+      after = job.id;
+      report.examined += 1;
+      const copy = await deps.target.download(`file:${job.file_id}`);
+      if (copy.ok && computeFileHash(copy.data) === job.file_hash) report.verified += 1;
+      else report.mismatched.push(job.id);
+    }
+  }
+  return report;
+}
+
 async function migrateOne(
   job: LegacyJob,
   dryRun: boolean,
@@ -108,6 +149,12 @@ async function migrateOne(
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--verify')) {
+    const report = await verifyMigratedDocuments({ query, target: new PermitDocumentStorage(null) });
+    console.log(JSON.stringify(report, null, 2));
+    if (report.mismatched.length > 0) process.exitCode = 2;
+    return;
+  }
   const execute = process.argv.includes('--execute');
   const legacy = createSupabaseDocumentStorageAdapter();
   if (!legacy) throw new Error('legacy storage configuration is incomplete');
