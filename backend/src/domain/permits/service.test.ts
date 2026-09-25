@@ -1225,6 +1225,13 @@ class FakeDb {
       return { rows: [] };
     }
 
+    // Issuance captures the Permit CMS branding into the snapshot. A fresh
+    // CMS: the default organization name and no active PDF logos.
+    if (sql.startsWith('SELECT organization_name FROM permit.cms_settings')) {
+      return { rows: [{ organization_name: 'E-Set Engineering Services' }] };
+    }
+    if (sql.includes('FROM permit.cms_logo_assets')) return { rows: [] };
+
     throw new Error(`FakeDb: unhandled query: ${sql}`);
   };
 

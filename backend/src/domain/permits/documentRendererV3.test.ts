@@ -67,12 +67,14 @@ test('the same snapshot rendered twice through PDFKIT_V3 is byte-identical', asy
   }
 });
 
-test('V3 renders a real PDF and is the identity new jobs pin to', async () => {
+test('V3 renders a real PDF; V4 is the identity new jobs pin to, and without branding prints the V3 bytes', async () => {
   const pdf = await generateIssuedPermitPdf(makeV2PdfTestSnapshot('WTG_WORK'), 'PDFKIT_V3');
   assert.equal(pdf.subarray(0, 5).toString(), '%PDF-');
-  assert.equal(CURRENT_RENDERER_VERSION, 'PDFKIT_V3');
+  assert.equal(CURRENT_RENDERER_VERSION, 'PDFKIT_V4');
   // The default is the current renderer, so a caller that does not pin
-  // one gets what a new job would get.
+  // one gets what a new job would get. A snapshot carrying no branding
+  // (every snapshot taken before the CMS existed) prints exactly the V3
+  // document under V4 as well.
   const byDefault = await generateIssuedPermitPdf(makeV2PdfTestSnapshot('WTG_WORK'));
   assert.ok(byDefault.equals(pdf));
 });
@@ -101,11 +103,12 @@ test('a V1-pinned job renders through the legacy path, not the new one', async (
   assert.ok(!v1.equals(v3));
 });
 
-test('only the three known renderer identities are accepted', () => {
+test('only the four known renderer identities are accepted', () => {
   assert.equal(isRendererVersion('PDFKIT_V1'), true);
   assert.equal(isRendererVersion('PDFKIT_V2'), true);
   assert.equal(isRendererVersion('PDFKIT_V3'), true);
-  assert.equal(isRendererVersion('PDFKIT_V4'), false);
+  assert.equal(isRendererVersion('PDFKIT_V4'), true);
+  assert.equal(isRendererVersion('PDFKIT_V5'), false);
   assert.equal(isRendererVersion('HAND_ROLLED'), false);
   assert.equal(isRendererVersion(null), false);
 });

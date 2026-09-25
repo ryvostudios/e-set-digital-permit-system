@@ -22,7 +22,7 @@ export function setSessionEndedHandler(handler: SessionEndedHandler): void {
 }
 
 export interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined>;
   signal?: AbortSignal;
@@ -55,6 +55,55 @@ async function parseBody(response: Response): Promise<unknown> {
   } catch {
     return null;
   }
+}
+
+/** An absolute URL for a PUBLIC, unauthenticated API resource (branding artwork, the manifest). */
+export function publicApiUrl(path: string): string {
+  return `${API_BASE_URL}${API_PREFIX}${path}`;
+}
+
+/**
+ * A PUBLIC, unauthenticated JSON read (the branding endpoint). No cookie is
+ * sent and no session handling applies; any failure resolves to null so a
+ * caller can fall back to bundled content.
+ */
+export async function publicRequest(path: string): Promise<unknown> {
+  try {
+    const response = await fetch(publicApiUrl(path), { credentials: 'omit', headers: { accept: 'application/json' } });
+    return response.ok ? await parseBody(response) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Uploads raw bytes (a CMS image) with their declared type. Same cookie
+ * credentials and error mapping as every other call; the server decodes
+ * and re-encodes the image and never trusts this declared type alone.
+ */
+export async function apiUpload<T>(
+  path: string,
+  file: Blob,
+  query: Record<string, string>,
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(buildUrl(path, query), {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': file.type },
+      credentials: 'include',
+      body: file,
+    });
+  } catch {
+    throw toNetworkError();
+  }
+  const parsed = await parseBody(response);
+  if (!response.ok) {
+    const apiError = toApiError(response.status, parsed, response.headers.get('x-request-id'));
+    if (apiError.isSessionEnded) onSessionEnded();
+    throw apiError;
+  }
+  return parsed as T;
 }
 
 /** Performs one authenticated API call and returns its parsed JSON body. */

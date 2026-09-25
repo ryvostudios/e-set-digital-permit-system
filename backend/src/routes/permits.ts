@@ -603,11 +603,6 @@ permitsRouter.get('/permits/:id/pdf', requireAuth, async (req: Request, res: Res
   }
 
   const storage = resolveDocumentStorageAdapter();
-  const preflight = storage.preflight ? await storage.preflight() : { ok: true as const };
-  if (!preflight.ok) {
-    res.status(503).json({ error: 'storage_unavailable', message: 'The permit document could not be retrieved right now' });
-    return;
-  }
   const download = await storage.download(lookup.job.storage_path);
   if (!download.ok) {
     res.status(503).json({ error: 'storage_unavailable', message: 'The permit document could not be retrieved right now' });

@@ -13,6 +13,7 @@ import { authRouter } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { permitsRouter } from './routes/permits.js';
+import { brandingRouter, cmsRouter } from './routes/cms.js';
 
 // Request bodies here are small, structured JSON (permit/JSA form
 // fields) - there is no file upload or bulk-import endpoint in this
@@ -58,6 +59,8 @@ export function createApp(): Express {
   app.use('/api/v1', authRouter);
   app.use('/api/v1', accountsRouter);
   app.use('/api/v1', permitsRouter);
+  app.use('/api/v1', cmsRouter);
+  app.use('/api/v1', brandingRouter);
   app.use('/api/v1', notificationsRouter);
 
   // Any request that reached here matched no route above - an unknown

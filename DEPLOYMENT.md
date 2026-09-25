@@ -9,6 +9,13 @@
 > operates only on schema `permit` and refuses to run against the
 > standalone database, so do not deploy it there.
 >
+> **Permit storage and CMS (Phase 4).** Issued PDFs and CMS images go to
+> Permit's own Dropbox App Folder (`DROPBOX_CLIENT_ID`,
+> `DROPBOX_CLIENT_SECRET`, `DROPBOX_OAUTH_ORIGIN`,
+> `PERMIT_STORAGE_MASTER_KEY`, `PERMIT_STORAGE_KEY_VERSION`; server-only).
+> The legacy `SUPABASE_STORAGE_*` settings are kept only to read and copy
+> historical PDFs. See [docs/STORAGE_AND_CMS.md](docs/STORAGE_AND_CMS.md).
+>
 > The Phase 3 branch removes runtime Supabase Auth. Its new auth design and
 > fresh-versus-existing-data boundary are in
 > [docs/PERMIT_OWNED_AUTH.md](docs/PERMIT_OWNED_AUTH.md). The legacy Auth

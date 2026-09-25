@@ -39,6 +39,7 @@ export const CAPABILITIES = {
   close: 'permit.close',
   renew: 'permit.renew',
   viewAll: 'permit.view_all',
+  cmsManage: 'permit.cms.manage',
 } as const;
 
 export type Capability = (typeof CAPABILITIES)[keyof typeof CAPABILITIES];
@@ -92,6 +93,14 @@ export interface Capabilities {
    * amend a record.
    */
   canCorrectRecords: boolean;
+  /**
+   * The Permit CMS (branding, content, audit): the CEO, or a person the
+   * CEO explicitly granted `permit.cms.manage`. Never a Site Manager, CRO,
+   * HSE reviewer or any Team + Position by role.
+   */
+  canManageCms: boolean;
+  /** Permit Dropbox integration: CEO only, even for a CMS delegate. */
+  canManageStorage: boolean;
   /** Permit application. Privileged accounts may apply; E-SET E-BOP CRO may not (it holds neither capability). */
   canApplyForPermits: boolean;
   /** Whether the CRO review queue is worth showing at all. */
@@ -126,6 +135,8 @@ export function deriveCapabilities(user: CurrentUser): Capabilities {
     canManageOrganization: isPrivileged,
     canViewAdministrativeAudit: isPrivileged,
     canCorrectRecords: isCeo,
+    canManageCms: isCeo || has(CAPABILITIES.cmsManage),
+    canManageStorage: isCeo,
     // Matches `requirePermitApplicant`: the capability, OR a privileged
     // system role. E-SET E-BOP CRO holds neither `permit.create` nor
     // `permit.submit` (migration 0020 excludes it), so CRO cannot apply.

@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { AppRouter } from './app/AppRouter';
 import { AuthProvider } from './auth/AuthProvider';
+import { applyShellBranding, loadPublicBranding } from './branding/webBranding';
 import { registerServiceWorker } from './pwa/register';
 import { ToastProvider } from './ui/Toast';
 import './styles/tokens.css';
@@ -24,3 +25,7 @@ createRoot(container).render(
 // Installed only in a production build. It caches the application SHELL
 // and nothing else - see `public/sw.js`.
 registerServiceWorker();
+
+// CMS favicon / installed-app icon. The static links in index.html stay in
+// place unless the public branding endpoint answers with a published icon.
+void loadPublicBranding().then((branding) => applyShellBranding(branding));

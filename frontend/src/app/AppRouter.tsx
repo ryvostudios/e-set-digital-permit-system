@@ -14,6 +14,7 @@ import { HseQueuePage } from '../features/review/HseQueuePage';
 import { CreateEmployeePage } from '../features/admin/CreateEmployeePage';
 import { EmployeeDetailPage } from '../features/admin/EmployeeDetailPage';
 import { EmployeeListPage } from '../features/admin/EmployeeListPage';
+import { CmsPage } from '../features/admin/CmsPage';
 import { AuditLogsPage } from '../features/admin/AuditLogsPage';
 import { OrganizationPage } from '../features/admin/OrganizationPage';
 import { SiteManagersPage } from '../features/admin/SiteManagersPage';
@@ -139,6 +140,7 @@ export function AppRouter() {
           <Route path={ROUTES.organization} element={<OrganizationPage />} />
           <Route path={ROUTES.siteManagers} element={<SiteManagersPage />} />
           <Route path={ROUTES.auditLogs} element={<AuditLogsPage />} />
+          <Route path={ROUTES.cms} element={<CmsPage />} />
           {/*
             Visual-QA harness for the authoritative documents, mounted ONLY
             in the e2e build. The production bundle has no such route: the

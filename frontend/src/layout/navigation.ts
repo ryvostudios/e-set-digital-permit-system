@@ -76,6 +76,9 @@ export function buildNavigation(capabilities: Capabilities): NavGroup[] {
     // is a different thing entirely. The label has to say which one.
     administration.push({ to: ROUTES.siteManagers, label: 'System Site Managers', icon: 'key' });
   }
+  if (capabilities.canManageCms) {
+    administration.push({ to: ROUTES.cms, label: 'CMS', icon: 'key', matchPrefix: ROUTES.cms });
+  }
   if (capabilities.canViewAdministrativeAudit) {
     administration.push({ to: ROUTES.auditLogs, label: 'Audit Logs', icon: 'shield' });
   }

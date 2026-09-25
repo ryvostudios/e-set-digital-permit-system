@@ -1,3 +1,6 @@
+import { Alert } from '../../ui/Feedback';
+import { BrandLogo } from '../../branding/BrandLogo';
+import { usePublicBranding } from '../../branding/webBranding';
 import { useState, type FormEvent } from 'react';
 import { SignInError } from '../../auth/AuthProvider';
 import { useAuth } from '../../auth/useAuth';
@@ -26,6 +29,7 @@ import { Checkbox, FormError, Input, PasswordInput } from '../../ui/Field';
  */
 export function LoginPage() {
   const { signIn } = useAuth();
+  const branding = usePublicBranding();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(false);
@@ -62,14 +66,7 @@ export function LoginPage() {
               Decorative: the name sits immediately beside it, so alt
               text here would announce the company twice.
             */}
-            <img
-              className="centered-page__brand-logo"
-              src="/branding/eset-logo.png"
-              alt=""
-              width={224}
-              height={256}
-              data-testid="login-brand-logo"
-            />
+            <BrandLogo className="centered-page__brand-logo" width={224} height={256} data-testid="login-brand-logo" />
             <span>
               <span className="centered-page__brand-name">E-SET Digital Permit System</span>
               <span className="centered-page__brand-tag">Permit to Work</span>
@@ -81,6 +78,12 @@ export function LoginPage() {
             <p className="muted" style={{ marginBottom: 'var(--space-5)' }}>
               Use the work account issued to you.
             </p>
+            {branding.signInNotice ? (
+              <div style={{ marginBottom: 'var(--space-4)' }}>
+                {/* Plain text from the Permit CMS, rendered as text - never as HTML. */}
+                <Alert tone="info">{branding.signInNotice}</Alert>
+              </div>
+            ) : null}
 
             <form onSubmit={handleSubmit} noValidate className="stack">
               {error ? <FormError message={error} /> : null}

@@ -27,7 +27,7 @@ import { recordAccountAudit, type AccountsServiceDeps } from './service.js';
  */
 
 /** The one capability that may currently be granted to an individual. Kept as a constant so route validation and the database agree by construction. */
-export const INDIVIDUALLY_GRANTABLE_CAPABILITIES = ['permit.view_all'] as const;
+export const INDIVIDUALLY_GRANTABLE_CAPABILITIES = ['permit.view_all', 'permit.cms.manage'] as const;
 export type IndividualCapability = (typeof INDIVIDUALLY_GRANTABLE_CAPABILITIES)[number];
 
 /**

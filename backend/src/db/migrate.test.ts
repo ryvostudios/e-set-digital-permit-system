@@ -41,13 +41,16 @@ async function refusal(work: Promise<unknown>): Promise<string> {
 test('first run installs the baseline, records 0001-0038 with their hashes, then applies 0039+; re-runs are no-ops', async () => {
   const db = await provisionedDatabase();
   try {
-    assert.equal(await runAsMigrator(db), 39);
+    assert.equal(await runAsMigrator(db), 42);
     const ledger = await db.query<{ name: string; applied_via: string; content_sha256: string }>(
       'SELECT name, applied_via, content_sha256 FROM permit.schema_migrations ORDER BY name');
-    assert.equal(ledger.rows.length, 39);
+    assert.equal(ledger.rows.length, 42);
     assert.equal(ledger.rows[0]!.name, '0001_revoke_execute_rls_auto_enable.sql');
     assert.equal(ledger.rows[37]!.name, '0038_organization_deactivation_runtime_privilege.sql');
     assert.equal(ledger.rows[38]!.name, '0039_permit_owned_authentication.sql');
+    assert.equal(ledger.rows[39]!.name, '0040_permit_storage.sql');
+    assert.equal(ledger.rows[40]!.name, '0041_permit_cms.sql');
+    assert.equal(ledger.rows[41]!.name, '0042_permit_renderer_v4.sql');
     for (const [index, row] of ledger.rows.entries()) {
       assert.equal(row.applied_via, index < 38 ? 'baseline:permit_0038_v2' : 'migration');
       assert.equal(row.content_sha256, contentSha256(await readFile(path.join(MIGRATIONS_DIR, row.name), 'utf8')));
@@ -117,19 +120,19 @@ test('later migrations apply in their own transaction and are recorded with thei
   const repo = await scratchRepo();
   const db = await installedDatabase({ baselineDir: BASELINE_DIR });
   try {
-    await writeFile(path.join(repo.migrations, '0040_example.sql'), `
+    await writeFile(path.join(repo.migrations, '0042_example.sql'), `
       CREATE TABLE permit.example (id int PRIMARY KEY);
       ALTER TABLE permit.example ENABLE ROW LEVEL SECURITY;
     `);
     assert.equal(await runAsMigrator(db, { migrationsDir: repo.migrations, baselineDir: repo.baseline }), 1);
     const row = await db.query<{ applied_via: string }>(
-      `SELECT applied_via FROM permit.schema_migrations WHERE name = '0040_example.sql'`);
+      `SELECT applied_via FROM permit.schema_migrations WHERE name = '0042_example.sql'`);
     assert.deepEqual(row.rows, [{ applied_via: 'migration' }]);
 
     // An applied migration may not be edited afterwards.
-    await writeFile(path.join(repo.migrations, '0040_example.sql'), '-- rewritten history');
+    await writeFile(path.join(repo.migrations, '0042_example.sql'), '-- rewritten history');
     assert.match(await refusal(runAsMigrator(db, { migrationsDir: repo.migrations, baselineDir: repo.baseline })),
-      /0040_example\.sql was modified after it was applied/);
+      /0042_example\.sql was modified after it was applied/);
   } finally {
     await db.close();
     await repo.cleanup();
@@ -138,13 +141,13 @@ test('later migrations apply in their own transaction and are recorded with thei
 
 test('a migration that breaks the schema boundary is rolled back and not recorded', async () => {
   const cases: [string, string, RegExp][] = [
-    ['0040_public_table.sql', 'CREATE TABLE public.leak (id int);', /permission denied/],
-    ['0040_unprotected.sql', 'CREATE TABLE permit.unprotected (id int);', /RLS is disabled on permit tables: unprotected/],
-    ['0040_public_grant.sql', 'GRANT SELECT ON permit.permits TO PUBLIC;', /PUBLIC or a Supabase browser role/],
-    ['0040_browser_grant.sql', 'GRANT SELECT ON permit.permits TO anon;', /PUBLIC or a Supabase browser role/],
-    ['0040_unpolicied.sql', `CREATE TABLE permit.extra (id int); ALTER TABLE permit.extra ENABLE ROW LEVEL SECURITY;
+    ['0042_public_table.sql', 'CREATE TABLE public.leak (id int);', /permission denied/],
+    ['0042_unprotected.sql', 'CREATE TABLE permit.unprotected (id int);', /RLS is disabled on permit tables: unprotected/],
+    ['0042_public_grant.sql', 'GRANT SELECT ON permit.permits TO PUBLIC;', /PUBLIC or a Supabase browser role/],
+    ['0042_browser_grant.sql', 'GRANT SELECT ON permit.permits TO anon;', /PUBLIC or a Supabase browser role/],
+    ['0042_unpolicied.sql', `CREATE TABLE permit.extra (id int); ALTER TABLE permit.extra ENABLE ROW LEVEL SECURITY;
                              GRANT SELECT ON permit.extra TO permit_runtime;`, /no RLS policy on: extra/],
-    ['0040_other_schema.sql', 'CREATE SCHEMA sideways;', /permission denied/],
+    ['0042_other_schema.sql', 'CREATE SCHEMA sideways;', /permission denied/],
   ];
   for (const [file, sql, expected] of cases) {
     const repo = await scratchRepo();

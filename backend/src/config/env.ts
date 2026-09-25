@@ -123,6 +123,14 @@ export const envSchema = z
     SUPABASE_STORAGE_ACCESS_KEY_ID: z.string().min(1).optional(),
     SUPABASE_STORAGE_SECRET_ACCESS_KEY: z.string().min(1).optional(),
     SUPABASE_DOCUMENT_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).default('issued-permit-documents'),
+    // Permit-owned Dropbox App Folder. These are server-only; no browser
+    // variable carries a token or client secret. The old S3 settings above
+    // remain read-only for historical objects until offline migration.
+    PERMIT_STORAGE_MASTER_KEY: z.string().regex(/^[A-Za-z0-9+/]{43}=$/).optional(),
+    PERMIT_STORAGE_KEY_VERSION: z.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default('1'),
+    DROPBOX_CLIENT_ID: z.string().min(1).optional(),
+    DROPBOX_CLIENT_SECRET: z.string().min(1).optional(),
+    DROPBOX_OAUTH_ORIGIN: z.string().url().optional(),
 
     // The IANA time zone permit validity is evaluated in (next-midnight
     // expiry). No default - the site's actual timezone must be configured
@@ -267,6 +275,20 @@ export const envSchema = z
         path: ['SUPABASE_STORAGE_ENDPOINT'],
         message: 'all Supabase Storage S3 credential settings must be configured together',
       });
+    }
+    if ((value.DROPBOX_CLIENT_ID || value.DROPBOX_CLIENT_SECRET) && !value.PERMIT_STORAGE_MASTER_KEY) {
+      ctx.addIssue({code:z.ZodIssueCode.custom,path:['PERMIT_STORAGE_MASTER_KEY'],message:'Permit storage encryption is required when Dropbox application credentials are configured'});
+    }
+    if (value.PERMIT_STORAGE_MASTER_KEY && Buffer.from(value.PERMIT_STORAGE_MASTER_KEY,'base64').length !== 32) {
+      ctx.addIssue({code:z.ZodIssueCode.custom,path:['PERMIT_STORAGE_MASTER_KEY'],message:'Permit storage key must decode to 32 bytes'});
+    }
+    if (value.DROPBOX_OAUTH_ORIGIN) {
+      let origin: URL | null = null;
+      try { origin = new URL(value.DROPBOX_OAUTH_ORIGIN); } catch { /* rejected below */ }
+      if (!origin || origin.origin !== value.DROPBOX_OAUTH_ORIGIN || origin.username || origin.password ||
+          (origin.protocol !== 'https:' && !(value.NODE_ENV !== 'production' && origin.protocol === 'http:' && ['localhost','127.0.0.1'].includes(origin.hostname)))) {
+        ctx.addIssue({code:z.ZodIssueCode.custom,path:['DROPBOX_OAUTH_ORIGIN'],message:'Dropbox callback origin must be a bare HTTPS origin (loopback HTTP is local only)'});
+      }
     }
 
     if (value.NODE_ENV === 'production' && !value.DB_SSL) {

@@ -909,7 +909,7 @@ accountsRouter.get(
   },
 );
 
-/** Grant an individual permission (currently only `permit.view_all`). */
+/** Grant one of the closed-set individual permissions. CMS delegation is CEO-only. */
 accountsRouter.post(
   '/admin/employees/:id/permissions',
   requireAuth,
@@ -941,6 +941,17 @@ async function changeEmployeePermission(
   if (!body.success) {
     sendValidationError(res, body.error.issues);
     return;
+  }
+  if (body.data.capability === 'permit.cms.manage') {
+    try {
+      if (!(await resolvePrivilegedAccess(actorUserId)).has('CEO')) {
+        res.status(403).json({ error: 'forbidden', message: 'CEO authority required for CMS delegation' });
+        return;
+      }
+    } catch {
+      res.status(403).json({ error: 'forbidden', message: 'CEO authority required for CMS delegation' });
+      return;
+    }
   }
   const deps = defaultAccountsServiceDeps();
   const result = await setUserCapabilityGrant(

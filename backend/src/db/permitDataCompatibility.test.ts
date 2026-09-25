@@ -70,6 +70,18 @@ async function assign(db: PGlite, user: string, name: string, team: string, posi
 
 /** Drives real permits through the real services in the standalone schema. */
 async function produceHistory(db: PGlite): Promise<void> {
+  // The current issuance code captures the Permit CMS branding (Phase 4).
+  // A standalone 0038 database has no CMS, so give it exactly the state a
+  // fresh CMS has - an organization name and no logos - in the schema the
+  // code reads. These tables are not part of the copied history.
+  await db.exec(`
+    CREATE SCHEMA permit;
+    CREATE TABLE permit.cms_settings (singleton boolean PRIMARY KEY, organization_name text NOT NULL);
+    INSERT INTO permit.cms_settings VALUES (true, 'E-Set Engineering Services');
+    CREATE TABLE permit.file_registry (id uuid PRIMARY KEY, sha256 text NOT NULL, state text NOT NULL);
+    CREATE TABLE permit.cms_logo_assets (file_id uuid, display_label text, purpose text, active boolean,
+      display_order int, applicable_document_types text[]);
+  `);
   await db.exec('SET search_path = public, pg_catalog');
   await assign(db, APPLICANT, 'Applicant One', 'WTG', 'Technician');
   await assign(db, CRO, 'Control Room', 'E-BOP', 'CRO');
@@ -115,7 +127,7 @@ async function produceHistory(db: PGlite): Promise<void> {
 }
 
 /** Permit tables ordered so every foreign-key parent precedes its children. */
-async function dependencyOrder(db: PGlite): Promise<string[]> {
+async function dependencyOrder(db: PGlite, historicalTables: string[]): Promise<string[]> {
   const result = await db.query<{ child: string; parent: string }>(`
     SELECT c.relname AS child, p.relname AS parent FROM pg_constraint k
       JOIN pg_class c ON c.oid = k.conrelid JOIN pg_class p ON p.oid = k.confrelid
@@ -123,7 +135,10 @@ async function dependencyOrder(db: PGlite): Promise<string[]> {
        AND p.relnamespace = 'permit'::regnamespace AND c.oid <> p.oid`);
   const all = (await db.query<{ relname: string }>(`
     SELECT relname FROM pg_class WHERE relnamespace = 'permit'::regnamespace AND relkind = 'r'
-       AND relname NOT IN ('schema_migrations', 'users', 'user_sessions') ORDER BY 1`)).rows.map((r) => r.relname);
+       AND relname NOT IN ('schema_migrations', 'users', 'user_sessions') ORDER BY 1`)).rows
+    .map((r) => r.relname)
+    // Only the standalone 0038 tables carry history; Phase 4 tables start empty.
+    .filter((name) => historicalTables.includes(name));
   const ordered: string[] = [];
   while (ordered.length < all.length) {
     const ready = all.filter((t) => !ordered.includes(t) &&
@@ -155,7 +170,9 @@ before(async () => {
   source = await historicalDatabase();
   await produceHistory(source);
   target = await installedDatabase({ baselineReferenceData: false });
-  tables = await dependencyOrder(target);
+  const historicalTables = (await source.query<{ relname: string }>(
+    `SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'`)).rows.map((r) => r.relname);
+  tables = await dependencyOrder(target, historicalTables);
 
   // Synthetic credentials only: UUIDs and normalized login identity precede
   // all referencing data in the destination. Nothing reads a real Auth host.
@@ -217,7 +234,15 @@ test('the standalone history is non-trivial', async () => {
 
 test('every row of every Permit table arrives byte-for-byte: ids, numbers, timestamps, audit, signatures, snapshots', async () => {
   for (const table of tables) {
-    assert.deepEqual(await tableRows(target, 'permit', table), await tableRows(source, 'public', table), table);
+    let rows = await tableRows(target, 'permit', table);
+    if (table === 'capabilities') {
+      // Migration 0041 adds the Permit CMS capability; the standalone
+      // history never had it. Everything else must match exactly.
+      const added = rows.filter((row) => (row as { name: string }).name === 'permit.cms.manage');
+      assert.equal(added.length, 1, 'exactly one capability added after 0038');
+      rows = rows.filter((row) => (row as { name: string }).name !== 'permit.cms.manage');
+    }
+    assert.deepEqual(rows, await tableRows(source, 'public', table), table);
   }
 });
 

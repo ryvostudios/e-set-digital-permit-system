@@ -1,5 +1,6 @@
 ﻿import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import type { QueryFn } from '../../db/pool.js';
 import {
   buildIssuedPermitSnapshot,
@@ -11,7 +12,6 @@ import {
   getDocumentForPermit,
   hasExpectedFileHash,
   hasValidSnapshotHash,
-  isValidPrivateDocumentBucket,
   processPendingDocumentJobs,
   unconfiguredDocumentStorageAdapter,
   type DocumentStorageAdapter,
@@ -282,14 +282,9 @@ test('snapshot hash versions verify current and legacy contracts, reject mutatio
   assert.equal(hasValidSnapshotHash(snapshot, current, 'UNKNOWN'), false);
 });
 
-test('private document bucket validation fails closed for missing/public/wrong/unsafe configuration', () => {
-  const valid = { id: 'issued-permit-documents', public: false, file_size_limit: 1_000_000, allowed_mime_types: ['application/pdf'] };
-  assert.equal(isValidPrivateDocumentBucket(valid, valid.id), true);
-  assert.equal(isValidPrivateDocumentBucket(undefined, valid.id), false);
-  assert.equal(isValidPrivateDocumentBucket({ ...valid, public: true }, valid.id), false);
-  assert.equal(isValidPrivateDocumentBucket({ ...valid, id: 'wrong' }, valid.id), false);
-  assert.equal(isValidPrivateDocumentBucket({ ...valid, file_size_limit: null }, valid.id), false);
-  assert.equal(isValidPrivateDocumentBucket({ ...valid, allowed_mime_types: ['image/png'] }, valid.id), false);
+test('document storage readiness never reads Supabase-managed storage tables', () => {
+  const source=readFileSync(new URL('./documents.ts',import.meta.url),'utf8');
+  assert.doesNotMatch(source,/\bFROM\s+storage\.buckets\b/i);
 });
 
 test('download integrity accepts exactly the immutable PDF hash and rejects missing/mismatched hashes', () => {
@@ -508,4 +503,57 @@ test('a GENERATED immutable document job is never claimed or regenerated', async
   const result = await processPendingDocumentJobs({ query: db.query }, storage);
   assert.equal(result.processed, 0);
   assert.equal(uploads, 0);
+});
+
+// ---------------------------------------------------------------------
+// PDFKIT_V4: branding frozen at issuance, logos read by immutable id + hash
+// ---------------------------------------------------------------------
+
+async function rgbLogo(): Promise<Buffer> {
+  const sharp = (await import('sharp')).default;
+  return sharp({ create: { width: 300, height: 100, channels: 3, background: '#1a4f9c' } }).png().toBuffer();
+}
+
+test('processPendingDocumentJobs: a V4 job prints the snapshot logos, read by file id and verified hash', async () => {
+  const db = new FakeDocumentsDb();
+  const logo = await rgbLogo();
+  const sha256 = computeFileHash(logo);
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet(), {
+    organizationName: 'E-Set Engineering Services', logos: [{ fileId: '70000000-0000-4000-8000-000000000001', sha256, label: 'E-SET' }],
+  });
+  await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
+  const requested: [string, string][] = [];
+  let uploaded: Buffer | null = null;
+  const result = await processPendingDocumentJobs({
+    query: db.query,
+    readLogo: async (fileId, hash) => { requested.push([fileId, hash]); return logo; },
+  }, {
+    async upload(_path, data) { uploaded = data; return { ok: true }; },
+    async download() { return { ok: false, code: 'STORAGE_DOWNLOAD_FAILED' }; },
+  });
+  assert.equal(result.generated, 1);
+  assert.deepEqual(requested, [['70000000-0000-4000-8000-000000000001', sha256]]);
+  assert.equal(db.jobs[0]?.renderer_version, 'PDFKIT_V4');
+  assert.match((uploaded as Buffer | null)?.toString('latin1') ?? '', /\/Subtype\s*\/Image/);
+});
+
+test('processPendingDocumentJobs: an unavailable logo fails the attempt BEFORE any identity is pinned', async () => {
+  const db = new FakeDocumentsDb();
+  const snapshot = buildIssuedPermitSnapshot(makePermit(), makeJsa(), null, makeIssuanceEvent(), makeSignatureSet(), {
+    organizationName: 'E-Set', logos: [{ fileId: '70000000-0000-4000-8000-000000000001', sha256: 'a'.repeat(64), label: 'E-SET' }],
+  });
+  await createIssuedDocumentSnapshot(db.query, { permitId: 'permit-1', sourceEventId: 'event-1', snapshot });
+  let uploads = 0;
+  const result = await processPendingDocumentJobs({
+    query: db.query,
+    readLogo: async () => { throw new Error('Dropbox unavailable'); },
+  }, {
+    async upload() { uploads += 1; return { ok: true }; },
+    async download() { return { ok: false, code: 'STORAGE_DOWNLOAD_FAILED' }; },
+  });
+  assert.equal(result.failed, 1);
+  assert.equal(uploads, 0);
+  assert.equal(db.jobs[0]?.status, 'FAILED');
+  assert.equal(db.jobs[0]?.renderer_version, null, 'no renderer identity pinned');
+  assert.equal(db.jobs[0]?.expected_file_hash, null, 'no file hash pinned: the retry renders the true document');
 });

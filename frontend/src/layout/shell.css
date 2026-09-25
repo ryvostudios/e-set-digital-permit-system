@@ -53,6 +53,9 @@
  * squeezing it when the name wraps.
  */
 .brand__logo {
+  /* A CMS logo may be wide: bound it and never distort it. */
+  max-width: 9rem;
+  object-fit: contain;
   flex: none;
   height: 34px;
   width: auto;
@@ -430,6 +433,8 @@
  * supplied.
  */
 .centered-page__brand-logo {
+  max-width: 12rem;
+  object-fit: contain;
   flex: none;
   height: 42px;
   width: auto;

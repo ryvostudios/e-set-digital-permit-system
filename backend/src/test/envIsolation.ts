@@ -43,6 +43,12 @@ const OPERATOR_ONLY_KEYS = [
   'BOOTSTRAP_CEO_EMAIL',
   'BOOTSTRAP_CEO_PASSWORD',
   'BOOTSTRAP_CEO_NAME',
+  // Permit Dropbox (Phase 4). A developer's real app credentials or storage
+  // key must never reach a test; tests that need them inject synthetic ones.
+  'DROPBOX_CLIENT_ID',
+  'DROPBOX_CLIENT_SECRET',
+  'DROPBOX_OAUTH_ORIGIN',
+  'PERMIT_STORAGE_MASTER_KEY',
 ] as const;
 
 /**

@@ -35,7 +35,11 @@ const RUNTIME_TABLES: Record<string, string[]> = {
   account_audit_events: ['INSERT', 'SELECT'],
   app_user_access: ['INSERT', 'SELECT', 'UPDATE'],
   capabilities: ['SELECT'],
+  cms_audit_events: ['SELECT'],
+  cms_logo_assets: ['INSERT', 'SELECT'],
+  cms_settings: ['SELECT'],
   companies: ['INSERT', 'SELECT'],
+  file_registry: ['INSERT', 'SELECT'],
   issued_document_snapshot_integrity: ['INSERT', 'SELECT'],
   issued_document_snapshots: ['INSERT', 'SELECT'],
   jsas: ['INSERT', 'SELECT'],
@@ -49,6 +53,10 @@ const RUNTIME_TABLES: Record<string, string[]> = {
   positions: ['INSERT', 'SELECT'],
   privileged_access_events: ['SELECT'],
   privileged_identities: ['INSERT', 'SELECT'],
+  storage_audit_events: ['SELECT'],
+  storage_connections: ['INSERT', 'SELECT', 'UPDATE'],
+  storage_oauth_states: ['DELETE', 'INSERT', 'SELECT'],
+  storage_selection: ['SELECT', 'UPDATE'],
   team_position_capabilities: ['SELECT'],
   team_positions: ['INSERT', 'SELECT'],
   teams: ['INSERT', 'SELECT'],
@@ -60,6 +68,9 @@ const RUNTIME_TABLES: Record<string, string[]> = {
 };
 const RUNTIME_COLUMN_UPDATES: Record<string, string[]> = {
   companies: ['deactivated_at'],
+  cms_logo_assets: ['active', 'applicable_document_types', 'display_order'],
+  cms_settings: ['organization_name', 'pwa_icon_asset_id', 'revision', 'sign_in_notice', 'updated_at', 'updated_by', 'web_logo_asset_id'],
+  file_registry: ['remote_id', 'state'],
   jsas: ['form_payload', 'form_version', 'job_description', 'site_or_wtg'],
   notifications: ['read_at'],
   permit_document_jobs: ['attempt_count', 'claim_token', 'claimed_at', 'expected_file_hash', 'file_hash',
@@ -80,6 +91,8 @@ const RUNTIME_COLUMN_SELECTS: Record<string, string[]> = {
 };
 const RUNTIME_COLUMN_INSERTS: Record<string, string[]> = {
   user_sessions: ['expires_at', 'token_hash', 'user_id'],
+  cms_audit_events: ['actor_user_id', 'asset_id', 'detail', 'event_type'],
+  storage_audit_events: ['actor_user_id', 'connection_id', 'event_type'],
   users: ['email', 'password_hash', 'password_scheme'],
 };
 const RUNTIME_SEQUENCES = ['account_audit_events_ordinal_seq', 'jsa_number_seq', 'organization_audit_events_ordinal_seq',

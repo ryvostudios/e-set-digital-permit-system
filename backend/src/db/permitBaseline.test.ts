@@ -230,7 +230,9 @@ test('0039 re-creates every deferred user reference against permit.users, unchan
     .map((c) => ({ ...c, definition: c.definition.replace('REFERENCES auth.users(id)', 'REFERENCES permit.users(id)') }));
   const after0039 = await snapshot(migrated, 'permit');
   const actual = (after0039.constraints as { relname: string; conname: string; definition: string }[])
-    .filter((c) => c.definition.includes('REFERENCES permit.users(id)') && c.relname !== 'user_sessions');
+    .filter((c) => c.definition.includes('REFERENCES permit.users(id)') && c.relname !== 'user_sessions'
+      && !['cms_audit_events', 'cms_logo_assets', 'cms_settings', 'file_registry', 'storage_audit_events',
+        'storage_connections', 'storage_oauth_states', 'storage_selection'].includes(c.relname));
   assert.deepEqual(actual, expected);
   const stillAuth = await migrated.query(`SELECT conname FROM pg_constraint WHERE contype = 'f' AND confrelid::regclass::text = 'auth.users'`)
     .catch(() => ({ rows: [] }));

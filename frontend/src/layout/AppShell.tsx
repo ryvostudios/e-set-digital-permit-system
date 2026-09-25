@@ -1,3 +1,4 @@
+import { BrandLogo } from '../branding/BrandLogo';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { listNotifications } from '../api/endpoints';
@@ -197,17 +198,12 @@ export function AppShell() {
       <aside className="shell__sidebar" data-open={drawerOpen} id="app-navigation">
         <NavLink to={ROUTES.home} className="brand">
           {/*
-            The official E-SET logo, in place of the simplified mark.
-            Decorative: the link's own text already reads "E-SET / Permit
-            to Work", so alt text here would say it twice.
+            The organization logo (the CMS website logo when published,
+            otherwise the bundled official E-SET logo). Decorative: the
+            link's own text already reads "E-SET / Permit to Work", so alt
+            text here would say it twice.
           */}
-          <img
-            className="brand__logo"
-            src="/branding/eset-logo.png"
-            alt=""
-            width={224}
-            height={256}
-          />
+          <BrandLogo className="brand__logo" width={224} height={256} />
           <span>
             <span className="brand__name">E-SET</span>
             <span className="brand__tag">Permit to Work</span>

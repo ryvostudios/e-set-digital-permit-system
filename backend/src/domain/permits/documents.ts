@@ -11,6 +11,9 @@ import { toDisplayNumber, toPermitNumber } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
 import type { SnapshotSignatureSet } from './signatures.js';
 import { computeNextMidnightUtc } from './validity.js';
+import { PermitDocumentStorage } from '../../storage/documentStorage.js';
+import { readManagedFile } from '../../storage/managedFiles.js';
+import type { DocumentBrandingSnapshot } from '../cms/cms.js';
 
 /**
  * The immutable, issuance-time business content of a Permit+JSA - "the
@@ -82,6 +85,13 @@ export interface IssuedPermitSnapshot {
    * re-resolved from a live profile.
    */
   signatures: SnapshotSignatureSet;
+  /**
+   * The Permit CMS branding AT ISSUE (organization name and the ordered PDF
+   * logos, by immutable file id + SHA-256). Added compatibly within V2 and
+   * absent on every snapshot taken before it existed. Frozen here so a
+   * later CMS change can never alter what an issued permit prints.
+   */
+  branding?: DocumentBrandingSnapshot | undefined;
 }
 
 export interface IssuanceEventMetadata {
@@ -117,6 +127,7 @@ export function buildIssuedPermitSnapshot(
   previousPermit: PermitRow | null,
   issuanceEvent: IssuanceEventMetadata,
   signatures: SnapshotSignatureSet,
+  branding?: DocumentBrandingSnapshot,
 ): IssuedPermitSnapshot {
   if (!permit.issued_at) {
     throw new Error('buildIssuedPermitSnapshot requires an already-issued permit (issued_at is null)');
@@ -175,6 +186,7 @@ export function buildIssuedPermitSnapshot(
     jsaFormVersion: jsa.form_version,
     jsaForm: jsa.form_payload,
     signatures,
+    ...(branding ? { branding } : {}),
   };
 }
 
@@ -368,7 +380,7 @@ export interface IssuedDocumentSnapshotRow {
  * on-screen form shows and is what new jobs pin to. The database
  * allowlist (migration 0032, widening 0016) knows all three.
  */
-export const RENDERER_VERSIONS = ['PDFKIT_V1', 'PDFKIT_V2', 'PDFKIT_V3'] as const;
+export const RENDERER_VERSIONS = ['PDFKIT_V1', 'PDFKIT_V2', 'PDFKIT_V3', 'PDFKIT_V4'] as const;
 export type RendererVersion = (typeof RENDERER_VERSIONS)[number];
 
 export function isRendererVersion(value: string | null | undefined): value is RendererVersion {
@@ -376,7 +388,7 @@ export function isRendererVersion(value: string | null | undefined): value is Re
 }
 
 /** What a NEW job pins to. Existing jobs keep whatever they already pinned. */
-export const CURRENT_RENDERER_VERSION: RendererVersion = 'PDFKIT_V3';
+export const CURRENT_RENDERER_VERSION: RendererVersion = 'PDFKIT_V4';
 
 /**
  * The label the legacy renderer prints in its trailer.
@@ -555,9 +567,22 @@ async function renderIssuedPermitPdfLegacy(snapshot: IssuedPermitSnapshot): Prom
  * one. An unrecognised identity is refused rather than rendered by a
  * renderer that would produce different bytes under its name.
  */
+/**
+ * Only an alpha-free PNG (greyscale or RGB colour type) embeds
+ * byte-identically in pdfkit. The CMS stores PDF logos that way; anything
+ * else is refused, so a job fails visibly instead of pinning unstable bytes.
+ */
+export function isStablePdfLogo(bytes: Buffer): boolean {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  return bytes.length > 33 && bytes.subarray(0, 8).equals(signature)
+    && bytes.subarray(12, 16).toString('latin1') === 'IHDR' && [0, 2].includes(bytes[25]!);
+}
+
 export async function generateIssuedPermitPdf(
   snapshot: IssuedPermitSnapshot,
   rendererVersion: RendererVersion = CURRENT_RENDERER_VERSION,
+  /** PDFKIT_V4 only: the snapshot's logos, already verified against their SHA-256, in order. */
+  logos: Buffer[] = [],
 ): Promise<Buffer> {
   switch (rendererVersion) {
     case 'PDFKIT_V1':
@@ -565,6 +590,14 @@ export async function generateIssuedPermitPdf(
       return renderIssuedPermitPdfLegacy(snapshot);
     case 'PDFKIT_V3':
       return renderIssuedPermitPdfV3(snapshot, buildIssuedDocumentPages(snapshot));
+    case 'PDFKIT_V4':
+      if (logos.length !== (snapshot.branding?.logos.length ?? 0) || !logos.every(isStablePdfLogo)) {
+        throw new Error('branding logos do not match the issued snapshot');
+      }
+      return renderIssuedPermitPdfV3(snapshot, buildIssuedDocumentPages(snapshot), {
+        organizationName: snapshot.branding?.organizationName ?? '',
+        logos,
+      });
     default: {
       const unreachable: never = rendererVersion;
       throw new Error(`unknown renderer version: ${String(unreachable)}`);
@@ -580,8 +613,17 @@ export type DocumentStorageErrorCode =
   | 'STORAGE_INTEGRITY_MISMATCH'
   | 'STORAGE_PREFLIGHT_FAILED'
   | 'DOCUMENT_GENERATION_FAILED';
-export type DocumentStorageResult = { ok: true } | { ok: false; code: DocumentStorageErrorCode; alreadyExists?: boolean };
-export type DocumentDownloadResult = { ok: true; data: Buffer } | { ok: false; code: DocumentStorageErrorCode };
+export type DocumentStorageResult = { ok: true; reference?: string } | { ok: false; code: DocumentStorageErrorCode; alreadyExists?: boolean };
+export type DocumentDownloadResult = { ok: true; data: Buffer; reference?: string } | { ok: false; code: DocumentStorageErrorCode };
+
+export interface DocumentStorageContext {
+  documentJobId: string;
+  permitId: string;
+  jsaId: string;
+  permitNumber: string;
+  issuedAt: string;
+  actorUserId: string;
+}
 
 /**
  * The storage provider/adapter boundary - "no secrets in DB payload; no
@@ -592,22 +634,8 @@ export type DocumentDownloadResult = { ok: true; data: Buffer } | { ok: false; c
  */
 export interface DocumentStorageAdapter {
   preflight?(): Promise<DocumentStorageResult>;
-  upload(path: string, data: Buffer, contentType: string): Promise<DocumentStorageResult>;
+  upload(path: string, data: Buffer, contentType: string, context?: DocumentStorageContext): Promise<DocumentStorageResult>;
   download(path: string): Promise<DocumentDownloadResult>;
-}
-
-export interface StorageBucketMetadata {
-  id: string;
-  public: boolean;
-  file_size_limit: number | null;
-  allowed_mime_types: string[] | null;
-}
-
-export function isValidPrivateDocumentBucket(row: StorageBucketMetadata | undefined, expectedBucket: string): boolean {
-  return Boolean(
-    row && row.id === expectedBucket && !row.public && row.file_size_limit && row.file_size_limit >= 100_000 &&
-    row.allowed_mime_types?.includes('application/pdf'),
-  );
 }
 
 /**
@@ -638,7 +666,7 @@ export const unconfiguredDocumentStorageAdapter: DocumentStorageAdapter = {
  * something somehow tried to re-upload to the same path, Storage itself
  * refuses to silently overwrite an existing object.
  */
-export function createSupabaseDocumentStorageAdapter(queryFn: QueryFn = query): DocumentStorageAdapter | null {
+export function createSupabaseDocumentStorageAdapter(): DocumentStorageAdapter | null {
   if (
     !env.SUPABASE_STORAGE_ENDPOINT || !env.SUPABASE_STORAGE_REGION ||
     !env.SUPABASE_STORAGE_ACCESS_KEY_ID || !env.SUPABASE_STORAGE_SECRET_ACCESS_KEY
@@ -658,13 +686,6 @@ export function createSupabaseDocumentStorageAdapter(queryFn: QueryFn = query): 
     async preflight(): Promise<DocumentStorageResult> {
       try {
         await client.send(new HeadBucketCommand({ Bucket: bucket }));
-        const metadata = await queryFn<StorageBucketMetadata>(
-          `SELECT id, public, file_size_limit, allowed_mime_types
-             FROM storage.buckets WHERE id = $1`,
-          [bucket],
-        );
-        const row = metadata.rows[0];
-        if (!isValidPrivateDocumentBucket(row, bucket)) return { ok: false, code: 'STORAGE_PREFLIGHT_FAILED' };
         return { ok: true };
       } catch {
         return { ok: false, code: 'STORAGE_PREFLIGHT_FAILED' };
@@ -705,7 +726,7 @@ export function setDocumentStorageAdapterForTests(adapter: DocumentStorageAdapte
 /** Picks the real adapter when Storage is configured, the safe "not configured" stand-in otherwise - the single place callers (the PDF download route, the background generation worker) get a storage adapter from, so neither has to re-check configuration itself. */
 export function resolveDocumentStorageAdapter(): DocumentStorageAdapter {
   if (testStorageAdapter) return testStorageAdapter;
-  return createSupabaseDocumentStorageAdapter() ?? unconfiguredDocumentStorageAdapter;
+  return new PermitDocumentStorage(createSupabaseDocumentStorageAdapter());
 }
 
 export interface PermitDocumentLookup {
@@ -772,7 +793,11 @@ function safeDocumentError(code: DocumentStorageErrorCode): string {
 
 export interface ProcessDocumentJobsDeps {
   query: QueryFn;
+  /** Reads one snapshot logo by immutable file id, refusing bytes that do not match `sha256`. */
+  readLogo?: (fileId: string, sha256: string) => Promise<Buffer>;
 }
+
+const readSnapshotLogo = (fileId: string, sha256: string): Promise<Buffer> => readManagedFile(fileId, sha256);
 
 export interface ProcessDocumentJobsResult {
   processed: number;
@@ -850,9 +875,16 @@ export async function processPendingDocumentJobs(
         throw new Error('unknown pinned renderer version');
       }
       const rendererVersion: RendererVersion = row.renderer_version ?? CURRENT_RENDERER_VERSION;
-      const pdfBuffer = await generateIssuedPermitPdf(row.snapshot, rendererVersion);
+      // V4 prints the logos frozen in the snapshot. Each is read by its
+      // immutable file id and refused unless it matches the SHA-256 the
+      // snapshot recorded; any failure fails this attempt BEFORE an identity
+      // is pinned, so a transient outage can never lock in logo-less bytes.
+      const logos = rendererVersion === 'PDFKIT_V4'
+        ? await Promise.all((row.snapshot.branding?.logos ?? []).map((logo) => (deps.readLogo ?? readSnapshotLogo)(logo.fileId, logo.sha256)))
+        : [];
+      const pdfBuffer = await generateIssuedPermitPdf(row.snapshot, rendererVersion, logos);
       const fileHash = computeFileHash(pdfBuffer);
-      const storagePath = `permits/${row.permit_id}/${row.snapshot_id}.pdf`;
+      let storagePath = `permits/${row.permit_id}/${row.snapshot_id}.pdf`;
 
       // Establishes (once) the intended renderer identity and file hash
       // for this job, then refuses to proceed if a DIFFERENT identity was
@@ -871,7 +903,11 @@ export async function processPendingDocumentJobs(
       );
       if (intended.rows.length === 0) throw new Error('document intended identity conflict');
 
-      const uploadResult = await storage.upload(storagePath, pdfBuffer, 'application/pdf');
+      const uploadResult = await storage.upload(storagePath, pdfBuffer, 'application/pdf', {
+        documentJobId:row.id,permitId:row.permit_id,jsaId:row.snapshot.jsaId,
+        permitNumber:row.snapshot.permitNumber,issuedAt:row.snapshot.issuedAt,
+        actorUserId:row.snapshot.issuanceActorUserId,
+      });
       if (!uploadResult.ok) {
         const existing = await storage.download(storagePath);
         if (!existing.ok || computeFileHash(existing.data) !== fileHash) {
@@ -890,6 +926,9 @@ export async function processPendingDocumentJobs(
           if (marked.rows.length > 0) failed += 1;
           continue;
         }
+        storagePath = existing.reference ?? storagePath;
+      } else {
+        storagePath = uploadResult.reference ?? storagePath;
       }
 
       const marked = await deps.query<{ id: string }>(

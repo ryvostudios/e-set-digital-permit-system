@@ -15,6 +15,9 @@ Versioned, plain SQL migration files, applied in filename order by
   `permit.schema_migrations`. Every migration from `0039` on operates only
   on `permit` and follows the rules in `docs/SHARED_DATABASE.md`, which the
   runner enforces before each commit.
+- `0040`-`0042` (Phase 4): Permit-owned storage (Dropbox connection,
+  file registry, storage audit), the Permit CMS, and renderer identity
+  `PDFKIT_V4`. See `docs/STORAGE_AND_CMS.md`.
 - Migrations are never edited or renamed after being applied to any
   shared environment — a mistake is corrected with a new migration.
 - `0039_permit_owned_authentication.sql` is Phase 3 branch work for a fresh

@@ -222,13 +222,10 @@ Never point either tool at a real database. Both refuse a non-localhost
 
 ## Known open items
 
-- **Private-bucket preflight:** the backend reads `storage.buckets`
-  (Supabase-managed) during the private-bucket preflight. Without BYPASSRLS
-  and without a grant outside `permit`, that read returns nothing, so the
-  document preflight fails closed. Resolve in the storage phase, before the
-  production cut-over (options: an S3-only preflight, or an approved narrow
-  read on the Permit bucket's metadata). This phase does not widen access to
-  make it pass.
+- **Private-bucket preflight:** resolved in Phase 4. The `storage.buckets`
+  query is removed; readiness is checked through the Permit storage provider
+  and Permit roles have no access to Supabase's `storage` schema
+  (docs/STORAGE_AND_CMS.md).
 - **Reconstructed grants:** the **[C]** runtime grants must be reconciled
   against the live standalone catalog.
 - **Schema creation by the administrator:** on Supabase, the administrator

@@ -17,7 +17,8 @@
     "migrate": "tsx src/db/migrate.ts",
     "bootstrap:ceo": "tsx src/scripts/bootstrapCeo.ts",
     "outbox:whatsapp:process": "tsx src/scripts/processWhatsappOutbox.ts",
-    "documents:process": "tsx src/scripts/processDocumentJobs.ts"
+    "documents:process": "tsx src/scripts/processDocumentJobs.ts",
+    "storage:migrate-legacy": "tsx src/scripts/migrateLegacyStorage.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1118.0",
@@ -31,6 +32,7 @@
     "ipaddr.js": "^1.9.1",
     "pdfkit": "^0.20.1",
     "pg": "^8.23.0",
+    "sharp": "0.35.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {

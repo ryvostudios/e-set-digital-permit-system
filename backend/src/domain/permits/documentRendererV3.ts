@@ -54,11 +54,31 @@ const SIZE = { masthead: 13, issuer: 8, section: 9.5, body: 8.5, small: 7.5, tic
 
 const LINE = 11;
 
+/**
+ * PDFKIT_V4 ONLY: the issuance-time branding band. Absent for V3, which
+ * therefore renders exactly the bytes it always did.
+ */
+export interface BrandingBand {
+  /** Printed as the issuer when non-empty (otherwise the page model's issuer). */
+  organizationName: string;
+  /** Verified PNG bytes, left to right; at most MAX_BAND_LOGOS. */
+  logos: Buffer[];
+}
+
+/**
+ * Four equal slots across the A4 content width (~128pt each): enough for
+ * E-SET plus an operator, client and contractor, and still legible. The
+ * CMS and the database refuse a fifth active logo.
+ */
+export const MAX_BAND_LOGOS = 4;
+const BAND_HEIGHT = 34;
+
 interface Cursor {
   doc: PDFKit.PDFDocument;
   width: number;
   /** The site's timezone, for printing stored instants as readable times. */
   timeZone: string;
+  band?: BrandingBand;
 }
 
 const left = PAGE_MARGIN;
@@ -394,15 +414,44 @@ function renderBlock(cursor: Cursor, block: DocumentBlock): void {
 // Page furniture
 // ---------------------------------------------------------------------
 
+/**
+ * The logo band above the masthead. Each logo is scaled to FIT its slot
+ * (aspect ratio preserved, never cropped or stretched) and centred in it;
+ * the group is centred on the page. Only preset geometry - nothing from
+ * the CMS controls a coordinate.
+ */
+function renderBrandBand(cursor: Cursor): void {
+  const { doc, width, band } = cursor;
+  if (!band || band.logos.length === 0) return;
+  const logos = band.logos.slice(0, MAX_BAND_LOGOS);
+  const top = doc.y;
+  const slot = width / MAX_BAND_LOGOS;
+  const start = left + (width - slot * logos.length) / 2;
+  logos.forEach((bytes, index) => {
+    doc.image(bytes, start + index * slot + 6, top + 4, {
+      fit: [slot - 12, BAND_HEIGHT - 8], align: 'center', valign: 'center',
+    });
+  });
+  doc.x = left;
+  doc.y = top + BAND_HEIGHT;
+}
+
 function renderMasthead(cursor: Cursor, page: DocumentPage): void {
+  renderBrandBand(cursor);
   const { doc, width } = cursor;
-  const head = page.masthead;
+  const head = cursor.band?.organizationName && page.masthead
+    ? { ...page.masthead, issuer: cursor.band.organizationName }
+    : page.masthead;
   const top = doc.y;
   const height = 38;
   box(doc, left, top, width, height);
   if (head) {
+    // V4: a CMS-supplied issuer is held to ONE line (ellipsis), so no name
+    // length can push into the title. V3 keeps its exact original call.
     doc.font('Helvetica').fontSize(SIZE.issuer).fillColor(MUTED)
-      .text(head.issuer, left + 6, top + 5, { width: width - 160 });
+      .text(head.issuer, left + 6, top + 5, cursor.band
+        ? { width: width - 160, height: SIZE.issuer + 2, lineBreak: false, ellipsis: true }
+        : { width: width - 160 });
     doc.font('Helvetica-Bold').fontSize(SIZE.masthead).fillColor(INK)
       .text(head.title, left + 6, top + 16, { width: width - 160 });
     const meta = [head.reference, head.pageLabel].filter((value): value is string => Boolean(value));
@@ -524,6 +573,7 @@ function renderSection(cursor: Cursor, section: DocumentSection): void {
 export function renderIssuedPermitPdfV3(
   snapshot: IssuedPermitSnapshot,
   pages: DocumentPage[],
+  band?: BrandingBand,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const authoritativeDate = new Date(snapshot.issuanceOccurredAt);
@@ -543,7 +593,8 @@ export function renderIssuedPermitPdfV3(
     doc.on('error', reject);
 
     const width = doc.page.width - PAGE_MARGIN * 2;
-    const cursor: Cursor = { doc, width, timeZone: snapshot.siteTimezone };
+    const cursor: Cursor = band ? { doc, width, timeZone: snapshot.siteTimezone, band }
+      : { doc, width, timeZone: snapshot.siteTimezone };
     // Printed ONCE, under the identity band on the first page: the times
     // above are the site's, and a reader is entitled to know which clock
     // that is - in words, not as an IANA identifier.

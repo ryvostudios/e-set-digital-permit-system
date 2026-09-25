@@ -11,6 +11,7 @@ import {
 import { toDisplayNumber, toPermitLabel, toPermitNumber } from './numbering.js';
 import type { JsaRow, PermitRow } from './service.js';
 import { buildSnapshotSignatureSet, getPermitSignatures, type SnapshotSignatureSet } from './signatures.js';
+import { captureDocumentBranding } from '../cms/cms.js';
 
 /**
  * Every function below is called from INSIDE the same open transaction
@@ -165,7 +166,8 @@ export async function onPermitIssued(
   // fallback approval, each frozen when it was actually performed. They
   // are read back here rather than re-resolved from anyone's profile.
   const signatures = buildSnapshotSignatureSet(await getPermitSignatures(queryFn, input.permit.id));
-  const snapshot = buildIssuedPermitSnapshot(input.permit, input.jsa, null, input.issuanceEvent, signatures);
+  const snapshot = buildIssuedPermitSnapshot(input.permit, input.jsa, null, input.issuanceEvent, signatures,
+    await captureDocumentBranding(queryFn));
   await createIssuedDocumentSnapshot(queryFn, {
     permitId: input.permit.id,
     sourceEventId,
@@ -383,6 +385,7 @@ export async function onPermitRenewed(
     input.oldPermit,
     input.issuanceEvent,
     signatures,
+    await captureDocumentBranding(queryFn),
   );
   await createIssuedDocumentSnapshot(queryFn, {
     permitId: input.newPermit.id,

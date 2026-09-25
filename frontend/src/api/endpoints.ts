@@ -1,4 +1,4 @@
-import { apiDownload, apiRequest } from './client';
+import { apiDownload, apiRequest, apiUpload } from './client';
 import type {
   AuditLogsResponse,
   AppNotification,
@@ -531,4 +531,111 @@ export function deactivateOrganizationRecord(
     method: 'PATCH',
     body: {},
   });
+}
+
+// ---------------------------------------------------------------------
+// Permit CMS (CEO, or an explicit individual permit.cms.manage grant)
+// ---------------------------------------------------------------------
+
+export type CmsAssetPurpose = 'PDF_LOGO' | 'WEB_LOGO' | 'PWA_ICON';
+
+export interface CmsAsset {
+  id: string;
+  label: string;
+  purpose: CmsAssetPurpose;
+  active: boolean;
+  displayOrder: number;
+  documentTypes: string[];
+  createdAt: string;
+}
+
+export interface CmsState {
+  revision: number;
+  organizationName: string;
+  signInNotice: string;
+  webLogoAssetId: string | null;
+  pwaIconAssetId: string | null;
+  maxPdfLogos: number;
+  assets: CmsAsset[];
+}
+
+export interface CmsAuditEvent {
+  id: string;
+  actorUserId: string;
+  eventType: string;
+  assetId: string | null;
+  occurredAt: string;
+}
+
+export function getCmsState(signal?: AbortSignal): Promise<CmsState> {
+  return apiRequest('/cms/state', signal ? { signal } : {});
+}
+
+export function updateCmsIdentity(body: { revision: number; organizationName: string; signInNotice: string }): Promise<{ revision: number }> {
+  return apiRequest('/cms/identity', { method: 'PATCH', body });
+}
+
+export function uploadCmsAsset(file: File, purpose: CmsAssetPurpose, label: string): Promise<{ id: string }> {
+  return apiUpload('/cms/assets', file, { purpose, label });
+}
+
+export function downloadCmsAsset(id: string): Promise<{ blob: Blob; fileName: string | null }> {
+  return apiDownload(`/cms/assets/${encodeURIComponent(id)}/image`);
+}
+
+export function setCmsPdfLogos(revision: number, assetIds: string[]): Promise<{ revision: number }> {
+  return apiRequest('/cms/pdf-logos', {
+    method: 'PUT',
+    body: { revision, logos: assetIds.map((assetId) => ({ assetId, documentTypes: ['ISSUED_PERMIT'] })) },
+  });
+}
+
+export function setCmsWebArtwork(kind: 'web-logo' | 'pwa-icon', revision: number, assetId: string | null): Promise<{ revision: number }> {
+  return apiRequest(`/cms/${kind}`, { method: 'PUT', body: { revision, assetId } });
+}
+
+export function listCmsAudit(signal?: AbortSignal): Promise<{ events: CmsAuditEvent[] }> {
+  return apiRequest('/cms/audit', { query: { limit: 100 }, ...(signal ? { signal } : {}) });
+}
+
+// Permit Dropbox integration (CEO only)
+
+export interface DropboxConnectionView {
+  id: string;
+  status: 'disconnected' | 'connected' | 'error' | 'disconnecting';
+  accountLabel: string | null;
+  revision: number;
+  dependentFiles: number;
+  healthVerified: boolean;
+}
+
+export interface DropboxStatus {
+  setupComplete: boolean;
+  selectionRevision: number;
+  activeConnectionId: string | null;
+  connections: DropboxConnectionView[];
+}
+
+export function getDropboxStatus(signal?: AbortSignal): Promise<DropboxStatus> {
+  return apiRequest('/cms/dropbox/status', signal ? { signal } : {});
+}
+
+export function startDropboxConnect(): Promise<{ authorizationUrl: string }> {
+  return apiRequest('/cms/dropbox/connect', { method: 'POST' });
+}
+
+export function testDropboxConnection(connectionId: string): Promise<{ ok: boolean }> {
+  return apiRequest('/cms/dropbox/test', { method: 'POST', body: { connectionId } });
+}
+
+export function activateDropbox(revision: number, connectionId: string): Promise<{ active: boolean }> {
+  return apiRequest('/cms/dropbox/activate', { method: 'POST', body: { revision, connectionId } });
+}
+
+export function deactivateDropbox(revision: number): Promise<{ active: boolean }> {
+  return apiRequest('/cms/dropbox/deactivate', { method: 'POST', body: { revision } });
+}
+
+export function disconnectDropbox(revision: number, connectionId: string): Promise<{ disconnected: boolean }> {
+  return apiRequest('/cms/dropbox/disconnect', { method: 'POST', body: { revision, connectionId } });
 }

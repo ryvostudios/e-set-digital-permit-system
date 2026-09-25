@@ -21,4 +21,5 @@ export const ROUTES = {
   auditLogs: '/admin/audit-logs',
   organization: '/admin/organization',
   siteManagers: '/admin/site-managers',
+  cms: '/admin/cms',
 } as const;
