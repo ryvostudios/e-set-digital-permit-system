@@ -18,7 +18,8 @@
     "bootstrap:ceo": "tsx src/scripts/bootstrapCeo.ts",
     "outbox:whatsapp:process": "tsx src/scripts/processWhatsappOutbox.ts",
     "documents:process": "tsx src/scripts/processDocumentJobs.ts",
-    "storage:migrate-legacy": "tsx src/scripts/migrateLegacyStorage.ts"
+    "storage:migrate-legacy": "tsx src/scripts/migrateLegacyStorage.ts",
+    "storage:rekey": "tsx src/scripts/rekeyStorageSecrets.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1118.0",

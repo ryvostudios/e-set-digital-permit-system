@@ -3,6 +3,7 @@ import { query, withTransaction } from '../db/pool.js';
 import { sealStorageSecret, sha256Bytes, unsealStorageSecret } from './crypto.js';
 import { dropboxAuthorizationUrl, dropboxExchangeTokens, DropboxProvider, type DropboxTokens } from './dropbox.js';
 import { connectionClient, dropboxSetup, storageAudit, type StorageConnectionRow } from './connections.js';
+import { storageKeyUsage } from './keyRotation.js';
 import { stripControlCharacters } from './text.js';
 
 export class StorageConflict extends Error {}
@@ -15,7 +16,8 @@ function setupRequired() {
 }
 
 export async function storageStatus() {
-  const setup=Boolean(dropboxSetup());
+  const keys=dropboxSetup()?.key;
+  const setup=Boolean(keys);
   const [selection,connections]=await Promise.all([
     query<{connection_id:string|null;revision:number}>('SELECT connection_id,revision FROM permit.storage_selection WHERE singleton=true'),
     query<StorageConnectionRow>("SELECT * FROM permit.storage_connections WHERE provider='dropbox' ORDER BY created_at DESC"),
@@ -23,8 +25,12 @@ export async function storageStatus() {
   const counts=await query<{connection_id:string;count:string}>(
     'SELECT connection_id,count(*)::text AS count FROM permit.file_registry WHERE connection_id IS NOT NULL GROUP BY connection_id');
   const countById=new Map(counts.rows.map(row=>[row.connection_id,Number(row.count)]));
+  const usage=keys ? await storageKeyUsage(query,keys) : null;
   return {setupComplete:setup,selectionRevision:selection.rows[0]?.revision ?? 0,
     activeConnectionId:selection.rows[0]?.connection_id ?? null,
+    // Versions and counts only (key rotation, docs/STORAGE_AND_CMS.md §2).
+    keyRotation:usage && {activeVersion:usage.activeVersion,pendingReencryption:usage.pendingReencryption,
+      missingVersions:usage.missingVersions},
     connections:connections.rows.map(row=>({id:row.id,status:row.status,accountLabel:row.account_label,
       revision:row.revision,dependentFiles:countById.get(row.id) ?? 0,
       healthVerified:Boolean(row.last_health_at && !row.last_error_code)}))};

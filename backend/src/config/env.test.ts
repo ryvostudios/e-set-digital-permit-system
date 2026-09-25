@@ -325,3 +325,19 @@ test('Permit authentication configuration has no Supabase Auth dependency', () =
     assert.equal(key in result, false);
   }
 });
+
+test('envSchema validates read-only previous storage keys for rotation without echoing them', async () => {
+  const { randomBytes } = await import('node:crypto');
+  const active = randomBytes(32).toString('base64');
+  const previous = randomBytes(32).toString('base64');
+  const withKeys = (value: string | undefined, master: string | null = active) =>
+    envSchema.safeParse(baseEnv({ PERMIT_STORAGE_MASTER_KEY: master ?? undefined, PERMIT_STORAGE_KEY_VERSION: '2', PERMIT_STORAGE_PREVIOUS_KEYS: value }));
+  assert.equal(withKeys(`1:${previous}`).success, true);
+  assert.equal(withKeys(undefined).success, true);
+  for (const bad of [`2:${previous}`, `1:${active}`, 'garbage', `1:${previous},1:${randomBytes(32).toString('base64')}`]) {
+    const result = withKeys(bad);
+    assert.equal(result.success, false);
+    assert.ok(!JSON.stringify(result.error).includes(previous) && !JSON.stringify(result.error).includes(active));
+  }
+  assert.equal(withKeys(`1:${previous}`, null).success, false, 'previous keys need an active key');
+});

@@ -79,15 +79,52 @@ Only the CEO can connect, test, activate, deactivate or disconnect.
 - **Provider responses:** the HTTP client pins the Dropbox origins,
   refuses redirects, and caps response size and time. Provider response
   bodies are never logged.
-- **Key rotation:** the current code decrypts only the configured key
-  version. Rotating the key needs a reconnect (or a future dual-key read);
-  see §10.
+- **Key rotation (Phase 6):** see "Rotating the storage key" below.
+
+### Rotating the storage key
+
+- **One active key.** `PERMIT_STORAGE_MASTER_KEY` with
+  `PERMIT_STORAGE_KEY_VERSION` seals every new envelope.
+- **Previous keys are read-only.** `PERMIT_STORAGE_PREVIOUS_KEYS` holds
+  them as `version:base64key[,…]`. Versions and keys must all be distinct,
+  and the configuration is refused otherwise, without echoing any key.
+- **The envelope chooses its key.** Each envelope names the version it was
+  sealed with, and is opened only with that key. The version is also part
+  of the AES-GCM associated data, so relabelling an envelope fails. Tags
+  must be the full 16 bytes.
+- **Fail closed.** An unknown version cannot be opened: the connection is
+  unavailable, never guessed.
+- **Re-sealing.** Tokens still under a previous key are re-sealed under the
+  active key the next time they are used, through the same
+  compare-and-swap as a refresh. `npm run storage:rekey -- --execute` does
+  it for every connection at once. Short-lived OAuth states are never
+  rewritten; they expire within 10 minutes.
+- **Removing a key.** `npm run storage:rekey` (a dry run, versions and
+  counts only) lists `removableVersions`: previous versions that no
+  credential and no unexpired OAuth state references. Remove a version
+  from `PERMIT_STORAGE_PREVIOUS_KEYS` only when it is listed there. If a
+  referenced key has been removed, it appears in `missingVersions` in the
+  command output and in the CEO storage status, and the command exits 2.
+  Restore that key from the secret manager; do not reconnect blindly.
+
+**Procedure**
+1. Generate a new 32-byte key in the secret manager.
+2. Set it as the active key under a new version, and move the old key to
+   `PERMIT_STORAGE_PREVIOUS_KEYS`.
+3. Deploy.
+4. Run `npm run storage:rekey -- --execute`.
+5. Run `npm run storage:rekey` until the old version is removable, then
+   remove it and deploy.
+
+Key material lives only in the environment and secret manager: never in
+the database, Git or logs.
 
 **Setup (variable names only):** `DROPBOX_CLIENT_ID`,
 `DROPBOX_CLIENT_SECRET`, `DROPBOX_OAUTH_ORIGIN` (the bare HTTPS origin
 serving `/api/v1`; the redirect URI is
 `<origin>/api/v1/cms/dropbox/callback`), `PERMIT_STORAGE_MASTER_KEY`,
-`PERMIT_STORAGE_KEY_VERSION`.
+`PERMIT_STORAGE_KEY_VERSION`, and during a rotation
+`PERMIT_STORAGE_PREVIOUS_KEYS`.
 - Use a **Dropbox App Folder** app with the scopes `account_info.read`,
   `files.metadata.read`, `files.content.write` and `files.content.read`.
 - Use a company-owned Dropbox account. Never a personal one.
@@ -269,8 +306,6 @@ reinstalled.
 
 ## 10. Open items
 
-- **Encryption-key rotation:** the key has a version, but decryption
-  supports one version at a time.
 - **Legacy copy not yet run:** run the old-storage migration during the
   data-migration rehearsal.
 - **Deployment requirement:** Permit's frontend and API must be same-site

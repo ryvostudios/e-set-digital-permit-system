@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { z } from 'zod';
 import { findInvalidTrustProxyTokens, parseTrustProxyCidrs } from './trustProxy.js';
+import { storageKeyring } from '../storage/crypto.js';
 
 const ALLOWED_DATABASE_URL_SCHEMES = new Set(['postgres:', 'postgresql:']);
 
@@ -128,6 +129,9 @@ export const envSchema = z
     // remain read-only for historical objects until offline migration.
     PERMIT_STORAGE_MASTER_KEY: z.string().regex(/^[A-Za-z0-9+/]{43}=$/).optional(),
     PERMIT_STORAGE_KEY_VERSION: z.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default('1'),
+    // Read-only keys kept during a rotation: "version:base64key[,…]". New
+    // envelopes always use the active key above (docs/STORAGE_AND_CMS.md §2).
+    PERMIT_STORAGE_PREVIOUS_KEYS: z.string().optional(),
     DROPBOX_CLIENT_ID: z.string().min(1).optional(),
     DROPBOX_CLIENT_SECRET: z.string().min(1).optional(),
     DROPBOX_OAUTH_ORIGIN: z.string().url().optional(),
@@ -281,6 +285,18 @@ export const envSchema = z
     }
     if (value.PERMIT_STORAGE_MASTER_KEY && Buffer.from(value.PERMIT_STORAGE_MASTER_KEY,'base64').length !== 32) {
       ctx.addIssue({code:z.ZodIssueCode.custom,path:['PERMIT_STORAGE_MASTER_KEY'],message:'Permit storage key must decode to 32 bytes'});
+    }
+    if (value.PERMIT_STORAGE_PREVIOUS_KEYS) {
+      let valid = Boolean(value.PERMIT_STORAGE_MASTER_KEY);
+      try {
+        if (valid) storageKeyring(value.PERMIT_STORAGE_KEY_VERSION, value.PERMIT_STORAGE_MASTER_KEY!, value.PERMIT_STORAGE_PREVIOUS_KEYS);
+      } catch {
+        valid = false;
+      }
+      if (!valid) {
+        ctx.addIssue({code:z.ZodIssueCode.custom,path:['PERMIT_STORAGE_PREVIOUS_KEYS'],
+          message:'Previous Permit storage keys must be distinct "version:base64" 32-byte keys, other than the active key'});
+      }
     }
     if (value.DROPBOX_OAUTH_ORIGIN) {
       let origin: URL | null = null;

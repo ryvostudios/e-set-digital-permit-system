@@ -1,6 +1,6 @@
 import { env } from '../config/env.js';
 import { query, type QueryFn } from '../db/pool.js';
-import { storageKey, sealStorageSecret, unsealStorageSecret } from './crypto.js';
+import { envelopeKeyVersion, sealStorageSecret, storageKeyring, unsealStorageSecret, type StorageKeyring } from './crypto.js';
 import { DropboxProvider, dropboxExchangeTokens, type DropboxTokens } from './dropbox.js';
 
 export interface StorageConnectionRow {
@@ -16,11 +16,26 @@ export interface StorageConnectionRow {
   last_error_code:string|null;
 }
 
-export function dropboxSetup(): {clientId:string;clientSecret:string;redirectUri:string;key:ReturnType<typeof storageKey>} | null {
+export function dropboxSetup(): {clientId:string;clientSecret:string;redirectUri:string;key:StorageKeyring} | null {
   if (!env.DROPBOX_CLIENT_ID || !env.DROPBOX_CLIENT_SECRET || !env.DROPBOX_OAUTH_ORIGIN || !env.PERMIT_STORAGE_MASTER_KEY) return null;
   return {clientId:env.DROPBOX_CLIENT_ID,clientSecret:env.DROPBOX_CLIENT_SECRET,
     redirectUri:`${env.DROPBOX_OAUTH_ORIGIN}/api/v1/cms/dropbox/callback`,
-    key:storageKey(env.PERMIT_STORAGE_KEY_VERSION,env.PERMIT_STORAGE_MASTER_KEY)};
+    key:storageKeyring(env.PERMIT_STORAGE_KEY_VERSION,env.PERMIT_STORAGE_MASTER_KEY,env.PERMIT_STORAGE_PREVIOUS_KEYS)};
+}
+
+/**
+ * Re-seals a connection's tokens under the active key (compare-and-swap on
+ * revision and token_revision). Returns false when the row changed
+ * concurrently; the caller then re-reads it.
+ */
+export async function resealConnection(queryFn: QueryFn, connection: StorageConnectionRow, tokens: DropboxTokens,
+  key: StorageKeyring): Promise<boolean> {
+  const sealed=sealStorageSecret(tokens,`connection:${connection.id}`,key);
+  const updated=await queryFn<{id:string}>(`UPDATE permit.storage_connections
+    SET credentials=$2,token_revision=token_revision+1,updated_at=now()
+    WHERE id=$1 AND revision=$3 AND token_revision=$4 AND status IN ('connected','error') RETURNING id`,
+    [connection.id,sealed,connection.revision,connection.token_revision]);
+  return updated.rows.length>0;
 }
 
 export async function activeConnection(queryFn: QueryFn = query): Promise<StorageConnectionRow | null> {
@@ -35,15 +50,13 @@ export async function connectionClient(connection: StorageConnectionRow, queryFn
   if (!setup || !connection.credentials || !['connected',...(allowError?['error']:[])].includes(connection.status) ||
       !connection.account_id) throw new Error('Permit Dropbox connection unavailable');
   let tokens=unsealStorageSecret<DropboxTokens>(connection.credentials,`connection:${connection.id}`,setup.key);
-  if (tokens.expiresAt < Date.now()+60_000) {
-    tokens=await dropboxExchangeTokens({clientId:setup.clientId,clientSecret:setup.clientSecret,
+  const refresh=tokens.expiresAt < Date.now()+60_000;
+  // Refreshed tokens, and tokens still sealed under a previous key, are
+  // (re-)sealed under the active key.
+  if (refresh || envelopeKeyVersion(connection.credentials)!==setup.key.active.version) {
+    if (refresh) tokens=await dropboxExchangeTokens({clientId:setup.clientId,clientSecret:setup.clientSecret,
       redirectUri:setup.redirectUri,refreshToken:tokens.refreshToken});
-    const sealed=sealStorageSecret(tokens,`connection:${connection.id}`,setup.key);
-    const updated=await queryFn<{id:string}>(`UPDATE permit.storage_connections
-      SET credentials=$2,token_revision=token_revision+1,updated_at=now()
-      WHERE id=$1 AND revision=$3 AND token_revision=$4 AND status IN ('connected','error') RETURNING id`,
-      [connection.id,sealed,connection.revision,connection.token_revision]);
-    if (!updated.rows.length) {
+    if (!await resealConnection(queryFn,connection,tokens,setup.key)) {
       const latest=await queryFn<StorageConnectionRow>('SELECT * FROM permit.storage_connections WHERE id=$1',[connection.id]);
       const row=latest.rows[0];
       if (!row?.credentials || row.revision!==connection.revision ||
