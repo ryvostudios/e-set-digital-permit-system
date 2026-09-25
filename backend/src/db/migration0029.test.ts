@@ -53,6 +53,9 @@ async function substrate(): Promise<PGlite> {
 async function migrationNames(): Promise<string[]> {
   return (await readdir(migrationsDirectory, { withFileTypes: true }))
     .filter((entry) => entry.isFile() && /^\d{4}_.+\.sql$/.test(entry.name))
+    // The standalone (public-schema) history ends at 0038; 0039+ run only
+    // in the shared database's permit schema (docs/SHARED_DATABASE.md).
+    .filter((entry) => Number(entry.name.slice(0, 4)) <= 38)
     .map((entry) => entry.name)
     .sort();
 }

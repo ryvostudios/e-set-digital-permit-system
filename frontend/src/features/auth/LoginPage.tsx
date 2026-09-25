@@ -1,10 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { SignInError } from '../../auth/AuthProvider';
-import { isSupabaseConfigured } from '../../auth/supabaseClient';
 import { useAuth } from '../../auth/useAuth';
 import { Button } from '../../ui/Button';
 import { Checkbox, FormError, Input, PasswordInput } from '../../ui/Field';
-import { Alert } from '../../ui/Feedback';
 
 /**
  * Sign-in.
@@ -23,7 +21,7 @@ import { Alert } from '../../ui/Feedback';
  *
  * REMEMBER ME DEFAULTS TO UNCHECKED - the safer choice on a shared plant
  * workstation. Checked persists the session across browser restarts;
- * unchecked keeps it to this tab. The password itself is never stored in
+ * unchecked uses a browser-session cookie. The password itself is never stored in
  * either case.
  */
 export function LoginPage() {
@@ -84,14 +82,6 @@ export function LoginPage() {
               Use the work account issued to you.
             </p>
 
-            {!isSupabaseConfigured ? (
-              <div style={{ marginBottom: 'var(--space-4)' }}>
-                <Alert tone="warning" title="Sign-in is not configured">
-                  This environment has not been given its public sign-in settings yet. Contact your operator.
-                </Alert>
-              </div>
-            ) : null}
-
             <form onSubmit={handleSubmit} noValidate className="stack">
               {error ? <FormError message={error} /> : null}
 
@@ -134,7 +124,7 @@ export function LoginPage() {
                 }
               />
 
-              <Button type="submit" variant="primary" block loading={submitting} disabled={!isSupabaseConfigured}>
+              <Button type="submit" variant="primary" block loading={submitting}>
                 {submitting ? 'Signing in' : 'Sign in'}
               </Button>
             </form>

@@ -4,7 +4,7 @@ import { after, before, beforeEach, test } from 'node:test';
 import { Pool, type PoolClient } from 'pg';
 import { createApp } from '../app.js';
 import { env } from '../config/env.js';
-import { supabase } from '../lib/supabase.js';
+import { setSessionResolverForTests } from '../middleware/auth.js';
 
 /**
  * Route wiring for account management and the forced first-login
@@ -17,17 +17,16 @@ import { supabase } from '../lib/supabase.js';
  * protected-target guard, the authoritative company resolution, the Zod
  * bodies, and the route definitions all run for real.
  *
- * `SUPABASE_SERVICE_ROLE_KEY` is intentionally NOT configured in the test
- * environment, so the Auth Admin client is absent and every request that
- * gets far enough to need it lands on the explicit "unavailable" branch.
- * That is exactly what proves authorization runs BEFORE any Auth Admin
- * work is attempted: a denied caller gets 403, never 503.
+ * The stubbed database answers the credential writes, so a request that
+ * passes every authorization gate completes (201/200) and a denied one is
+ * refused with 403 before any credential or account state is touched.
  */
 
-const VALID_TOKEN = 'accounts-test-valid-token';
+const VALID_TOKEN = 'accounts-test-valid-token------------------'; // session-cookie format: 43 base64url chars
 const MANAGER_ID = '10000000-0000-4000-8000-000000000002';
 const EMPLOYEE_ID = '10000000-0000-4000-8000-000000000003';
 const CEO_ID = '10000000-0000-4000-8000-000000000001';
+const NEW_USER_ID = '10000000-0000-4000-8000-0000000000ee';
 const TEAM_POSITION_ID = '40000000-0000-4000-8000-000000000001';
 const COMPANY_ID = '18000000-0000-4000-8000-000000000001';
 
@@ -57,19 +56,28 @@ let knownPrivilegedIdentities: string[] = [];
 let knownAccessRows: string[] = [];
 let capturedQueries: Array<{ sql: string; params: unknown[] }> = [];
 
-const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
 const originalPoolConnect = Pool.prototype.connect;
 
 before(() => {
-  supabase.auth.getClaims = (async (token: string) => {
-    if (token !== VALID_TOKEN) return { data: null, error: new Error('invalid token') };
-    return { data: { claims: { sub: authenticatedUserId, email: null } }, error: null };
-  }) as typeof supabase.auth.getClaims;
+  setSessionResolverForTests(async (token: string) =>
+    token === VALID_TOKEN ? { sessionId: '00000000-0000-4000-8000-00000000cafe', userId: authenticatedUserId, email: null } : null);
 
   Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
-    const sql = String(text).trim();
+    const sql = String(text).replace(/\s+/g, ' ').trim();
     capturedQueries.push({ sql, params });
+
+    if (sql.startsWith('SELECT s.id FROM user_sessions')) return { rows: [{ id: params[0] }] };
+
+    // Credential writes (permit.users) and the self-change credential read.
+    if (sql.startsWith('INSERT INTO users')) return { rows: [{ id: NEW_USER_ID }] };
+    if (sql.startsWith('UPDATE users')) return { rows: [{ id: params[0] }] };
+    if (sql.startsWith('SELECT a.must_change_password, u.password_hash')) {
+      return { rows: [{ must_change_password: mustChangePassword, password_hash: '$argon2id$v=19$m=65536,t=3,p=4$c3R1Yg$c3R1Yg', password_scheme: 'argon2id' }] };
+    }
+    if (sql.includes('AS protected')) {
+      return { rows: [{ protected: (privilegedGrants[String(params[0])] ?? []).length > 0 }] };
+    }
 
     if (sql.includes('FROM app_user_access') && sql.startsWith('SELECT state')) {
       return { rows: [{ state: 'ACTIVE', must_change_password: mustChangePassword }] };
@@ -101,12 +109,16 @@ before(() => {
     return { rows: [] };
   }) as unknown as typeof Pool.prototype.query;
 
+  // Transactions run against the same dispatcher.
   Pool.prototype.connect = (async () =>
-    ({ query: async () => ({ rows: [] }), release: () => {} }) as unknown as PoolClient) as typeof Pool.prototype.connect;
+    ({
+      query: (text: unknown, params?: unknown[]) => (Pool.prototype.query as unknown as (t: unknown, p?: unknown[]) => unknown)(text, params),
+      release: () => {},
+    }) as unknown as PoolClient) as typeof Pool.prototype.connect;
 });
 
 after(() => {
-  supabase.auth.getClaims = originalGetClaims;
+  setSessionResolverForTests(null);
   Pool.prototype.query = originalPoolQuery;
   Pool.prototype.connect = originalPoolConnect;
 });
@@ -152,13 +164,13 @@ async function startServer(): Promise<{ url: string; close: () => Promise<void> 
 
 function post(url: string, path: string, token: string | undefined, body: unknown): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
 function request(url: string, method: string, path: string, token: string | undefined, body?: unknown): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   const init: RequestInit = { method, headers };
   if (body !== undefined) init.body = JSON.stringify(body);
   return fetch(`${url}/api/v1${path}`, init);
@@ -166,7 +178,7 @@ function request(url: string, method: string, path: string, token: string | unde
 
 function get(url: string, path: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = {};
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1${path}`, { method: 'GET', headers });
 }
 
@@ -232,8 +244,8 @@ test('an E-SET Site Manager with NO Team, Position or capability is authorized',
   privilegedGrants = { [authenticatedUserId]: ['SITE_MANAGER'] };
   const { url, close } = await startServer();
   try {
-    // 503 = the Auth Admin boundary, i.e. past every authorization gate.
-    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 503);
+    // 201 = provisioned, i.e. past every authorization gate.
+    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 201);
   } finally {
     await close();
   }
@@ -243,12 +255,12 @@ test('a CEO holds the same account-management authority', async () => {
   authorizeCeo();
   const { url, close } = await startServer();
   try {
-    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 503);
+    assert.equal((await post(url, '/admin/employees', VALID_TOKEN, validCreateBody)).status, 201);
     authenticatedUserId = nextActorId();
     authorizeCeo();
     assert.equal(
       (await post(url, `/admin/employees/${EMPLOYEE_ID}/reset-password`, VALID_TOKEN, { temporaryPassword: FAKE_TEMPORARY_PASSWORD })).status,
-      503,
+      200,
     );
   } finally {
     await close();
@@ -285,15 +297,13 @@ test('an authorized Site Manager passes authorization and reaches the provisioni
   authorizeSiteManager();
   const { url, close } = await startServer();
   try {
-    // The Auth Admin credential is absent in tests, so a fully
-    // authorized request lands on the explicit unavailable branch -
-    // which is only reachable AFTER authorization succeeded.
+    // A fully authorized request provisions the account (one transaction).
     const response = await post(url, '/admin/employees', VALID_TOKEN, validCreateBody);
-    assert.equal(response.status, 503);
-    const body = (await response.json()) as { error: string; message: string };
-    assert.equal(body.error, 'account_management_unavailable');
-    // The response never names the missing credential.
-    assert.doesNotMatch(JSON.stringify(body), /SERVICE_ROLE|service_role|key/i);
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as { employee: { userId: string; mustChangePassword: boolean } };
+    assert.deepEqual(body.employee, { userId: NEW_USER_ID, mustChangePassword: true });
+    // The response never echoes the temporary password or any hash.
+    assert.doesNotMatch(JSON.stringify(body), /FAKE|argon2|password_hash|temporary/i);
   } finally {
     await close();
   }
@@ -357,8 +367,8 @@ test('a normal employee target passes the protected-identity guard', async () =>
     const response = await post(url, `/admin/employees/${EMPLOYEE_ID}/reset-password`, VALID_TOKEN, {
       temporaryPassword: FAKE_TEMPORARY_PASSWORD,
     });
-    // Reached the Auth Admin boundary, i.e. past every authorization gate.
-    assert.equal(response.status, 503);
+    // Reset applied, i.e. past every authorization gate.
+    assert.equal(response.status, 200);
   } finally {
     await close();
   }
@@ -518,10 +528,11 @@ test('a CEO passes the privileged gate and reaches the provisioning step', async
   authorizeCeo();
   const { url, close } = await startServer();
   try {
-    // 503 = the Auth Admin boundary, only reachable AFTER authorization.
+    // The privileged channel is not configured in tests, and that 503 is
+    // only reachable AFTER the CEO-only gate passed.
     const response = await post(url, '/admin/site-managers', VALID_TOKEN, validSiteManagerBody);
     assert.equal(response.status, 503);
-    assert.equal(((await response.json()) as { error: string }).error, 'account_management_unavailable');
+    assert.equal(((await response.json()) as { error: string }).error, 'privileged_management_unavailable');
   } finally {
     await close();
   }
@@ -858,7 +869,7 @@ test('Audit Logs is read-only and narrowly paged - no mutation verb, no filter p
     for (const method of ['POST', 'PATCH', 'DELETE', 'PUT'] as const) {
       const response = await fetch(new URL('/api/v1/admin/audit-logs', url), {
         method,
-        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173', 'content-type': 'application/json' },
         body: JSON.stringify({}),
       });
       assert.ok(response.status === 404 || response.status === 405, `${method} must not be a route`);
@@ -916,8 +927,7 @@ test('self-service password change is refused when no change is owed', async () 
   const { url, close } = await startServer();
   try {
     const response = await post(url, '/auth/change-password', VALID_TOKEN, { newPassword: 'FAKE-chosen-password' });
-    // 503 would mean it reached the Auth Admin boundary; it must not.
-    assert.notEqual(response.status, 200);
+    assert.equal(response.status, 409);
     assert.equal(capturedQueries.some(({ sql }) => sql.includes('UPDATE app_user_access')), false,
       'a refused self-change never touches credential state');
   } finally {
@@ -958,9 +968,10 @@ test('change-password never requires a capability - any authenticated account ma
   privilegedGrants = {};
   const { url, close } = await startServer();
   try {
+    mustChangePassword = true;
     const response = await post(url, '/auth/change-password', VALID_TOKEN, { newPassword: 'FAKE-chosen-password' });
-    // Reached the Auth Admin boundary: authorization did not block it.
-    assert.equal(response.status, 503);
+    // Changed: authorization did not block it.
+    assert.equal(response.status, 200);
   } finally {
     await close();
   }
@@ -1014,10 +1025,9 @@ test('the two allowed endpoints stay reachable while a password change is outsta
     const body = (await me.json()) as { mustChangePassword: boolean };
     assert.equal(body.mustChangePassword, true);
 
-    // The change endpoint itself is reachable (and gets as far as the
-    // absent Auth Admin credential, not a 403).
+    // The change endpoint itself is reachable and completes.
     const change = await post(url, '/auth/change-password', VALID_TOKEN, { newPassword: 'FAKE-chosen-password' });
-    assert.equal(change.status, 503);
+    assert.equal(change.status, 200);
   } finally {
     await close();
   }

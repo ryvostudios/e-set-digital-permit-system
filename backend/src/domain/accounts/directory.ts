@@ -13,8 +13,8 @@ import type { QueryFn } from '../../db/pool.js';
  * `authorizeCeo()` gate the corresponding mutations already use, so this
  * module widens no authority.
  *
- * WHAT IS DELIBERATELY NOT RETURNED. No email address (the login lives
- * in Supabase Auth and is not this application's to echo back), no
+ * WHAT IS DELIBERATELY NOT RETURNED. No email address (the login address
+ * is deliberately omitted from the directory response), no
  * password or credential material, no `credential_version`, no
  * reset-pending marker, no raw audit ordinal, and no Team + Position
  * capability list. `mustChangePassword` is the single credential-adjacent

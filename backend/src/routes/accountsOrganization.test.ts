@@ -3,7 +3,7 @@ import http from 'node:http';
 import { after, before, beforeEach, test } from 'node:test';
 import { Pool, type PoolClient } from 'pg';
 import { createApp } from '../app.js';
-import { supabase } from '../lib/supabase.js';
+import { setSessionResolverForTests } from '../middleware/auth.js';
 
 /**
  * The Organization Management API, over real HTTP against the real
@@ -25,7 +25,7 @@ import { supabase } from '../lib/supabase.js';
  *     PostgreSQL text.
  */
 
-const VALID_TOKEN = 'accounts-organization-test-valid-token';
+const VALID_TOKEN = 'accounts-organization-test-valid-token-----'; // session-cookie format: 43 base64url chars
 
 const COMPANY_ID = '18000000-0000-4000-8000-000000000001';
 const TEAM_ID = '20000000-0000-4000-8000-000000000001';
@@ -46,7 +46,6 @@ let failStatement: ((sql: string) => Error | undefined) | null = null;
 /** Lets a test change what a lookup returns (inactive company, missing team, ...). */
 let lookupRows: Record<string, Record<string, unknown>[]> = {};
 
-const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
 const originalPoolConnect = Pool.prototype.connect;
 
@@ -100,10 +99,8 @@ async function organizationQuery(text: unknown, params: unknown[] = []): Promise
 }
 
 before(() => {
-  supabase.auth.getClaims = (async (token: string) => {
-    if (token !== VALID_TOKEN) return { data: null, error: new Error('invalid token') };
-    return { data: { claims: { sub: authenticatedUserId, email: null } }, error: null };
-  }) as typeof supabase.auth.getClaims;
+  setSessionResolverForTests(async (token: string) =>
+    token === VALID_TOKEN ? { sessionId: '00000000-0000-4000-8000-00000000cafe', userId: authenticatedUserId, email: null } : null);
 
   Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
     const sql = String(text).trim();
@@ -139,7 +136,7 @@ before(() => {
 });
 
 after(() => {
-  supabase.auth.getClaims = originalGetClaims;
+  setSessionResolverForTests(null);
   Pool.prototype.query = originalPoolQuery;
   Pool.prototype.connect = originalPoolConnect;
 });
@@ -177,7 +174,7 @@ async function call(
   const server = await startServer();
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (options.token) headers.authorization = `Bearer ${options.token}`;
+    if (options.token) Object.assign(headers, { cookie: `permit_session=${options.token}`, origin: 'http://localhost:5173' });
     const response = await fetch(`${server.url}/api/v1${path}`, {
       method: options.method ?? 'GET',
       headers,

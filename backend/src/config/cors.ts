@@ -22,21 +22,29 @@ const allowedOrigins = new Set(
   configuredOrigins.length > 0 ? configuredOrigins : env.NODE_ENV === 'production' ? [] : [DEFAULT_DEV_ORIGIN],
 );
 
+/** Whether a browser Origin (or a Referer's origin) is one of the configured frontend origins. */
+export function isAllowedOrigin(origin: string): boolean {
+  const normalized = env.NODE_ENV === 'production' ? canonicalProductionOrigin(origin) : origin.replace(/\/$/, '');
+  return typeof normalized === 'string' && allowedOrigins.has(normalized);
+}
+
 export const corsOptions: CorsOptions = {
   origin(origin, callback) {
     // No Origin header means the request isn't a browser cross-origin
     // request (e.g. curl, server-to-server); nothing to allow/deny here.
-    const normalized = origin
-      ? (env.NODE_ENV === 'production' ? canonicalProductionOrigin(origin) : origin)
-      : undefined;
-    if (!origin || (typeof normalized === 'string' && allowedOrigins.has(normalized))) {
+    // Cookie-authenticated mutations are held to a stricter rule by
+    // middleware/originCheck.ts.
+    if (!origin || isAllowedOrigin(origin)) {
       callback(null, true);
       return;
     }
     callback(new Error('Not allowed by CORS'));
   },
-  credentials: false,
-  allowedHeaders: ['Authorization', 'Content-Type'],
+  // The Permit session is an HttpOnly cookie (domain/auth/sessions.ts), so
+  // credentialed requests are allowed - only ever for the allowlisted
+  // origins above, never a wildcard. No Authorization header is used.
+  credentials: true,
+  allowedHeaders: ['Content-Type'],
   // The correlation id `middleware/requestLog.ts` already sets on every
   // response. Without this the browser cannot READ it cross-origin (it
   // is not a CORS-safelisted response header), so a person could never

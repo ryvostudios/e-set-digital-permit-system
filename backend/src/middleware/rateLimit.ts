@@ -102,12 +102,8 @@ export const globalApiLimiter = buildRateLimiter({
  * Applied in addition to `globalApiLimiter`, only to state-changing
  * permit endpoints (POST/PATCH), after `requireAuth` - stricter, and
  * keyed by authenticated identity (see `keyByAuthOrIp`). This backend
- * has no password login/signup endpoint of its own (authentication
- * happens directly against Supabase Auth from the frontend - see
- * `routes/auth.ts`), so there is no separate "login" route to rate-limit
- * the way SECURITY.md's "particularly on authentication... endpoints"
- * guidance usually implies; the closest equivalent, every
- * capability-gated mutation, is covered here instead.
+ * has a separate login limiter on `routes/auth.ts`. Capability-gated
+ * mutations carry this additional per-actor limit.
  */
 export const mutationLimiter = buildRateLimiter({
   windowMs: env.RATE_LIMIT_WINDOW_MS,
@@ -129,6 +125,17 @@ export const mutationLimiter = buildRateLimiter({
  * exactly what password-reset abuse and scripted account creation look
  * like. Legitimate use is a few calls per window.
  */
+/**
+ * Sign-in attempts, keyed by client IP (there is no authenticated actor
+ * yet). Every attempt pays an Argon2id verification whether or not the
+ * email exists, so this bounds both password guessing and the CPU an
+ * anonymous client can spend.
+ */
+export const loginLimiter = buildRateLimiter({
+  windowMs: env.RATE_LIMIT_WINDOW_MS,
+  limit: env.RATE_LIMIT_LOGIN_MAX,
+});
+
 export const accountLimiter = buildRateLimiter({
   windowMs: env.RATE_LIMIT_WINDOW_MS,
   limit: env.RATE_LIMIT_ACCOUNT_MAX,

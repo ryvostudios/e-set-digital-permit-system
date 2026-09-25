@@ -5,6 +5,7 @@ import { corsOptions } from './config/cors.js';
 import { env } from './config/env.js';
 import { parseTrustProxyCidrs } from './config/trustProxy.js';
 import { toSafeDbErrorMessage } from './db/pool.js';
+import { requireTrustedOrigin } from './middleware/originCheck.js';
 import { globalApiLimiter } from './middleware/rateLimit.js';
 import { requestId, requestLog } from './middleware/requestLog.js';
 import { accountsRouter } from './routes/accounts.js';
@@ -50,6 +51,9 @@ export function createApp(): Express {
   app.use(helmet());
   app.use(cors(corsOptions));
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
+  // Cookie-authenticated mutations (and sign-in) must prove an allowlisted
+  // origin before any route runs (middleware/originCheck.ts).
+  app.use('/api/v1', requireTrustedOrigin);
   app.use('/api/v1', healthRouter);
   app.use('/api/v1', authRouter);
   app.use('/api/v1', accountsRouter);

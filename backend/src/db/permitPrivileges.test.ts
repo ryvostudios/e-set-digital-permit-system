@@ -53,6 +53,7 @@ const RUNTIME_TABLES: Record<string, string[]> = {
   team_positions: ['INSERT', 'SELECT'],
   teams: ['INSERT', 'SELECT'],
   user_capability_grants: ['INSERT', 'SELECT'],
+  user_sessions: ['SELECT'],
   user_team_positions: ['INSERT', 'SELECT'],
   whatsapp_outbox_messages: ['INSERT', 'SELECT'],
   workforce_profiles: ['INSERT', 'SELECT'],
@@ -66,10 +67,20 @@ const RUNTIME_COLUMN_UPDATES: Record<string, string[]> = {
   permit_number_counters: ['next_value', 'updated_at'],
   team_positions: ['deactivated_at'],
   teams: ['deactivated_at'],
+  user_sessions: ['revoked_at'],
   user_team_positions: ['ended_at'],
+  users: ['email', 'password_hash', 'password_scheme', 'updated_at'],
   whatsapp_outbox_messages: ['attempt_count', 'claim_token', 'claimed_at', 'last_attempted_at', 'last_error',
     'next_attempt_at', 'sent_at', 'status'],
   workforce_profiles: ['company_id', 'display_name', 'primary_team_position_id'],
+};
+// Column-level SELECT/INSERT exist only on the 0039 authentication tables.
+const RUNTIME_COLUMN_SELECTS: Record<string, string[]> = {
+  users: ['email', 'id', 'password_hash', 'password_scheme'],
+};
+const RUNTIME_COLUMN_INSERTS: Record<string, string[]> = {
+  user_sessions: ['expires_at', 'token_hash', 'user_id'],
+  users: ['email', 'password_hash', 'password_scheme'],
 };
 const RUNTIME_SEQUENCES = ['account_audit_events_ordinal_seq', 'jsa_number_seq', 'organization_audit_events_ordinal_seq',
   'permit_lifecycle_events_ordinal_seq', 'permit_number_seq', 'user_capability_grants_ordinal_seq'];
@@ -92,11 +103,11 @@ async function grants(target: PGlite, schema: string, role: string) {
       FROM pg_class c, aclexplode(c.relacl) a
      WHERE c.relnamespace = $1::regnamespace AND c.relkind = 'r' AND a.grantee = $2::regrole
      GROUP BY 1 ORDER BY 1`, [schema, role]);
-  const columns = await target.query<{ relname: string; cols: string[] }>(`
+  const columnPrivilege = async (privilege: string) => Object.fromEntries((await target.query<{ relname: string; cols: string[] }>(`
     SELECT c.relname, array_agg(att.attname::text ORDER BY att.attname) AS cols
       FROM pg_class c JOIN pg_attribute att ON att.attrelid = c.oid, aclexplode(att.attacl) a
-     WHERE c.relnamespace = $1::regnamespace AND a.grantee = $2::regrole AND a.privilege_type = 'UPDATE'
-     GROUP BY 1 ORDER BY 1`, [schema, role]);
+     WHERE c.relnamespace = $1::regnamespace AND a.grantee = $2::regrole AND a.privilege_type = $3
+     GROUP BY 1 ORDER BY 1`, [schema, role, privilege])).rows.map((r) => [r.relname, r.cols]));
   const sequences = await target.query<{ relname: string }>(`
     SELECT c.relname FROM pg_class c, aclexplode(c.relacl) a
      WHERE c.relnamespace = $1::regnamespace AND c.relkind = 'S' AND a.grantee = $2::regrole
@@ -106,7 +117,9 @@ async function grants(target: PGlite, schema: string, role: string) {
      WHERE p.pronamespace = $1::regnamespace AND a.grantee = $2::regrole ORDER BY 1`, [schema, role]);
   return {
     tables: Object.fromEntries(tables.rows.map((r) => [r.relname, r.privs])),
-    columns: Object.fromEntries(columns.rows.map((r) => [r.relname, r.cols])),
+    columns: await columnPrivilege('UPDATE'),
+    columnSelects: await columnPrivilege('SELECT'),
+    columnInserts: await columnPrivilege('INSERT'),
     sequences: sequences.rows.map((r) => r.relname),
     functions: functions.rows.map((r) => r.proname),
   };
@@ -138,6 +151,8 @@ test('permit_runtime holds exactly the reviewed privilege set', async () => {
   const actual = await grants(db, 'permit', 'permit_runtime');
   assert.deepEqual(actual.tables, RUNTIME_TABLES);
   assert.deepEqual(actual.columns, RUNTIME_COLUMN_UPDATES);
+  assert.deepEqual(actual.columnSelects, RUNTIME_COLUMN_SELECTS);
+  assert.deepEqual(actual.columnInserts, RUNTIME_COLUMN_INSERTS);
   assert.deepEqual(actual.sequences, RUNTIME_SEQUENCES);
   assert.deepEqual(actual.functions, RUNTIME_FUNCTIONS);
 });
@@ -190,31 +205,67 @@ test('the privileges DEPLOYMENT.md forbids are refused by the database, not just
     ['truncate the audit log', 'TRUNCATE permit.account_audit_events'],
     ['create a table', 'CREATE TABLE permit.intruder (id int)'],
     ['create in public', 'CREATE TABLE public.intruder (id int)'],
+    ['re-key a user', 'UPDATE permit.users SET id = id'],
+    ['delete a user', 'DELETE FROM permit.users'],
+    ['forge a session owner', 'UPDATE permit.user_sessions SET user_id = user_id'],
+    ['extend a session', 'UPDATE permit.user_sessions SET expires_at = expires_at'],
+    ['delete a session', 'DELETE FROM permit.user_sessions'],
   ] as const;
   for (const [label, sql] of refused) {
     assert.equal(await attempt('permit_runtime', sql), '42501', `permit_runtime must not ${label}`);
   }
 });
 
-test('permit_privileged can only call record_site_manager_grant', async () => {
+test('permit_privileged can only call the two approved privileged operations', async () => {
   const actual = await grants(db, 'permit', 'permit_privileged');
-  assert.deepEqual(actual, { tables: {}, columns: {}, sequences: [], functions: ['record_site_manager_grant'] });
+  assert.deepEqual(actual, {
+    tables: {}, columns: {}, columnSelects: {}, columnInserts: {}, sequences: [], functions: ['provision_site_manager', 'record_site_manager_grant'],
+  });
   for (const sql of ['SELECT * FROM permit.permits', 'SELECT * FROM permit.privileged_access_events',
     `INSERT INTO permit.privileged_access_events (user_id, role, action) VALUES (gen_random_uuid(), 'CEO', 'GRANTED')`,
-    'SELECT permit.grant_baseline_applicant_capabilities(gen_random_uuid())', 'CREATE TABLE permit.intruder (id int)']) {
+    'SELECT permit.grant_baseline_applicant_capabilities(gen_random_uuid())', 'CREATE TABLE permit.intruder (id int)',
+    'SELECT password_hash FROM permit.users', 'SELECT token_hash FROM permit.user_sessions']) {
     assert.equal(await attempt('permit_privileged', sql), '42501', sql);
   }
   // The function itself is reachable: it runs and applies its own CEO check.
   const code = await attempt('permit_privileged',
     `SELECT permit.record_site_manager_grant(gen_random_uuid(), gen_random_uuid(), 'GRANTED')`);
-  assert.notEqual(code, '42501', 'EXECUTE on the privileged function must be granted');
+  assert.equal(code, '42501', 'the callable function must reject an invalid session');
 });
 
 test('PUBLIC and the Supabase browser roles cannot reach schema permit at all', async () => {
   for (const role of ['anon', 'authenticated', 'service_role']) {
     assert.equal(await attempt(role, 'SELECT count(*) FROM permit.permits'), '42501', role);
+    assert.equal(await attempt(role, 'SELECT password_hash FROM permit.users'), '42501', role);
     assert.equal(await attempt(role, 'SELECT permit.allocate_permit_sequence($1)', ['WTG_WORK']), '42501', role);
   }
+});
+
+test('Permit and ESDMS runtime roles cannot cross their schema boundary', async () => {
+  // A disposable representative ESDMS object proves both directions with
+  // real PostgreSQL privilege checks after the final 0039 schema is installed.
+  await db.exec(`
+    CREATE ROLE esdms_runtime NOLOGIN NOBYPASSRLS NOINHERIT;
+    CREATE TABLE public.esdms_isolation_probe (id integer PRIMARY KEY);
+    REVOKE ALL ON public.esdms_isolation_probe FROM PUBLIC;
+    GRANT SELECT ON public.esdms_isolation_probe TO esdms_runtime;
+  `);
+  for (const role of ['permit_runtime', 'permit_privileged']) {
+    assert.equal(await attempt(role, 'SELECT * FROM public.esdms_isolation_probe'), '42501', role);
+  }
+  assert.equal(await attempt('esdms_runtime', 'SELECT * FROM permit.users'), '42501');
+  assert.equal(await attempt('esdms_runtime',
+    `SELECT permit.provision_site_manager(gen_random_uuid(), 'x@example.test', 'x', 'x')`), '42501');
+
+  const misplaced = await db.query<{ name: string }>(`
+    SELECT n.nspname || '.' || c.relname AS name FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND pg_get_userbyid(c.relowner) = 'permit_migrator'
+    UNION ALL
+    SELECT n.nspname || '.' || p.proname AS name FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public' AND pg_get_userbyid(p.proowner) = 'permit_migrator'`);
+  assert.deepEqual(misplaced.rows, [], 'the Permit migrator owns no public objects');
 });
 
 // ---------------------------------------------------------------------
@@ -226,7 +277,7 @@ const CRO = '51000000-0000-4000-8000-000000000002';
 const HSE = '51000000-0000-4000-8000-000000000003';
 
 async function assign(user: string, name: string, team: string, position: string): Promise<void> {
-  await db.query(`INSERT INTO auth.users (id) VALUES ($1)`, [user]);
+  await db.query(`INSERT INTO permit.users (id, email) VALUES ($1, $2)`, [user, `${user}@example.test`]);
   await db.query(`
     INSERT INTO permit.user_team_positions (user_id, team_position_id)
     SELECT $1, tp.id FROM permit.team_positions tp

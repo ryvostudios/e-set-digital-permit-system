@@ -4,7 +4,7 @@ import { after, before, beforeEach, test } from 'node:test';
 import { Pool, type PoolClient } from 'pg';
 import { createApp } from '../app.js';
 import { env } from '../config/env.js';
-import { supabase } from '../lib/supabase.js';
+import { setSessionResolverForTests } from '../middleware/auth.js';
 
 /**
  * Rate limiting on account management, exercised through the REAL route
@@ -16,15 +16,11 @@ import { supabase } from '../lib/supabase.js';
  * budget every other test in `accounts.test.ts` depends on. Node's test
  * runner gives each file its own process, so these start clean.
  *
- * WHY 503 IS THE SUCCESS CONDITION. `SUPABASE_SERVICE_ROLE_KEY` is not
- * configured in the test environment, so a fully authorized creation
- * reaches the Auth Admin boundary and stops there with 503. That is
- * exactly what these tests need: 503 proves the request passed
- * authentication, authorization AND the rate limiter. The assertions are
- * about what must NOT happen - 429 - not about Auth succeeding.
+ * Successful credential writes use the same SQL dispatcher inside the
+ * transaction, so accepted creation returns 201 rather than a stub outage.
  */
 
-const VALID_TOKEN = 'account-rate-limit-test-token';
+const VALID_TOKEN = 'account-rate-limit-test-token--------------'; // session-cookie format: 43 base64url chars
 const EMPLOYEE_ID = '10000000-0000-4000-8000-000000000003';
 const TEAM_POSITION_ID = '40000000-0000-4000-8000-000000000001';
 const COMPANY_ID = '18000000-0000-4000-8000-000000000001';
@@ -43,18 +39,16 @@ let authenticatedUserId = nextActorId();
 let grantedCapabilities: string[] = [];
 let privilegedGrants: Record<string, string[]> = {};
 
-const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
 const originalPoolConnect = Pool.prototype.connect;
 
 before(() => {
-  supabase.auth.getClaims = (async (token: string) => {
-    if (token !== VALID_TOKEN) return { data: null, error: new Error('invalid token') };
-    return { data: { claims: { sub: authenticatedUserId, email: null } }, error: null };
-  }) as typeof supabase.auth.getClaims;
+  setSessionResolverForTests(async (token: string) =>
+    token === VALID_TOKEN ? { sessionId: '00000000-0000-4000-8000-00000000cafe', userId: authenticatedUserId, email: null } : null);
 
   Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
-    const sql = String(text).trim();
+    const sql = String(text).replace(/\s+/g, ' ').trim();
+    if (sql.startsWith('INSERT INTO users')) return { rows: [{ id: EMPLOYEE_ID }] };
     if (sql.includes('FROM app_user_access') && sql.startsWith('SELECT state')) {
       return { rows: [{ state: 'ACTIVE', must_change_password: false }] };
     }
@@ -80,11 +74,11 @@ before(() => {
   }) as unknown as typeof Pool.prototype.query;
 
   Pool.prototype.connect = (async () =>
-    ({ query: async () => ({ rows: [] }), release: () => {} }) as unknown as PoolClient) as typeof Pool.prototype.connect;
+    ({ query: (text: unknown, params?: unknown[]) => (Pool.prototype.query as unknown as (t: unknown, p?: unknown[]) => unknown)(text, params), release: () => {} }) as unknown as PoolClient) as typeof Pool.prototype.connect;
 });
 
 after(() => {
-  supabase.auth.getClaims = originalGetClaims;
+  setSessionResolverForTests(null);
   Pool.prototype.query = originalPoolQuery;
   Pool.prototype.connect = originalPoolConnect;
 });
@@ -109,7 +103,7 @@ async function startServer(): Promise<{ url: string; close: () => Promise<void> 
 function post(url: string, path: string, body: unknown): Promise<Response> {
   return fetch(`${url}/api/v1${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${VALID_TOKEN}` },
+    headers: { 'content-type': 'application/json', cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' },
     body: JSON.stringify(body),
   });
 }
@@ -117,7 +111,7 @@ function post(url: string, path: string, body: unknown): Promise<Response> {
 function get(url: string, path: string): Promise<Response> {
   return fetch(`${url}/api/v1${path}`, {
     method: 'GET',
-    headers: { authorization: `Bearer ${VALID_TOKEN}` },
+    headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' },
   });
 }
 
@@ -153,7 +147,7 @@ for (const role of ['CEO', 'SITE_MANAGER'] as const) {
         assert.notEqual(response.status, 429, `creation ${index} of ${REQUIRED_SEQUENTIAL_CREATIONS} was rate limited`);
         // 503 is the Auth Admin boundary in this environment - the request
         // got all the way past authorization, which is the point.
-        assert.equal(response.status, 503, `creation ${index} should reach the Auth boundary`);
+        assert.equal(response.status, 201, `creation ${index} should create the account`);
       }
     } finally {
       await close();
@@ -172,7 +166,7 @@ test('the 61st creation is not refused merely for being the 61st - there is no b
     // the number 60 means anything to this system.
     const sixtyFirst = await post(url, '/admin/employees', createBody(61));
     assert.notEqual(sixtyFirst.status, 429, 'the 61st creation must not be a cliff edge');
-    assert.equal(sixtyFirst.status, 503);
+    assert.equal(sixtyFirst.status, 201);
 
     const seventieth = await post(url, '/admin/employees', createBody(70));
     assert.notEqual(seventieth.status, 429);
@@ -247,7 +241,7 @@ test('two managers hold independent budgets - one cannot exhaust the other', asy
     authorizeAs('SITE_MANAGER');
     const other = await post(url, '/admin/employees', createBody(1));
     assert.notEqual(other.status, 429, 'a second manager must not inherit the first exhausted budget');
-    assert.equal(other.status, 503);
+    assert.equal(other.status, 201);
   } finally {
     await close();
   }

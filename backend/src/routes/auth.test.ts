@@ -3,7 +3,7 @@ import http from 'node:http';
 import { after, before, beforeEach, test } from 'node:test';
 import { Pool } from 'pg';
 import { createApp } from '../app.js';
-import { supabase } from '../lib/supabase.js';
+import { setSessionResolverForTests } from '../middleware/auth.js';
 
 /**
  * Exercises the real `/auth/me` route wiring over HTTP, mirroring
@@ -13,7 +13,7 @@ import { supabase } from '../lib/supabase.js';
  * resolution run for real.
  */
 
-const VALID_TOKEN = 'auth-me-test-valid-token';
+const VALID_TOKEN = 'auth-me-test-valid-token-------------------'; // session-cookie format: 43 base64url chars
 const AUTHENTICATED_USER_ID = 'auth-me-test-user-id';
 
 let grantedCapabilities: string[] = [];
@@ -23,16 +23,11 @@ let mockProfileRows: Record<string, unknown>[] = [];
 let mockPrivilegedRoles: string[] = [];
 let mockPrivilegedDisplayName: string | null = null;
 
-const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
 
 before(() => {
-  supabase.auth.getClaims = (async (token: string) => {
-    if (token !== VALID_TOKEN) {
-      return { data: null, error: new Error('invalid token') };
-    }
-    return { data: { claims: { sub: AUTHENTICATED_USER_ID, email: 'user@example.com' } }, error: null };
-  }) as typeof supabase.auth.getClaims;
+  setSessionResolverForTests(async (token: string) =>
+    token === VALID_TOKEN ? { sessionId: '00000000-0000-4000-8000-00000000cafe', userId: AUTHENTICATED_USER_ID, email: 'user@example.com' } : null);
 
   Pool.prototype.query = (async (text: unknown) => {
     const sql = String(text);
@@ -51,7 +46,7 @@ before(() => {
 });
 
 after(() => {
-  supabase.auth.getClaims = originalGetClaims;
+  setSessionResolverForTests(null);
   Pool.prototype.query = originalPoolQuery;
 });
 
@@ -96,7 +91,7 @@ test('GET /auth/me returns identity plus the caller\'s currently resolved capabi
   }];
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
       auth: { id: string };
@@ -124,7 +119,7 @@ test('GET /auth/me returns an empty capabilities array for a user with none (def
   grantedCapabilities = [];
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     assert.equal(res.status, 200);
     const body = (await res.json()) as { capabilities: string[] };
     assert.deepEqual(body.capabilities, []);
@@ -138,7 +133,7 @@ test('GET /auth/me immediately rejects a valid token for a DISABLED user even if
   grantedCapabilities = ['permit.create'];
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     assert.equal(res.status, 401);
   } finally {
     await close();
@@ -149,7 +144,7 @@ test('GET /auth/me fails closed when application access state is missing', async
   appAccessState = null;
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     assert.equal(res.status, 401);
   } finally {
     await close();
@@ -166,7 +161,7 @@ test('a privileged system account reports its roles and NO company, team or posi
   mockPrivilegedDisplayName = 'Bilal Ahmed';
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     const body = (await res.json()) as {
       profile: unknown;
       privilegedRoles: string[];
@@ -188,7 +183,7 @@ test('a CEO reports the CEO role and an authoritative personal name', async () =
   mockPrivilegedDisplayName = 'Sana Iqbal';
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     const body = (await res.json()) as { privilegedRoles: string[]; privilegedDisplayName: string };
     assert.deepEqual(body.privilegedRoles, ['CEO']);
     assert.equal(body.privilegedDisplayName, 'Sana Iqbal');
@@ -209,7 +204,7 @@ test('a normal employee carries no privileged display name', async () => {
   mockPrivilegedDisplayName = null;
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     const body = (await res.json()) as {
       profile: { displayName: string };
       privilegedDisplayName: string | null;
@@ -238,7 +233,7 @@ test('a ZPL employee whose POSITION is called "Site Manager" holds no privileged
   mockPrivilegedRoles = [];
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     const body = (await res.json()) as {
       profile: { company: { code: string }; positionName: string };
       privilegedRoles: string[];
@@ -266,7 +261,7 @@ test('an individually granted permission appears in the effective capabilities',
   }];
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     const body = (await res.json()) as { capabilities: string[]; profile: { company: { code: string } } };
     assert.ok(body.capabilities.includes('permit.view_all'));
     // A cross-company employee is fine: the permission is deliberately
@@ -282,7 +277,7 @@ test('/auth/me never exposes credential internals or raw audit rows', async () =
   mockPrivilegedRoles = [];
   const { url, close } = await startServer();
   try {
-    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { authorization: `Bearer ${VALID_TOKEN}` } });
+    const res = await fetch(`${url}/api/v1/auth/me`, { headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173' } });
     const body = (await res.json()) as Record<string, unknown>;
     const serialized = JSON.stringify({ ...body, mustChangePassword: undefined }).toLowerCase();
     for (const forbidden of [

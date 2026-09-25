@@ -4,7 +4,7 @@ import type { QueryFn } from '../../db/pool.js';
  * The single writer for `organization_audit_events`.
  *
  * WHY A SEPARATE TABLE. `account_audit_events` requires a
- * `target_user_id` that is a real `auth.users` row, and constrains the
+ * `target_user_id` that is a real `permit.users` row, and constrains the
  * actor to differ from the target for every manager event. A
  * COMPANY_CREATED event has no target user at all, and relaxing that
  * column to NULL would weaken a constraint that currently makes "a

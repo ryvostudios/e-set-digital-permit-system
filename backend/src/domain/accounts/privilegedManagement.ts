@@ -1,4 +1,6 @@
 import type { PrivilegedAccessAdmin } from '../../db/privilegedPool.js';
+import { hashPassword } from '../auth/passwords.js';
+import { normalizeEmail } from './credentials.js';
 import type { AccountsServiceDeps } from './service.js';
 
 /**
@@ -17,7 +19,7 @@ import type { AccountsServiceDeps } from './service.js';
  * nothing here is a singleton.
  *
  * NEVER A PROMOTION. A privileged account is established as its own new
- * Auth identity with its own privileged display name. A normal
+ * identity with its own privileged display name. A normal
  * workforce employee is never converted: migration 0019 refuses a
  * privileged grant for any user holding a workforce profile, and this
  * service checks the same thing first so the refusal is a clean 409
@@ -57,94 +59,19 @@ export interface CreateSiteManagerInput {
 export type CreateSiteManagerOutcome =
   | { outcome: 'ok'; userId: string }
   | { outcome: 'conflict'; reason: 'email_unavailable' }
-  | { outcome: 'failed'; reason: 'auth_create_failed' }
-  | { outcome: 'failed'; reason: 'provisioning_rolled_back' }
-  | { outcome: 'failed'; reason: 'provisioning_orphan_requires_operator'; orphanUserId: string }
-  /** Account and name exist, but the SITE_MANAGER grant did not land. It holds NO privilege; the CEO retries the grant. */
-  | { outcome: 'failed'; reason: 'grant_not_recorded'; userId: string };
+  | { outcome: 'failed'; reason: 'provisioning_rolled_back' };
 
-/**
- * Establishes a new E-SET SITE_MANAGER account.
- *
- * ORDER AND FAILURE DESIGN - identical in shape to employee
- * provisioning, for the same reasons:
- *   1. Create the Auth identity FIRST. At that instant it can
- *      authenticate against Supabase but has NO `app_user_access` row,
- *      and `requireAuth` fails closed on a missing row, so it can reach
- *      no application endpoint and holds no privilege.
- *   2. Write every PostgreSQL row in ONE transaction: the access row
- *      (ACTIVE, owing a password change), the privileged identity, and
- *      the SITE_MANAGER grant. They are genuinely atomic with each
- *      other, so there is no state with a grant but no name, or a name
- *      but no forced password change.
- *   3. On failure, COMPENSATE by deleting the Auth identity. If that
- *      also fails the identity remains harmless for the reason in step
- *      1, and the caller receives a distinct outcome naming the orphan.
- *
- * The forced password change is set in the same transaction as the
- * grant, so a Site Manager can never reach an application endpoint with
- * the temporary password the CEO chose.
- *
- * An existing email is NEVER adopted: reconciling onto an existing Auth
- * identity would let this endpoint attach privilege to an identity it
- * does not own - including a normal employee's.
- */
+/** All writes, including privileged audit, belong to one database function call. */
 export async function createSiteManagerAccount(
-  actorUserId: string,
+  sessionId: string,
   input: CreateSiteManagerInput,
-  deps: AccountsServiceDeps,
   privileged: PrivilegedAccessAdmin,
 ): Promise<CreateSiteManagerOutcome> {
-  const created = await deps.admin.createUser({
-    email: input.email,
-    password: input.temporaryPassword,
-  });
-  if (!created.ok) {
-    return created.reason === 'email_unavailable'
-      ? { outcome: 'conflict', reason: 'email_unavailable' }
-      : { outcome: 'failed', reason: 'auth_create_failed' };
-  }
-
-  const userId = created.userId;
-  try {
-    await deps.withTransaction(async (client) => {
-      await client.query(
-        `INSERT INTO app_user_access (user_id, state, must_change_password, credentials_changed_at)
-         VALUES ($1, 'ACTIVE', TRUE, now())`,
-        [userId],
-      );
-      // No company_id, no team, no position - a privileged system
-      // account has none, and none is fabricated to satisfy any column.
-      await client.query(
-        'INSERT INTO privileged_identities (user_id, display_name) VALUES ($1, $2)',
-        [userId, input.displayName],
-      );
-    });
-  } catch {
-    const removed = await deps.admin.deleteUser(userId);
-    return removed.ok
-      ? { outcome: 'failed', reason: 'provisioning_rolled_back' }
-      : { outcome: 'failed', reason: 'provisioning_orphan_requires_operator', orphanUserId: userId };
-  }
-
-  // The grant is the LAST step and travels over the separate privileged
-  // login, so it cannot share the transaction above. That split is safe
-  // precisely because of the ordering: at this point the account exists,
-  // is named, owes a password change, and holds NO privilege and NO
-  // capabilities - a privileged identity confers nothing on its own. If
-  // the grant fails, the reachable state has LESS authority than
-  // intended, never more, which is the property every cross-system step
-  // in this codebase is ordered to preserve.
-  //
-  // The Auth identity is deliberately NOT compensated here: the account
-  // is legitimate and complete apart from its authority, so deleting it
-  // would destroy a named identity over a retryable failure. The CEO
-  // retries via the grant endpoint, which succeeds because the
-  // privileged identity already exists.
-  const granted = await privileged.recordSiteManagerGrant(actorUserId, userId);
-  if (!granted.ok) return { outcome: 'failed', reason: 'grant_not_recorded', userId };
-
-  return { outcome: 'ok', userId };
+  const passwordHash = await hashPassword(input.temporaryPassword);
+  const result = await privileged.provisionSiteManager(sessionId, normalizeEmail(input.email), passwordHash, input.displayName);
+  if (result.ok) return { outcome: 'ok', userId: result.userId };
+  if (result.reason === 'email_unavailable') return { outcome: 'conflict', reason: 'email_unavailable' };
+  return { outcome: 'failed', reason: 'provisioning_rolled_back' };
 }
 
 export type SiteManagerGrantOutcome =
@@ -166,7 +93,7 @@ async function readPrivilegedState(
   targetUserId: string,
 ): Promise<{ exists: boolean; isSiteManager: boolean; isCeo: boolean; isEmployee: boolean }> {
   const access = await client.query<{ user_id: string }>(
-    'SELECT user_id FROM app_user_access WHERE user_id = $1 FOR UPDATE',
+    'SELECT user_id FROM app_user_access WHERE user_id = $1',
     [targetUserId],
   );
   if (access.rows.length === 0) {
@@ -199,7 +126,7 @@ async function readPrivilegedState(
  * This deliberately cannot bootstrap a brand-new privileged account: the
  * target must already have a `privileged_identities` row, so there is
  * always an authoritative display name behind the authority, and a bare
- * Auth id can never be handed privilege by identifier alone. Creating a
+ * user id can never be handed privilege by identifier alone. Creating a
  * new Site Manager is `createSiteManagerAccount`, which establishes name
  * and grant atomically.
  *
@@ -211,6 +138,7 @@ export async function grantSiteManager(
   targetUserId: string,
   deps: AccountsServiceDeps,
   privileged: PrivilegedAccessAdmin,
+  sessionId: string,
 ): Promise<SiteManagerGrantOutcome> {
   if (actorUserId === targetUserId) return { outcome: 'refused', reason: 'target_is_self' };
   try {
@@ -228,7 +156,7 @@ export async function grantSiteManager(
       if (identity.rows.length === 0) return { outcome: 'not_found' };
 
       // Written over the separate privileged login, never this one.
-      const recorded = await privileged.recordSiteManagerGrant(actorUserId, targetUserId);
+      const recorded = await privileged.recordSiteManagerGrant(sessionId, targetUserId);
       if (!recorded.ok) return { outcome: 'failed', reason: 'grant_write_failed' };
       return { outcome: 'ok' };
     });
@@ -253,6 +181,7 @@ export async function revokeSiteManager(
   targetUserId: string,
   deps: AccountsServiceDeps,
   privileged: PrivilegedAccessAdmin,
+  sessionId: string,
 ): Promise<SiteManagerGrantOutcome> {
   if (actorUserId === targetUserId) return { outcome: 'refused', reason: 'target_is_self' };
   try {
@@ -264,7 +193,7 @@ export async function revokeSiteManager(
       if (!state.isSiteManager) return { outcome: 'refused', reason: 'already_in_requested_state' };
 
       // Written over the separate privileged login, never this one.
-      const recorded = await privileged.recordSiteManagerRevoke(actorUserId, targetUserId);
+      const recorded = await privileged.recordSiteManagerRevoke(sessionId, targetUserId);
       if (!recorded.ok) return { outcome: 'failed', reason: 'grant_write_failed' };
       return { outcome: 'ok' };
     });

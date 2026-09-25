@@ -1,185 +1,44 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { PoolClient } from 'pg';
-import type { QueryFn } from '../db/pool.js';
-import { bootstrapInitialCeo, runBootstrapCeoCli, type BootstrapAdmin, type BootstrapCeoDeps } from './bootstrapCeo.js';
-
-class FakeBootstrapSystem {
-  reservation: { email: string; status: 'RESERVED' | 'COMPLETED'; token: string | null; authUserId: string | null; stale: boolean } | null = null;
-  ceos = new Set<string>();
-  authUsers = new Map<string, string>();
-  /** Auth ids that already belong to a NORMAL employee (a workforce profile). */
-  workforceEmployees = new Set<string>();
-  privilegedIdentities = new Map<string, string>();
-  createCalls = 0;
-  failAuthPersistenceOnce = false;
-  access = new Map<string, 'ACTIVE' | 'DISABLED'>();
-  /** The literal SQL used to create the access row, so its flags can be asserted. */
-  accessInsertSql: string | null = null;
-
-  admin: BootstrapAdmin = {
-    createUser: async ({ email }) => {
-      this.createCalls += 1;
-      if (this.authUsers.has(email.toLowerCase())) return { user: null, error: true };
-      const id = `auth-${this.authUsers.size + 1}`;
-      this.authUsers.set(email.toLowerCase(), id);
-      return { user: { id }, error: false };
-    },
-    findUserByEmail: async (email) => {
-      const id = this.authUsers.get(email.toLowerCase());
-      return id ? { id } : null;
-    },
-  };
-
-  query: QueryFn = (async (text: string, params: unknown[] = []) => {
-    const sql = text.trim();
-    if (sql.startsWith('SELECT user_id FROM (')) return { rows: [...this.ceos].slice(0, 1).map((user_id) => ({ user_id })) };
-    if (sql.startsWith('INSERT INTO initial_ceo_bootstrap')) {
-      if (this.reservation) return { rows: [] };
-      this.reservation = { email: String(params[0]).toLowerCase(), status: 'RESERVED', token: String(params[1]), authUserId: null, stale: false };
-      return { rows: [{ singleton: true }] };
-    }
-    if (sql.startsWith('UPDATE initial_ceo_bootstrap SET claim_token')) {
-      if (this.reservation?.status === 'RESERVED' && this.reservation.email === String(params[0]).toLowerCase() && this.reservation.stale) {
-        this.reservation.token = String(params[1]);
-        this.reservation.stale = false;
-        return { rows: [{ singleton: true }] };
-      }
-      return { rows: [] };
-    }
-    if (sql.startsWith('SELECT email, status FROM initial_ceo_bootstrap')) return { rows: this.reservation ? [{ email: this.reservation.email, status: this.reservation.status }] : [] };
-    if (sql.startsWith('UPDATE initial_ceo_bootstrap SET auth_user_id')) {
-      if (this.failAuthPersistenceOnce) { this.failAuthPersistenceOnce = false; throw new Error('transient database failure'); }
-      if (this.reservation?.status === 'RESERVED' && this.reservation.token === params[0]) this.reservation.authUserId = String(params[1]);
-      return { rows: [] };
-    }
-    if (sql.startsWith('SELECT auth_user_id FROM initial_ceo_bootstrap')) {
-      return { rows: this.reservation?.status === 'RESERVED' && this.reservation.token === params[0] ? [{ auth_user_id: this.reservation.authUserId }] : [] };
-    }
-    if (sql.startsWith('INSERT INTO app_user_access')) { this.accessInsertSql = sql; if (!this.access.has(String(params[0]))) this.access.set(String(params[0]), 'ACTIVE'); return { rows: [] }; }
-    if (sql.includes('FROM app_user_access') && sql.startsWith('SELECT')) { const state = this.access.get(String(params[0])); return { rows: state ? [{ state, must_change_password: false }] : [] }; }
-    if (sql.startsWith('SELECT user_id FROM workforce_profiles')) {
-      return { rows: this.workforceEmployees.has(String(params[0])) ? [{ user_id: params[0] }] : [] };
-    }
-    if (sql.startsWith('INSERT INTO privileged_identities')) {
-      this.privilegedIdentities.set(String(params[0]), String(params[1]));
-      return { rows: [] };
-    }
-    if (sql.startsWith('INSERT INTO privileged_access_events')) { this.ceos.add(String(params[0])); return { rows: [] }; }
-    if (sql.startsWith('UPDATE initial_ceo_bootstrap') && sql.includes("status = 'COMPLETED'")) {
-      if (this.reservation?.status === 'RESERVED' && this.reservation.token === params[0]) {
-        this.reservation.status = 'COMPLETED'; this.reservation.token = null; return { rows: [{ singleton: true }] };
-      }
-      return { rows: [] };
-    }
-    throw new Error(`unhandled bootstrap query: ${sql}`);
-  }) as QueryFn;
-
-  deps(token: string): BootstrapCeoDeps {
-    return {
-      query: this.query,
-      admin: this.admin,
-      claimToken: token,
-      withTransaction: async <T>(fn: (client: PoolClient) => Promise<T>) => fn({ query: this.query } as unknown as PoolClient),
-    };
-  }
-}
-
-const input = { email: 'ceo@example.com', password: 'a-strong-temporary-password', name: 'Sana Iqbal' };
-
-test('CEO bootstrap creates exactly one authoritative CEO and rejects a duplicate', async () => {
-  const system = new FakeBootstrapSystem();
-  const first = await bootstrapInitialCeo(input, system.deps('claim-1'));
-  const second = await bootstrapInitialCeo(input, system.deps('claim-2'));
-  assert.equal(first.outcome, 'ok');
-  assert.deepEqual(second, { outcome: 'conflict', reason: 'ceo_exists' });
-  assert.equal(system.ceos.size, 1);
-  assert.equal(system.createCalls, 1);
+import { installedDatabase } from '../test/permitSchemaFixtures.js';
+import { authDatabaseDeps } from '../test/authDatabase.js';
+import { bootstrapInitialCeo, runBootstrapCeoCli } from './bootstrapCeo.js';
+const input={email:'ceo@example.invalid',password:'FAKE-bootstrap-password',name:'Synthetic CEO'};
+test('bootstrap creates one complete CEO, owes password change, and refuses a second CEO',async()=>{
+ const db=await installedDatabase();
+ try{
+  await db.exec('SET ROLE permit_migrator; SET search_path=pg_catalog,permit,pg_temp');
+  const result=await bootstrapInitialCeo(input,authDatabaseDeps(db));
+  assert.equal(result.outcome,'ok');
+  assert.doesNotMatch(JSON.stringify(result),/password|hash|FAKE/);
+  assert.deepEqual(await bootstrapInitialCeo(input,authDatabaseDeps(db)),{outcome:'conflict',reason:'ceo_exists'});
+  assert.deepEqual((await db.query('SELECT must_change_password FROM app_user_access')).rows,[{must_change_password:true}]);
+  assert.deepEqual((await db.query('SELECT display_name FROM privileged_identities')).rows,[{display_name:input.name}]);
+  assert.deepEqual((await db.query('SELECT * FROM workforce_profiles')).rows,[]);
+ }finally{await db.close();}
 });
-
-test('concurrent CEO bootstrap reservations have one winner before any Auth identity is created', async () => {
-  const system = new FakeBootstrapSystem();
-  const [first, second] = await Promise.all([
-    bootstrapInitialCeo(input, system.deps('claim-1')),
-    bootstrapInitialCeo({ ...input, email: 'other@example.com' }, system.deps('claim-2')),
-  ]);
-  assert.equal([first, second].filter((result) => result.outcome === 'ok').length, 1);
-  assert.equal(system.ceos.size, 1);
-  assert.equal(system.createCalls, 1);
+test('bootstrap failure leaves no user or privileged identity and can retry after reservation expires',async()=>{
+ const db=await installedDatabase();
+ try{
+  await db.exec(`SET ROLE permit_migrator; SET search_path=pg_catalog,permit,pg_temp;
+    CREATE FUNCTION permit.test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic failure'; END $$;
+    CREATE TRIGGER test_fail BEFORE INSERT ON permit.privileged_access_events FOR EACH ROW EXECUTE FUNCTION permit.test_fail();`);
+  await assert.rejects(bootstrapInitialCeo(input,authDatabaseDeps(db)));
+  assert.deepEqual((await db.query('SELECT id FROM users')).rows,[]);
+  assert.deepEqual((await db.query('SELECT user_id FROM privileged_identities')).rows,[]);
+  await db.exec("DROP TRIGGER test_fail ON permit.privileged_access_events; DROP FUNCTION permit.test_fail(); UPDATE initial_ceo_bootstrap SET claimed_at=now()-interval '6 minutes'");
+  assert.equal((await bootstrapInitialCeo(input,authDatabaseDeps(db))).outcome,'ok');
+ }finally{await db.close();}
 });
-
-test('Auth-created/DB-failed bootstrap reconciles the same Auth identity on retry instead of creating an orphan repeatedly', async () => {
-  const system = new FakeBootstrapSystem();
-  system.failAuthPersistenceOnce = true;
-  await assert.rejects(() => bootstrapInitialCeo(input, system.deps('claim-1')), /transient database failure/);
-  assert.equal(system.authUsers.size, 1);
-  system.reservation!.stale = true;
-  const retried = await bootstrapInitialCeo(input, system.deps('claim-2'));
-  assert.equal(retried.outcome, 'ok');
-  if (retried.outcome === 'ok') assert.equal(retried.authUserCreated, false);
-  assert.equal(system.authUsers.size, 1);
-  assert.equal(system.ceos.size, 1);
-});
-
-test('a pre-existing matching Auth identity is safely reused and secrets are not part of the result', async () => {
-  const system = new FakeBootstrapSystem();
-  system.authUsers.set(input.email, 'existing-auth-id');
-  const result = await bootstrapInitialCeo(input, system.deps('claim-1'));
-  assert.deepEqual(result, { outcome: 'ok', userId: 'existing-auth-id', authUserCreated: false });
-  assert.doesNotMatch(JSON.stringify(result), /temporary-password/);
-});
-
-test('CEO bootstrap CLI failure output cannot reveal password, token, service secret, URL, or raw exception data', async () => {
-  const output: string[] = [];
-  const hostile = `${input.password} Authorization: Bearer abc123 sb_secret_FAKE_SECRET https://secret.example/?token=SUPER_SECRET_TOKEN`;
-  const ok = await runBootstrapCeoCli({
-    execute: async () => { throw new Error(hostile); },
-    error: (message) => output.push(message),
-  });
-  assert.equal(ok, false);
-  const rendered = output.join('\n');
-  assert.equal(rendered, 'bootstrap:ceo: failed safely');
-  assert.doesNotMatch(rendered, /strong-temporary|abc123|sb_secret|SUPER_SECRET_TOKEN|https:/);
-});
-
-test('the bootstrapped CEO gets an authoritative privileged display name and NO workforce identity', async () => {
-  const system = new FakeBootstrapSystem();
-  const result = await bootstrapInitialCeo(input, system.deps('claim-name'));
-  assert.equal(result.outcome, 'ok');
-  assert.deepEqual([...system.privilegedIdentities.values()], ['Sana Iqbal']);
-  // A privileged system account has no company, team or position, so the
-  // bootstrap must never write a workforce profile or an assignment.
-  assert.equal(system.workforceEmployees.size, 0);
-});
-
-test('the bootstrap REFUSES to adopt an Auth identity that belongs to a normal employee', async () => {
-  const system = new FakeBootstrapSystem();
-  // The email already has an Auth identity, and that identity is a
-  // normal organizational employee - the exact reuse that would make one
-  // person simultaneously an employee and the CEO.
-  system.authUsers.set('ceo@example.com', 'auth-existing-employee');
-  system.workforceEmployees.add('auth-existing-employee');
-
-  const result = await bootstrapInitialCeo(input, system.deps('claim-employee'));
-  assert.deepEqual(result, { outcome: 'conflict', reason: 'email_belongs_to_employee' });
-
-  // Nothing was granted, named, or converted; the employee is untouched.
-  assert.equal(system.ceos.size, 0);
-  assert.equal(system.privilegedIdentities.size, 0);
-  assert.ok(system.workforceEmployees.has('auth-existing-employee'));
-});
-
-test('the bootstrapped CEO OWES a first-login password change, like every other account', async () => {
-  // The bootstrap password is chosen by an operator and typed into an
-  // environment variable, so someone other than the CEO has seen it. The
-  // CEO used to be the single account exempt from replacing it - the one
-  // account where that matters most. Employee provisioning
-  // (domain/accounts/service.ts) and Site Manager provisioning
-  // (domain/accounts/privilegedManagement.ts) have always set this.
-  const system = new FakeBootstrapSystem();
-  const result = await bootstrapInitialCeo(input, system.deps('claim-force-change'));
-  assert.equal(result.outcome, 'ok');
-  assert.ok(system.accessInsertSql, 'the bootstrap must create the access row');
-  assert.match(system.accessInsertSql, /must_change_password/);
-  assert.match(system.accessInsertSql, /TRUE/);
+test('bootstrap never adopts an existing identity or echoes an exception',async()=>{
+ const db=await installedDatabase();
+ try{
+  await db.exec('SET ROLE permit_migrator; SET search_path=pg_catalog,permit,pg_temp');
+  await db.query('INSERT INTO users(email) VALUES($1)',[input.email]);
+  assert.deepEqual(await bootstrapInitialCeo(input,authDatabaseDeps(db)),{outcome:'conflict',reason:'email_unavailable'});
+  assert.deepEqual((await db.query('SELECT user_id FROM privileged_access_events')).rows,[]);
+  const output:string[]=[];
+  assert.equal(await runBootstrapCeoCli({execute:async()=>{throw new Error(input.password);},error:(s)=>output.push(s)}),false);
+  assert.deepEqual(output,['bootstrap:ceo: failed safely']);
+ }finally{await db.close();}
 });

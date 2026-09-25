@@ -1,37 +1,12 @@
 import { ApiError, toApiError, toNetworkError } from './errors';
 
-/**
- * THE single place this application talks to the backend.
- *
- * Every network call in the app goes through `apiRequest`, so there is
- * exactly one place that attaches the access token, one place that
- * decides what an error means, and one place that could ever be audited
- * for what leaves the browser. No component calls `fetch` directly.
- *
- * THE ACCESS TOKEN IS NEVER STORED BY THIS MODULE. It is read, per
- * request, from a provider function the auth layer installs
- * (`setAccessTokenProvider`), which asks the Supabase client for the
- * current session. That keeps token lifetime entirely inside Supabase's
- * own (refresh-aware) storage and means signing out immediately stops
- * this module from being able to authenticate anything.
- *
- * NOTHING IS EVER LOGGED HERE. Not the token, not a request body (permit
- * content, temporary passwords), not a response body.
- */
+/** Single backend boundary. The browser attaches an HttpOnly Permit cookie;
+ * JavaScript never reads, stores, or propagates an authentication token. */
 
 const API_BASE_URL: string = import.meta.env.VITE_API_BASE_URL ?? '';
 
 /** The versioned API prefix every backend route is mounted under (backend/src/app.ts). */
 const API_PREFIX = '/api/v1';
-
-type AccessTokenProvider = () => Promise<string | null>;
-
-let accessTokenProvider: AccessTokenProvider = async () => null;
-
-/** Installed once by the auth layer. Never accepts a token value itself - only a way to ask for the current one. */
-export function setAccessTokenProvider(provider: AccessTokenProvider): void {
-  accessTokenProvider = provider;
-}
 
 /**
  * Called whenever the backend reports that the session is no longer
@@ -87,8 +62,6 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const { method = 'GET', body, query, signal, allowDuringPasswordChange = false } = options;
 
   const headers: Record<string, string> = { accept: 'application/json' };
-  const token = await accessTokenProvider();
-  if (token) headers.authorization = `Bearer ${token}`;
   if (body !== undefined) headers['content-type'] = 'application/json';
 
   let response: Response;
@@ -96,6 +69,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     response = await fetch(buildUrl(path, query), {
       method,
       headers,
+      credentials: 'include',
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       ...(signal ? { signal } : {}),
     });
@@ -128,7 +102,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 
 /**
  * Downloads a binary response (the permit PDF). Kept here, alongside
- * `apiRequest`, so the PDF path uses exactly the same token attachment
+ * `apiRequest`, so the PDF path uses exactly the same cookie credentials
  * and error mapping as every JSON call - and so no component ever builds
  * a storage URL of its own. The bytes are served BY THE BACKEND after it
  * authorizes the permit; the browser never sees a bucket, a key, or a
@@ -139,14 +113,13 @@ export async function apiDownload(
   options: { signal?: AbortSignal } = {},
 ): Promise<{ blob: Blob; fileName: string | null }> {
   const headers: Record<string, string> = {};
-  const token = await accessTokenProvider();
-  if (token) headers.authorization = `Bearer ${token}`;
 
   let response: Response;
   try {
     response = await fetch(buildUrl(path, undefined), {
       method: 'GET',
       headers,
+      credentials: 'include',
       ...(options.signal ? { signal: options.signal } : {}),
     });
   } catch (error) {

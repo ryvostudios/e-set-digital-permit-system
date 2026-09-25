@@ -22,8 +22,8 @@ import { Alert } from '../../ui/Feedback';
  *
  * THE MINIMUM LENGTH SHOWN IS THE BACKEND'S OWN (12 characters, from
  * `passwordSchema`). No extra composition policy is invented here:
- * Supabase Auth holds the project's configured policy and remains the
- * authority, and a rejection from it is reported as the backend words it.
+ * the Permit backend owns the credential policy, and any refusal is
+ * shown using its response.
  */
 
 /** From backend `domain/accounts/validation.ts::passwordSchema`. */

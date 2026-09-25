@@ -1,11 +1,18 @@
 import type { NextFunction, Request, Response } from 'express';
-import { query, type QueryFn } from '../db/pool.js';
-import { supabase, toSafeAuthErrorMessage } from '../lib/supabase.js';
+import { query, toSafeDbErrorMessage, type QueryFn } from '../db/pool.js';
+import {
+  clearSessionCookie,
+  findActiveSession,
+  readSessionToken,
+  type ActiveSession,
+} from '../domain/auth/sessions.js';
 
 /** Minimal, validated authentication identity attached to a request. Proves identity only — not authorization. */
 export interface AuthIdentity {
   id: string;
   email: string | null;
+  /** The server-side session this request authenticated with (domain/auth/sessions.ts). */
+  sessionId: string;
   /**
    * Application-side credential state, read from `app_user_access` on
    * every authenticated request. `true` means the account holds a
@@ -39,14 +46,22 @@ export function sendPasswordChangeRequired(res: Response): void {
   });
 }
 
-function extractBearerToken(header: string | undefined): string | null {
-  if (!header) return null;
-  const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
-  return match?.[1] ?? null;
+type SessionResolver = (token: string) => Promise<ActiveSession | null>;
+
+let sessionResolverOverride: SessionResolver | null = null;
+
+/** Test-only injection at the session-lookup boundary; production callers cannot enable it. */
+export function setSessionResolverForTests(resolver: SessionResolver | null): void {
+  if (!process.env.NODE_TEST_CONTEXT) throw new Error('Session resolver overrides are test-only');
+  sessionResolverOverride = resolver;
+}
+
+function resolveSession(token: string): Promise<ActiveSession | null> {
+  return sessionResolverOverride ? sessionResolverOverride(token) : findActiveSession(query, token);
 }
 
 export interface AppUserAccessState {
-  state: 'ACTIVE' | 'DISABLED';
+  state: 'ACTIVE' | 'DISABLED' | 'DELETED';
   must_change_password: boolean;
 }
 
@@ -57,10 +72,9 @@ export interface AppUserAccessState {
  * an Auth identity that was never (or only half-) provisioned - which
  * must never obtain access.
  *
- * Returns the credential state alongside ACTIVE/DISABLED so a
- * manager-initiated password reset takes effect on the very NEXT request
- * made with an already-issued token, without a second query and without
- * ever reading `auth.sessions`.
+ * Returns the credential state alongside ACTIVE/DISABLED so the forced
+ * password-change gate is decided from authoritative application state on
+ * every request, never from anything the session itself carries.
  */
 export async function loadAppUserAccess(
   userId: string,
@@ -80,42 +94,39 @@ export async function isAppUserActive(userId: string, queryFn: QueryFn = query):
 }
 
 /**
- * Verifies the caller's Supabase access token server-side and attaches
- * the resulting identity to `req.auth`. Rejects with 401 on any missing
- * or invalid token, or on any account that is not ACTIVE. Never trusts a
- * client-supplied user/session object.
+ * Resolves the caller's Permit session cookie server-side and attaches
+ * the resulting identity to `req.auth`. Rejects with 401 on a missing,
+ * unknown, revoked or expired session, or on any account that is not
+ * ACTIVE. Never trusts a client-supplied user/session object.
  *
  * Shared by both exported guards below; it deliberately does NOT decide
  * the forced-password-change question, so the two guards differ in
  * exactly one place.
  */
 async function authenticate(req: Request, res: Response): Promise<AuthIdentity | null> {
-  const token = extractBearerToken(req.header('authorization'));
+  const token = readSessionToken(req);
   if (!token) {
     sendUnauthorized(res);
     return null;
   }
 
   try {
-    const { data, error } = await supabase.auth.getClaims(token);
-    if (error || !data) {
-      sendUnauthorized(res);
-      return null;
-    }
-
-    const { claims } = data;
-    const access = await loadAppUserAccess(claims.sub);
-    if (access?.state !== 'ACTIVE') {
+    const session = await resolveSession(token);
+    const access = session ? await loadAppUserAccess(session.userId) : null;
+    if (!session || access?.state !== 'ACTIVE') {
+      // A dead cookie is removed so the browser stops presenting it.
+      clearSessionCookie(res);
       sendUnauthorized(res);
       return null;
     }
     return {
-      id: claims.sub,
-      email: claims.email ?? null,
+      id: session.userId,
+      email: session.email,
+      sessionId: session.sessionId,
       mustChangePassword: access.must_change_password,
     };
   } catch (err) {
-    console.error('Authentication verification failed:', toSafeAuthErrorMessage(err));
+    console.error('Authentication verification failed:', toSafeDbErrorMessage(err));
     sendUnauthorized(res);
     return null;
   }
@@ -132,12 +143,9 @@ async function authenticate(req: Request, res: Response): Promise<AuthIdentity |
  * therefore no "alternate route" that quietly skips the check, because
  * skipping it requires naming a different middleware.
  *
- * This is also what makes a manager-initiated reset effective
- * IMMEDIATELY: an access token issued before the reset still verifies
- * against Supabase (it remains cryptographically valid until it
- * expires), but the account-state read above now reports
- * `must_change_password = true`, so the request is refused here rather
- * than proceeding to any Permit/JSA/records/admin operation.
+ * A manager-initiated reset revokes every session of the account in the
+ * same transaction; the account-state read above is the second, independent
+ * gate (`must_change_password = true` refuses everything here).
  */
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const auth = await authenticate(req, res);
@@ -157,7 +165,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
  * outstanding: reading one's own state (`/auth/me`) and performing the
  * change itself (`/auth/change-password`).
  *
- * Everything else `requireAuth` enforces (real token verification,
+ * Everything else `requireAuth` enforces (real session verification,
  * ACTIVE account) still applies unchanged, so this is never a way to
  * reach application data - the routes that use it expose none.
  */

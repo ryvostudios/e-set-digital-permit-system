@@ -1,3 +1,6 @@
+import bcrypt from 'bcryptjs';
+import { planLegacyUserImport, importLegacyUsers } from '../domain/auth/legacyImport.js';
+import type { QueryFn } from './pool.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import type { PGlite } from '@electric-sql/pglite';
@@ -120,11 +123,11 @@ async function dependencyOrder(db: PGlite): Promise<string[]> {
        AND p.relnamespace = 'permit'::regnamespace AND c.oid <> p.oid`);
   const all = (await db.query<{ relname: string }>(`
     SELECT relname FROM pg_class WHERE relnamespace = 'permit'::regnamespace AND relkind = 'r'
-       AND relname <> 'schema_migrations' ORDER BY 1`)).rows.map((r) => r.relname);
+       AND relname NOT IN ('schema_migrations', 'users', 'user_sessions') ORDER BY 1`)).rows.map((r) => r.relname);
   const ordered: string[] = [];
   while (ordered.length < all.length) {
     const ready = all.filter((t) => !ordered.includes(t) &&
-      result.rows.every((e) => e.child !== t || ordered.includes(e.parent)));
+      result.rows.every((e) => e.child !== t || ordered.includes(e.parent) || !all.includes(e.parent)));
     assert.ok(ready.length > 0, 'foreign keys between permit tables must be acyclic');
     ordered.push(...ready);
   }
@@ -154,8 +157,18 @@ before(async () => {
   target = await installedDatabase({ baselineReferenceData: false });
   tables = await dependencyOrder(target);
 
+  // Synthetic credentials only: UUIDs and normalized login identity precede
+  // all referencing data in the destination. Nothing reads a real Auth host.
   const users = (await source.query<{ id: string }>('SELECT id FROM auth.users ORDER BY id')).rows;
-  for (const user of users) await target.query('INSERT INTO auth.users (id) VALUES ($1)', [user.id]);
+  const legacyHash = await bcrypt.hash('FAKE-data-migration-password', 10);
+  const plan = planLegacyUserImport(users.map((user) => ({id:user.id,email:`${user.id}@example.test`,
+    encryptedPassword:legacyHash,createdAt:'2020-01-01T00:00:00Z'})));
+  assert.equal(plan.ok,true);
+  if (!plan.ok) throw new Error('synthetic import plan refused');
+  await target.exec('SET ROLE permit_migrator; SET search_path=pg_catalog,permit,pg_temp');
+  await target.transaction(async(tx)=>{
+    assert.equal(await importLegacyUsers(tx.query.bind(tx) as QueryFn,plan),users.length);
+  });
 
   // The import step, as the data migration will run it.
   await target.exec('SET ROLE permit_migrator; BEGIN;');

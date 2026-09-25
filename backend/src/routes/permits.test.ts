@@ -3,7 +3,7 @@ import http from 'node:http';
 import { after, before, beforeEach, test } from 'node:test';
 import { Pool, type PoolClient } from 'pg';
 import { createApp } from '../app.js';
-import { supabase } from '../lib/supabase.js';
+import { setSessionResolverForTests } from '../middleware/auth.js';
 import { computeFileHash, setDocumentStorageAdapterForTests, type DocumentStorageAdapter } from '../domain/permits/documents.js';
 import { blankPermitV2 } from '../test/v2Forms.js';
 
@@ -23,7 +23,7 @@ import { blankPermitV2 } from '../test/v2Forms.js';
  * mocked, or duplicated - it all runs for real against these two stubs.
  */
 
-const VALID_TOKEN = 'route-test-valid-token';
+const VALID_TOKEN = 'route-test-valid-token---------------------'; // session-cookie format: 43 base64url chars
 const AUTHENTICATED_USER_ID = 'route-test-user-id';
 const SOME_PERMIT_ID = '00000000-0000-0000-0000-000000000000';
 
@@ -77,19 +77,14 @@ function makePermitDetailRow(overrides: Record<string, unknown> = {}): Record<st
   };
 }
 
-const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
 const originalPoolConnect = Pool.prototype.connect;
 
 before(() => {
   // Stub Supabase token verification: only VALID_TOKEN authenticates,
   // matching the { data, error } shape `requireAuth` reads.
-  supabase.auth.getClaims = (async (token: string) => {
-    if (token !== VALID_TOKEN) {
-      return { data: null, error: new Error('invalid token') };
-    }
-    return { data: { claims: { sub: AUTHENTICATED_USER_ID, email: null } }, error: null };
-  }) as typeof supabase.auth.getClaims;
+  setSessionResolverForTests(async (token: string) =>
+    token === VALID_TOKEN ? { sessionId: '00000000-0000-4000-8000-00000000cafe', userId: AUTHENTICATED_USER_ID, email: null } : null);
 
   // Stub the bare `Pool.query()` calls the read endpoints/capability
   // resolution make. Dispatches on the query text (mirroring the exact
@@ -201,7 +196,7 @@ before(() => {
 });
 
 after(() => {
-  supabase.auth.getClaims = originalGetClaims;
+  setSessionResolverForTests(null);
   Pool.prototype.query = originalPoolQuery;
   Pool.prototype.connect = originalPoolConnect;
 });
@@ -235,7 +230,7 @@ async function startServer(): Promise<{ url: string; close: () => Promise<void> 
 
 function closeRequest(url: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1/permits/${SOME_PERMIT_ID}/close`, {
     method: 'POST',
     headers,
@@ -245,14 +240,14 @@ function closeRequest(url: string, token?: string): Promise<Response> {
 
 function getRequest(url: string, path: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = {};
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1${path}`, { method: 'GET', headers });
 }
 
 /** Generic POST helper for the new workflow-completion mutation routes below (send-back, resubmit, hold, resume, cancel, renew, hse-send-back). */
 function postRequest(url: string, path: string, token: string | undefined, body: unknown): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
@@ -1730,7 +1725,7 @@ test('permit.view_all can DOWNLOAD an issued PDF it does not own, but gains no a
     for (const path of [`/permits/${SOME_PERMIT_ID}/forward-hse`, `/permits/${SOME_PERMIT_ID}/hse-approve`, `/permits/${SOME_PERMIT_ID}/send-back`]) {
       const response = await fetch(new URL(`/api/v1${path}`, url), {
         method: 'POST',
-        headers: { authorization: `Bearer ${VALID_TOKEN}`, 'content-type': 'application/json' },
+        headers: { cookie: `permit_session=${VALID_TOKEN}`, origin: 'http://localhost:5173', 'content-type': 'application/json' },
         body: JSON.stringify({ expectedVersion: 1 }),
       });
       assert.equal(response.status, 403, `${path} must refuse a permit.view_all holder`);
@@ -1909,7 +1904,7 @@ test('the catalogue reads nothing from the database', async () => {
  */
 function fallbackApproveRequest(url: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1/permits/${SOME_PERMIT_ID}/fallback-approve`, {
     method: 'POST',
     headers,

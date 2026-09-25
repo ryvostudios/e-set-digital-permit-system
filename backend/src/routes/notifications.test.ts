@@ -3,7 +3,7 @@ import http from 'node:http';
 import { after, before, beforeEach, test } from 'node:test';
 import { Pool } from 'pg';
 import { createApp } from '../app.js';
-import { supabase } from '../lib/supabase.js';
+import { setSessionResolverForTests } from '../middleware/auth.js';
 
 /**
  * Exercises the REAL Express app/router over actual HTTP requests - see
@@ -11,7 +11,7 @@ import { supabase } from '../lib/supabase.js';
  * Supabase token verification and `Pool.prototype.query` are stubbed).
  */
 
-const VALID_TOKEN = 'notif-route-test-valid-token';
+const VALID_TOKEN = 'notif-route-test-valid-token---------------'; // session-cookie format: 43 base64url chars
 const AUTHENTICATED_USER_ID = 'notif-route-test-user-id';
 
 let mockNotificationRows: Record<string, unknown>[] = [];
@@ -33,14 +33,11 @@ function makeNotification(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
-const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
 
 before(() => {
-  supabase.auth.getClaims = (async (token: string) => {
-    if (token !== VALID_TOKEN) return { data: null, error: new Error('invalid token') };
-    return { data: { claims: { sub: AUTHENTICATED_USER_ID, email: null } }, error: null };
-  }) as typeof supabase.auth.getClaims;
+  setSessionResolverForTests(async (token: string) =>
+    token === VALID_TOKEN ? { sessionId: '00000000-0000-4000-8000-00000000cafe', userId: AUTHENTICATED_USER_ID, email: null } : null);
 
   Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
     const sql = String(text).trim();
@@ -73,7 +70,7 @@ before(() => {
 });
 
 after(() => {
-  supabase.auth.getClaims = originalGetClaims;
+  setSessionResolverForTests(null);
   Pool.prototype.query = originalPoolQuery;
 });
 
@@ -96,13 +93,13 @@ async function startServer(): Promise<{ url: string; close: () => Promise<void> 
 
 function getRequest(url: string, path: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = {};
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1${path}`, { method: 'GET', headers });
 }
 
 function postRequest(url: string, path: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = {};
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1${path}`, { method: 'POST', headers });
 }
 

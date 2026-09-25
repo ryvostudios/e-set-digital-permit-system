@@ -1,42 +1,16 @@
 import { createContext, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { setAccessTokenProvider, setSessionEndedHandler } from '../api/client';
+import { apiRequest, setSessionEndedHandler } from '../api/client';
 import { getCurrentUser } from '../api/endpoints';
 import { asApiError, type ApiError } from '../api/errors';
 import type { CurrentUser } from '../api/types';
 import { clearCaches } from '../lib/cache';
 import { clearServiceWorkerCaches } from '../pwa/register';
 import { deriveCapabilities, type Capabilities } from './capabilities';
-import {
-  clearPersistedSession,
-  getAccessToken,
-  isSupabaseConfigured,
-  setRememberPreference,
-  supabase,
-} from './supabaseClient';
+import { clearLegacyCredentials } from './clearLegacyCredentials';
 
-/**
- * THE authoritative current-user bootstrap.
- *
- * Authentication and IDENTITY are two different things here, and the
- * separation is the whole point:
- *
- *   Supabase proves only that a person holds valid credentials. It is
- *   never asked who they are in this application.
- *
- *   `GET /auth/me` is the ONLY source of application identity: the
- *   display name, the Company/Team/Position (or the absence of all
- *   three), the privileged roles, the effective capabilities, and
- *   whether a password change is outstanding. Nothing is ever read from
- *   the JWT payload, from `user_metadata`, or from the email address.
- *
- * If `/auth/me` refuses the session - a disabled, deleted, or
- * de-provisioned account - the frontend tears its own state down and
- * returns to login rather than rendering a shell for an account the
- * backend has stopped accepting.
- */
-
+/** Backend /auth/me is the sole authority for identity and session restoration. */
 export type AuthPhase =
-  /** Restoring a persisted Supabase session, before anything is known. */
+  /** Restoring a backend cookie session, before anything is known. */
   | 'initializing'
   /** No session: show login. */
   | 'signed-out'
@@ -75,12 +49,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [identityError, setIdentityError] = useState<ApiError | null>(null);
   /** Guards against a resolved bootstrap overwriting a newer sign-out. */
   const generation = useRef(0);
-
-  // The API client asks for a token per request rather than holding one,
-  // so a sign-out immediately stops it being able to authenticate.
-  useEffect(() => {
-    setAccessTokenProvider(getAccessToken);
-  }, []);
+  const [signOutError, setSignOutError] = useState(false);
+  const channel = useRef<BroadcastChannel | null>(null);
 
   /**
    * Wipes every trace of the previous account from this tab. Called on
@@ -111,8 +81,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (apiError.isSessionEnded) {
         // The backend has stopped accepting this session (disabled,
         // deleted, or never provisioned). End it locally too.
-        await supabase.auth.signOut().catch(() => undefined);
-        clearPersistedSession();
         resetLocalState();
         setPhase('signed-out');
         return;
@@ -123,86 +91,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [resetLocalState]);
 
-  // A 401 from ANY endpoint means the session is over. Handled centrally
-  // so no individual screen has to notice.
   useEffect(() => {
     setSessionEndedHandler(() => {
-      void (async () => {
-        await supabase.auth.signOut().catch(() => undefined);
-        clearPersistedSession();
-        resetLocalState();
-        setPhase('signed-out');
-      })();
+      resetLocalState();
+      setPhase('signed-out');
     });
     return () => setSessionEndedHandler(() => {});
   }, [resetLocalState]);
 
-  // Restore a persisted session on load, then follow Supabase's own
-  // auth state (token refresh, sign-out in another tab).
   useEffect(() => {
-    if (!isSupabaseConfigured) {
-      setPhase('signed-out');
-      return;
+    clearLegacyCredentials();
+    void Promise.resolve().then(loadIdentity);
+    const onFocus = () => { void loadIdentity(); };
+    window.addEventListener('focus', onFocus);
+    if (typeof BroadcastChannel !== 'undefined') {
+      const current = new BroadcastChannel('permit-session-events');
+      channel.current = current;
+      current.onmessage = () => { void loadIdentity(); };
     }
-
-    let cancelled = false;
-
-    void supabase.auth.getSession().then(({ data }) => {
-      if (cancelled) return;
-      if (data.session) void loadIdentity();
-      else setPhase('signed-out');
-    });
-
-    const { data: subscription } = supabase.auth.onAuthStateChange((event, session) => {
-      if (cancelled) return;
-      if (event === 'SIGNED_OUT' || !session) {
-        resetLocalState();
-        setPhase('signed-out');
-      }
-      // SIGNED_IN and TOKEN_REFRESHED are deliberately not acted on
-      // here: `signIn` drives the bootstrap itself, and a token refresh
-      // changes no identity.
-    });
-
     return () => {
-      cancelled = true;
-      subscription.subscription.unsubscribe();
+      generation.current += 1;
+      window.removeEventListener('focus', onFocus);
+      channel.current?.close();
+      channel.current = null;
     };
-  }, [loadIdentity, resetLocalState]);
+  }, [loadIdentity]);
 
-  const signIn = useCallback(
-    async (email: string, password: string, remember: boolean): Promise<void> => {
-      if (!isSupabaseConfigured) {
-        throw new SignInError('Sign-in is not configured for this environment.');
-      }
-      // Recorded BEFORE the call, so the session Supabase is about to
-      // write lands in the store the person chose.
-      setRememberPreference(remember);
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) {
-        // Deliberately one message for every credential failure: never
-        // reveal whether an address exists.
-        throw new SignInError(
-          error.status === 400 || error.status === 401
-            ? 'Email or password is incorrect.'
-            : 'Sign-in is unavailable right now. Please try again.',
-        );
-      }
-      // Nothing is trusted from the sign-in response - identity comes
-      // from `/auth/me` and nowhere else.
-      await loadIdentity();
-    },
-    [loadIdentity],
-  );
+  const signIn = useCallback(async (email: string, password: string, remember: boolean): Promise<void> => {
+    try {
+      await apiRequest<void>('/auth/login', { method: 'POST', body: { email, password, remember } });
+    } catch (error) {
+      throw new SignInError(asApiError(error).status === 401
+        ? 'Email or password is incorrect.' : 'Sign-in is unavailable right now. Please try again.');
+    }
+    generation.current += 1;
+    setSignOutError(false);
+    await loadIdentity();
+    channel.current?.postMessage('changed');
+  }, [loadIdentity]);
 
   const signOut = useCallback(async (): Promise<void> => {
-    await supabase.auth.signOut().catch(() => undefined);
-    clearPersistedSession();
-    // The preference is cleared too, so the next sign-in starts from the
-    // safe default (session-scoped) rather than inheriting a choice.
-    setRememberPreference(false);
+    setSignOutError(false);
+    try {
+      await apiRequest<void>('/auth/logout', { method: 'POST' });
+    } catch {
+      // Do not claim success while a server session may still be usable.
+      setSignOutError(true);
+      return;
+    }
     resetLocalState();
     setPhase('signed-out');
+    channel.current?.postMessage('changed');
   }, [resetLocalState]);
 
   const value = useMemo<AuthState>(
@@ -218,5 +157,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [phase, user, identityError, signIn, signOut, loadIdentity],
   );
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={value}>
+    {signOutError ? <div role="alert">Sign-out could not be completed. Please try again.</div> : null}
+    {children}
+  </AuthContext.Provider>;
 }

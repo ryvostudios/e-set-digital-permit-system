@@ -21,11 +21,6 @@ function baseEnv(overrides: Record<string, string | undefined> = {}): Record<str
   };
 }
 
-function jwtWithPayload(payload: Record<string, unknown>): string {
-  const base64url = (obj: unknown) =>
-    Buffer.from(JSON.stringify(obj)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  return `${base64url({ alg: 'HS256', typ: 'JWT' })}.${base64url(payload)}.fake-signature`;
-}
 
 test('envSchema accepts a minimal valid development configuration', () => {
   const result = envSchema.safeParse(baseEnv());
@@ -42,10 +37,6 @@ test('envSchema rejects a non-postgres DATABASE_URL scheme (e.g. accidentally po
   assert.equal(result.success, false);
 });
 
-test('envSchema fails when SUPABASE_URL is missing or not a URL', () => {
-  assert.equal(envSchema.safeParse(baseEnv({ SUPABASE_URL: undefined })).success, false);
-  assert.equal(envSchema.safeParse(baseEnv({ SUPABASE_URL: 'not-a-url' })).success, false);
-});
 
 test('envSchema fails when SITE_TIMEZONE is missing or not a real IANA zone', () => {
   assert.equal(envSchema.safeParse(baseEnv({ SITE_TIMEZONE: undefined })).success, false);
@@ -100,22 +91,9 @@ test('envSchema: development does not require CORS_ALLOWED_ORIGINS (falls back t
   assert.equal(result.success, true);
 });
 
-test('envSchema rejects a SUPABASE_PUBLISHABLE_KEY that looks like the new-format service-role secret key', () => {
-  const result = envSchema.safeParse(baseEnv({ SUPABASE_PUBLISHABLE_KEY: 'sb_secret_abcdef1234567890' }));
-  assert.equal(result.success, false);
-});
 
-test('envSchema rejects a SUPABASE_PUBLISHABLE_KEY that looks like a legacy service_role JWT', () => {
-  const serviceRoleJwt = jwtWithPayload({ role: 'service_role', iss: 'supabase' });
-  const result = envSchema.safeParse(baseEnv({ SUPABASE_PUBLISHABLE_KEY: serviceRoleJwt }));
-  assert.equal(result.success, false);
-});
 
-test('envSchema accepts a legacy anon-role JWT (the correct key shape, pre-sb_publishable_ format)', () => {
-  const anonJwt = jwtWithPayload({ role: 'anon', iss: 'supabase' });
-  const result = envSchema.safeParse(baseEnv({ SUPABASE_PUBLISHABLE_KEY: anonJwt }));
-  assert.equal(result.success, true);
-});
+
 
 test('envSchema accepts the new sb_publishable_ key format', () => {
   const result = envSchema.safeParse(baseEnv({ SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_abcdef1234567890' }));
@@ -302,35 +280,9 @@ test('envSchema sizes manager budgets for real onboarding, with reads budgeted a
 
 // --- Auth-admin and Storage credentials ---
 
-test('envSchema: SUPABASE_SERVICE_ROLE_KEY is optional - the backend starts and the permit workflow works without it', () => {
-  const result = envSchema.safeParse(baseEnv());
-  assert.equal(result.success, true);
-  if (result.success) assert.equal(result.data.SUPABASE_SERVICE_ROLE_KEY, undefined);
-});
 
-test('envSchema: SUPABASE_SERVICE_ROLE_KEY accepts a configured value distinct from the publishable key', () => {
-  const result = envSchema.safeParse(baseEnv({ SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_abcdef1234567890' }));
-  assert.equal(result.success, true);
-});
 
-test('envSchema bounds the server-only Supabase Auth Admin timeout', () => {
-  const defaulted = envSchema.safeParse(baseEnv());
-  assert.equal(defaulted.success, true);
-  if (defaulted.success) assert.equal(defaulted.data.SUPABASE_AUTH_ADMIN_TIMEOUT_MS, 8_000);
 
-  assert.equal(envSchema.safeParse(baseEnv({ SUPABASE_AUTH_ADMIN_TIMEOUT_MS: '999' })).success, false);
-  assert.equal(envSchema.safeParse(baseEnv({ SUPABASE_AUTH_ADMIN_TIMEOUT_MS: '30001' })).success, false);
-  const configured = envSchema.safeParse(baseEnv({ SUPABASE_AUTH_ADMIN_TIMEOUT_MS: '5000' }));
-  assert.equal(configured.success, true);
-  if (configured.success) assert.equal(configured.data.SUPABASE_AUTH_ADMIN_TIMEOUT_MS, 5_000);
-});
-
-test('envSchema: SUPABASE_SERVICE_ROLE_KEY must not be the same value as SUPABASE_PUBLISHABLE_KEY (copy-paste guard)', () => {
-  const result = envSchema.safeParse(
-    baseEnv({ SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_same', SUPABASE_SERVICE_ROLE_KEY: 'sb_publishable_same' }),
-  );
-  assert.equal(result.success, false);
-});
 
 test('envSchema: SUPABASE_DOCUMENT_BUCKET defaults when unset and accepts an override', () => {
   const defaultResult = envSchema.safeParse(baseEnv());
@@ -345,10 +297,6 @@ test('envSchema: SUPABASE_DOCUMENT_BUCKET defaults when unset and accepts an ove
 test('production Supabase URL and CORS allow only canonical credential-free HTTPS origins', () => {
   const production = { NODE_ENV: 'production', CORS_ALLOWED_ORIGINS: 'https://app.example.com' };
   assert.equal(envSchema.safeParse(baseEnv(production)).success, true);
-  for (const SUPABASE_URL of [
-    'http://project.supabase.co',
-    'https://user:password@project.supabase.co',
-  ]) assert.equal(envSchema.safeParse(baseEnv({ ...production, SUPABASE_URL })).success, false);
   for (const CORS_ALLOWED_ORIGINS of [
     'http://app.example.com',
     'https://user:password@app.example.com',
@@ -369,4 +317,11 @@ test('development keeps localhost HTTP usable while storage S3 credentials are a
     SUPABASE_STORAGE_ACCESS_KEY_ID: 'storage-access',
     SUPABASE_STORAGE_SECRET_ACCESS_KEY: 'storage-secret',
   })).success, true);
+});
+
+test('Permit authentication configuration has no Supabase Auth dependency', () => {
+  const result = envSchema.parse({ DATABASE_URL: 'postgresql://local:local@127.0.0.1/test', SITE_TIMEZONE: 'UTC' });
+  for (const key of ['SUPABASE_URL', 'SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_AUTH_ADMIN_TIMEOUT_MS']) {
+    assert.equal(key in result, false);
+  }
 });

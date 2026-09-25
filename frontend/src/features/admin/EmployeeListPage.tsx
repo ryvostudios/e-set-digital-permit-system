@@ -21,8 +21,8 @@ import { useOrganization } from './useOrganization';
  * separate, CEO-only screen.
  *
  * NO EMAIL ADDRESS IS SHOWN, because the API does not return one: the
- * login address lives in Supabase Auth and is not this application's to
- * echo back. Changing it is a deliberate, separate action on the
+ * login address is intentionally omitted from the directory response.
+ * Changing it is a deliberate, separate action on the
  * employee's own page.
  */
 

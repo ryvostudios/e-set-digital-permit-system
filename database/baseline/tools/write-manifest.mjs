@@ -18,14 +18,14 @@ const sha256 = (file) =>
   createHash('sha256').update(readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).digest('hex');
 
 const historical = readdirSync(migrationsDir)
-  .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+  .filter((name) => /^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) <= 38)
   .sort();
 if (historical.length !== 38 || !historical.at(-1).startsWith('0038_')) {
   throw new Error(`Expected migrations 0001-0038, found ${historical.length}`);
 }
 
 const manifest = {
-  baseline: 'permit_0038_v1',
+  baseline: 'permit_0038_v2',
   representsThrough: historical.at(-1),
   historicalMigrations: historical.map((name) => ({ name, sha256: sha256(path.join(migrationsDir, name)) })),
   files: Object.fromEntries(

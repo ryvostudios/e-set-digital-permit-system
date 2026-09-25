@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -63,7 +64,7 @@ describe('no server secret can reach the browser bundle', () => {
     expect(offenders(APP_FILES, (content) => content.includes(name))).toEqual([]);
   });
 
-  it('reads only the two documented public VITE_ variables', () => {
+  it('reads only the documented public API origin', () => {
     const referenced = new Set<string>();
     for (const file of SOURCE_FILES) {
       for (const match of read(file).matchAll(/import\.meta\.env\.([A-Z0-9_]+)/g)) {
@@ -77,7 +78,7 @@ describe('no server secret can reach the browser bundle', () => {
     // VITE_ variable.
     referenced.delete('PROD');
     referenced.delete('MODE');
-    expect([...referenced].sort()).toEqual(['VITE_API_BASE_URL', 'VITE_SUPABASE_PUBLISHABLE_KEY', 'VITE_SUPABASE_URL']);
+    expect([...referenced].sort()).toEqual(['VITE_API_BASE_URL']);
   });
 });
 
@@ -124,7 +125,7 @@ describe('credentials are never persisted or logged', () => {
     const users = offenders(APP_FILES, (content) =>
       /localStorage|sessionStorage|indexedDB|document\.cookie/.test(content),
     );
-    expect(users).toEqual([join('src', 'auth', 'supabaseClient.ts')]);
+    expect(users).toEqual([join('src', 'auth', 'clearLegacyCredentials.ts')]);
   });
 
   it('has no console logging at all in application code', () => {

@@ -2,7 +2,7 @@ import { render, type RenderResult } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { vi } from 'vitest';
-import { setAccessTokenProvider, setSessionEndedHandler } from '../api/client';
+import { setSessionEndedHandler } from '../api/client';
 import type { CurrentUser } from '../api/types';
 import { AuthContext, type AuthState } from '../auth/AuthProvider';
 import { deriveCapabilities } from '../auth/capabilities';
@@ -98,7 +98,6 @@ export function stubFetch(routes: Record<string, StubbedResponse | ((url: URL, i
 
   vi.stubGlobal('fetch', fetchMock);
   // The API client asks for a token per request; give it a fixed one.
-  setAccessTokenProvider(async () => 'test-access-token');
   setSessionEndedHandler(() => {});
 
   return { fetchMock, calls };

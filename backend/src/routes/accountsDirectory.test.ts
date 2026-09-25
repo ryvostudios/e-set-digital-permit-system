@@ -3,7 +3,7 @@ import http from 'node:http';
 import { after, before, beforeEach, test } from 'node:test';
 import { Pool, type PoolClient } from 'pg';
 import { createApp } from '../app.js';
-import { supabase } from '../lib/supabase.js';
+import { setSessionResolverForTests } from '../middleware/auth.js';
 
 /**
  * Route wiring for the three READ-ONLY administrative directory
@@ -18,7 +18,7 @@ import { supabase } from '../lib/supabase.js';
  * Site Manager tier, and a CEO sees all three.
  */
 
-const VALID_TOKEN = 'accounts-directory-test-valid-token';
+const VALID_TOKEN = 'accounts-directory-test-valid-token--------'; // session-cookie format: 43 base64url chars
 
 let actorCounter = 0;
 function nextActorId(): string {
@@ -30,15 +30,12 @@ let authenticatedUserId = nextActorId();
 let privilegedGrants: Record<string, string[]> = {};
 let capturedQueries: Array<{ sql: string; params: unknown[] }> = [];
 
-const originalGetClaims = supabase.auth.getClaims;
 const originalPoolQuery = Pool.prototype.query;
 const originalPoolConnect = Pool.prototype.connect;
 
 before(() => {
-  supabase.auth.getClaims = (async (token: string) => {
-    if (token !== VALID_TOKEN) return { data: null, error: new Error('invalid token') };
-    return { data: { claims: { sub: authenticatedUserId, email: null } }, error: null };
-  }) as typeof supabase.auth.getClaims;
+  setSessionResolverForTests(async (token: string) =>
+    token === VALID_TOKEN ? { sessionId: '00000000-0000-4000-8000-00000000cafe', userId: authenticatedUserId, email: null } : null);
 
   Pool.prototype.query = (async (text: unknown, params: unknown[] = []) => {
     const sql = String(text).trim();
@@ -94,7 +91,7 @@ before(() => {
 });
 
 after(() => {
-  supabase.auth.getClaims = originalGetClaims;
+  setSessionResolverForTests(null);
   Pool.prototype.query = originalPoolQuery;
   Pool.prototype.connect = originalPoolConnect;
 });
@@ -126,7 +123,7 @@ async function startServer(): Promise<{ url: string; close: () => Promise<void> 
 
 function get(url: string, path: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = {};
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (token) Object.assign(headers, { cookie: `permit_session=${token}`, origin: 'http://localhost:5173' });
   return fetch(`${url}/api/v1${path}`, { method: 'GET', headers });
 }
 

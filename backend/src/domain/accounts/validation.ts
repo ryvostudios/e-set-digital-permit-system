@@ -46,13 +46,9 @@ export const companyCodeSchema = z
  * Password shape accepted at the API boundary.
  *
  * Deliberately NOT an invented composition policy (no bespoke
- * character-class rules): Supabase Auth holds the project's configured
- * password policy and remains the authority, and this backend must not
- * quietly diverge from it. What is enforced here is the minimum sanity
- * bound the repository already uses for an operator-set password
- * (`scripts/bootstrapCeo.ts`: 12..256) plus a rejection of values that
- * are only whitespace - obviously invalid input that should never reach
- * Auth at all.
+ * character-class rules). Permit owns authentication now. This schema
+ * enforces the same 12..256 bound used for an operator-set password
+ * (`scripts/bootstrapCeo.ts`) and rejects values that are only whitespace.
  *
  * Not trimmed: leading/trailing whitespace is legitimate password
  * content, and silently rewriting a credential would mean the stored
@@ -79,8 +75,8 @@ export const changePasswordBodySchema = z
 /**
  * Site Manager employee provisioning. Only genuine provisioning input is
  * accepted: no privileged role, no capability list, no account state,
- * and no user id - the new identity's id is assigned by Supabase Auth,
- * never chosen by the caller.
+ * and no user id - the database assigns the new identity's UUID,
+ * never the caller.
  */
 export const createEmployeeBodySchema = z
   .object({

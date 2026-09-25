@@ -44,32 +44,6 @@ function isValidTimeZone(value: string): boolean {
   }
 }
 
-/**
- * Best-effort guard against pasting a privileged Supabase key into
- * SUPABASE_PUBLISHABLE_KEY (ARCHITECTURE.md: "Privileged/service-role
- * credentials must never be exposed to the frontend or committed to the
- * repository" - this key is read by the frontend too, via its own env,
- * so a service-role key here would be a real exposure, not just a
- * backend misconfiguration). Covers both known Supabase key shapes:
- * the new prefixed format (`sb_secret_...`) and the legacy JWT format,
- * where the payload carries a `role` claim. This does not verify the
- * JWT signature - it only inspects the unsigned payload to catch an
- * obvious copy-paste mistake, not to authenticate anything.
- */
-function looksLikeServiceRoleKey(value: string): boolean {
-  if (value.startsWith('sb_secret_')) return true;
-
-  const parts = value.split('.');
-  if (parts.length !== 3) return false;
-  try {
-    const payloadBase64 = parts[1]!.replace(/-/g, '+').replace(/_/g, '/');
-    const payload: unknown = JSON.parse(Buffer.from(payloadBase64, 'base64').toString('utf8'));
-    return typeof payload === 'object' && payload !== null && (payload as { role?: unknown }).role === 'service_role';
-  } catch {
-    return false;
-  }
-}
-
 const booleanFlag = z
   .enum(['true', 'false'])
   .transform((value) => value === 'true');
@@ -137,20 +111,12 @@ export const envSchema = z
     DB_IDLE_TIMEOUT_MS: z.coerce.number().int().min(0).max(3_600_000).default(30_000),
     DB_CONNECTION_TIMEOUT_MS: z.coerce.number().int().min(0).max(60_000).default(5_000),
 
-    SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
-    SUPABASE_PUBLISHABLE_KEY: z.string().min(1, 'SUPABASE_PUBLISHABLE_KEY is required'),
-
-    // Privileged Auth Admin credential. Used only by the operator-run CEO
-    // bootstrap and the tightly authorized employee-account adapter;
-    // ordinary API/Storage code must never import it.
-    SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
-    // Hard HTTP cancellation deadline for server-only Supabase Auth Admin
-    // calls. Kept short because manager password reset deliberately holds a
-    // serialized credential-operation row lock across the Auth mutation.
-    SUPABASE_AUTH_ADMIN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(30_000).default(8_000),
-    // Supabase Storage S3-compatible server credentials. These are
-    // independent of Auth Admin/service-role authority and never exposed
-    // to the frontend. All are optional for ordinary API startup; the
+    // Authentication is Permit-owned (permit.users + server-side sessions,
+    // domain/auth/). No Supabase Auth URL, publishable key or service-role
+    // key is read by this backend.
+    //
+    // Supabase Storage S3-compatible server credentials, used only for
+    // issued permit PDFs. Never exposed to the frontend. All are optional for ordinary API startup; the
     // document worker/download path fails closed until all are present.
     SUPABASE_STORAGE_ENDPOINT: z.string().url().optional(),
     SUPABASE_STORAGE_REGION: z.string().min(1).optional(),
@@ -253,6 +219,9 @@ export const envSchema = z
     // damage, and their legitimate human use is a handful of calls per
     // window, not dozens.
     RATE_LIMIT_ACCOUNT_MAX: z.coerce.number().int().min(1).max(200).default(10),
+    // Sign-in attempts per client IP per window. Every attempt pays an
+    // Argon2id verification, so this also bounds CPU spent on guessing.
+    RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().min(1).max(200).default(10),
     // Manager WRITES (employee provisioning, password reset, permission
     // and lifecycle changes). There is no business quota on employee
     // creation, so this has to clear a realistic onboarding batch with
@@ -286,23 +255,6 @@ export const envSchema = z
       });
     }
 
-    if (looksLikeServiceRoleKey(value.SUPABASE_PUBLISHABLE_KEY)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['SUPABASE_PUBLISHABLE_KEY'],
-        message:
-          'SUPABASE_PUBLISHABLE_KEY looks like a privileged service-role key, not the publishable/anon key - refusing to start with a service-role credential in a value read by frontend-facing config',
-      });
-    }
-
-    if (value.SUPABASE_SERVICE_ROLE_KEY && value.SUPABASE_SERVICE_ROLE_KEY === value.SUPABASE_PUBLISHABLE_KEY) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['SUPABASE_SERVICE_ROLE_KEY'],
-        message: 'SUPABASE_SERVICE_ROLE_KEY must not be the same value as SUPABASE_PUBLISHABLE_KEY',
-      });
-    }
-
     const storageValues = [
       value.SUPABASE_STORAGE_ENDPOINT,
       value.SUPABASE_STORAGE_REGION,
@@ -326,13 +278,6 @@ export const envSchema = z
     }
 
     if (value.NODE_ENV === 'production') {
-      if (!isSecureUrlWithoutUserInfo(value.SUPABASE_URL)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['SUPABASE_URL'],
-          message: 'SUPABASE_URL must be an HTTPS URL without credentials in production',
-        });
-      }
       if (value.SUPABASE_STORAGE_ENDPOINT && !isSecureUrlWithoutUserInfo(value.SUPABASE_STORAGE_ENDPOINT)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

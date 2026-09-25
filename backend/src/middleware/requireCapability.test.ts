@@ -41,7 +41,7 @@ test('requireCapability denies a request with no authenticated identity (401)', 
 
 test('requireCapability denies when the resolved set is empty (default-deny)', async () => {
   const middleware = requireCapability('permit.hold', async () => new Set());
-  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
+  const req = mockRequest({ id: 'user-1', email: null, sessionId: '50000000-0000-4000-8000-000000000001', mustChangePassword: false });
   const mock = new MockResponse();
   let nextCalled = false;
   const next: NextFunction = () => {
@@ -57,7 +57,7 @@ test('requireCapability denies when the resolved set is empty (default-deny)', a
 
 test('requireCapability denies when the resolved set has other capabilities but not the required one', async () => {
   const middleware = requireCapability('permit.hold', async () => new Set(['permit.cancel', 'permit.close']));
-  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
+  const req = mockRequest({ id: 'user-1', email: null, sessionId: '50000000-0000-4000-8000-000000000001', mustChangePassword: false });
   const mock = new MockResponse();
   let nextCalled = false;
   const next: NextFunction = () => {
@@ -73,7 +73,7 @@ test('requireCapability denies when the resolved set has other capabilities but 
 
 test('requireCapability calls next() when the resolved set grants the required capability', async () => {
   const middleware = requireCapability('permit.hold', async () => new Set(['permit.cancel', 'permit.hold']));
-  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
+  const req = mockRequest({ id: 'user-1', email: null, sessionId: '50000000-0000-4000-8000-000000000001', mustChangePassword: false });
   const mock = new MockResponse();
   let nextCalled = false;
   const next: NextFunction = () => {
@@ -91,7 +91,7 @@ test('requireCapability fails closed (403) when capability resolution throws', a
   const middleware = requireCapability('permit.hold', async () => {
     throw new Error('simulated database failure');
   });
-  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
+  const req = mockRequest({ id: 'user-1', email: null, sessionId: '50000000-0000-4000-8000-000000000001', mustChangePassword: false });
   const mock = new MockResponse();
   let nextCalled = false;
   const next: NextFunction = () => {
@@ -109,7 +109,7 @@ test('requireCapability is scoped per required capability, not an all-or-nothing
   const capabilities = new Set(['permit.hold']);
   const holdMiddleware = requireCapability('permit.hold', async () => capabilities);
   const cancelMiddleware = requireCapability('permit.cancel', async () => capabilities);
-  const req = mockRequest({ id: 'user-1', email: null, mustChangePassword: false });
+  const req = mockRequest({ id: 'user-1', email: null, sessionId: '50000000-0000-4000-8000-000000000001', mustChangePassword: false });
 
   const holdMock = new MockResponse();
   let holdNextCalled = false;

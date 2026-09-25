@@ -3,7 +3,6 @@ import {
   authorizeAccountManagement,
   isManageableTarget,
 } from '../authz/accountManagement.js';
-import { createSupabaseAccountAdmin } from '../domain/accounts/admin.js';
 import {
   changeEmployeeEmail,
   deleteEmployeeAccount,
@@ -42,7 +41,6 @@ import {
   createEmployeeAccount,
   defaultAccountsServiceDeps,
   resetEmployeePassword,
-  type AccountsServiceDeps,
 } from '../domain/accounts/service.js';
 import {
   changeEmployeeEmailBodySchema,
@@ -79,8 +77,8 @@ export const accountsRouter = Router();
  *
  * Nothing in this file logs, echoes, or persists a password: the only
  * place a password value exists is the validated request body, which is
- * passed straight to the Supabase Auth Admin adapter and never written
- * to a business table, a response, an audit row, or a log line. Request
+ * hashed with Argon2id by the account service and never written to a
+ * business table, a response, an audit row, or a log line. Request
  * logging (`middleware/requestLog.ts`) records method/path/status only,
  * never bodies.
  */
@@ -93,31 +91,12 @@ function sendForbidden(res: Response): void {
   res.status(403).json({ error: 'forbidden', message: 'Insufficient authority for account management' });
 }
 
-/**
- * Account management is unavailable rather than partially working when
- * the server-only Auth Admin credential is not configured - the same
- * fail-closed posture PDF storage uses. The response never names the
- * missing credential.
- */
-function sendAccountAdminUnavailable(res: Response): void {
-  res.status(503).json({
-    error: 'account_management_unavailable',
-    message: 'Account management is not available right now',
-  });
-}
-
 function getAuthenticatedUserId(req: Request, res: Response): string | null {
   if (!req.auth) {
     res.status(401).json({ error: 'unauthorized', message: 'Authentication required' });
     return null;
   }
   return req.auth.id;
-}
-
-/** Resolves the service dependencies, or null when the Auth Admin credential is absent. */
-function resolveDeps(): AccountsServiceDeps | null {
-  const admin = createSupabaseAccountAdmin();
-  return admin ? defaultAccountsServiceDeps(admin) : null;
 }
 
 /**
@@ -169,17 +148,21 @@ accountsRouter.post(
       return;
     }
 
-    const deps = resolveDeps();
-    if (!deps) {
-      sendAccountAdminUnavailable(res);
+    const deps = defaultAccountsServiceDeps();
+
+    const result = await changeOwnPassword(userId, body.data.newPassword, deps, req.auth?.sessionId);
+    if (result.outcome === 'invalid') {
+      res.status(400).json({
+        error: 'invalid_request',
+        reason: result.reason,
+        message: 'Choose a new password that is different from the current one.',
+      });
       return;
     }
-
-    const result = await changeOwnPassword(userId, body.data.newPassword, deps);
     if (result.outcome === 'refused') {
       // There is deliberately no anytime "change my password" feature:
       // this endpoint exists only to satisfy an outstanding forced
-      // change. Refused BEFORE Supabase Auth was touched.
+      // change. Refused before anything was touched.
       res.status(409).json({
         error: 'conflict',
         reason: result.reason,
@@ -188,10 +171,9 @@ accountsRouter.post(
       return;
     }
     if (result.outcome !== 'ok') {
-      // Both failure modes are safe and recoverable: either nothing
-      // changed, or the password changed while the account still owes a
-      // change - so the caller may simply retry. The reason is a fixed
-      // enum, never an underlying error.
+      // Nothing changed (the transaction rolled back or the account moved
+      // on underneath the request), so the caller may simply retry. The
+      // reason is a fixed enum, never an underlying error.
       res.status(503).json({
         error: 'password_change_failed',
         reason: result.reason,
@@ -239,7 +221,7 @@ accountsRouter.post(
     // are both true for a Team + Position belonging to a DIFFERENT
     // company. It proves the company is active, the combination is
     // active and assignable, and its team is active and owned by that
-    // company - so an invalid destination never reaches Supabase Auth
+    // company - so an invalid destination never creates an identity
     // and can never leave a half-provisioned identity behind.
     //
     // The database remains the final authority: migration 0035's
@@ -268,11 +250,7 @@ accountsRouter.post(
     }
     const company = destination.company;
 
-    const deps = resolveDeps();
-    if (!deps) {
-      sendAccountAdminUnavailable(res);
-      return;
-    }
+    const deps = defaultAccountsServiceDeps();
 
     const result = await createEmployeeAccount(actorUserId, {
       email: body.data.email,
@@ -287,21 +265,9 @@ accountsRouter.post(
       return;
     }
     if (result.outcome === 'failed') {
-      if (result.reason === 'provisioning_orphan_requires_operator') {
-        // Operator-visible, sanitized: the half-created Auth identity has
-        // NO app_user_access row, so it cannot reach any application
-        // endpoint - but it should still be cleaned up manually.
-        console.error(
-          JSON.stringify({
-            event: 'employee_provisioning_orphan',
-            requestId: req.requestId,
-            orphanUserId: result.orphanUserId,
-          }),
-        );
-      }
       res.status(503).json({
         error: 'provisioning_failed',
-        reason: result.reason === 'provisioning_orphan_requires_operator' ? 'provisioning_failed' : result.reason,
+        reason: result.reason,
         message: 'The employee account could not be provisioned',
       });
       return;
@@ -346,11 +312,7 @@ accountsRouter.post(
       return;
     }
 
-    const deps = resolveDeps();
-    if (!deps) {
-      sendAccountAdminUnavailable(res);
-      return;
-    }
+    const deps = defaultAccountsServiceDeps();
 
     const result = await resetEmployeePassword(actorUserId, params.data.id, body.data.temporaryPassword, deps);
 
@@ -442,11 +404,6 @@ accountsRouter.post(
       return;
     }
 
-    const deps = resolveDeps();
-    if (!deps) {
-      sendAccountAdminUnavailable(res);
-      return;
-    }
     // Both credentials must be present before ANY Auth work begins:
     // creating an Auth identity we could not then grant would leave a
     // named account with no authority for no reason.
@@ -456,42 +413,15 @@ accountsRouter.post(
       return;
     }
 
-    const result = await createSiteManagerAccount(actorUserId, body.data, deps, privileged);
+    const result = await createSiteManagerAccount(req.auth!.sessionId, body.data, privileged);
     if (result.outcome === 'conflict') {
       res.status(409).json({ error: 'conflict', reason: result.reason, message: 'That email cannot be used' });
       return;
     }
     if (result.outcome === 'failed') {
-      if (result.reason === 'provisioning_orphan_requires_operator') {
-        console.error(
-          JSON.stringify({
-            event: 'site_manager_provisioning_orphan',
-            requestId: req.requestId,
-            orphanUserId: result.orphanUserId,
-          }),
-        );
-      }
-      if (result.reason === 'grant_not_recorded') {
-        // The account exists and is named but holds NO privilege. Safe,
-        // and retryable through the grant endpoint - so it is reported
-        // distinctly rather than as a generic provisioning failure.
-        console.error(
-          JSON.stringify({
-            event: 'site_manager_grant_not_recorded',
-            requestId: req.requestId,
-            userId: result.userId,
-          }),
-        );
-        res.status(503).json({
-          error: 'privileged_grant_failed',
-          reason: 'grant_not_recorded',
-          message: 'The account was created but its Site Manager authority was not granted. Retry the grant.',
-        });
-        return;
-      }
       res.status(503).json({
         error: 'provisioning_failed',
-        reason: result.reason === 'provisioning_orphan_requires_operator' ? 'provisioning_failed' : result.reason,
+        reason: result.reason,
         message: 'The Site Manager account could not be provisioned',
       });
       return;
@@ -539,11 +469,7 @@ async function changeSiteManagerGrant(
     return;
   }
 
-  const deps = resolveDeps();
-  if (!deps) {
-    sendAccountAdminUnavailable(res);
-    return;
-  }
+  const deps = defaultAccountsServiceDeps();
   const privileged = resolvePrivilegedAdmin();
   if (!privileged) {
     sendPrivilegedChannelUnavailable(res);
@@ -551,8 +477,8 @@ async function changeSiteManagerGrant(
   }
 
   const result = action === 'grant'
-    ? await grantSiteManager(actorUserId, params.data.id, deps, privileged)
-    : await revokeSiteManager(actorUserId, params.data.id, deps, privileged);
+    ? await grantSiteManager(actorUserId, params.data.id, deps, privileged, req.auth!.sessionId)
+    : await revokeSiteManager(actorUserId, params.data.id, deps, privileged, req.auth!.sessionId);
 
   if (result.outcome === 'not_found') {
     res.status(404).json({ error: 'not_found', message: 'Privileged account not found' });
@@ -738,11 +664,7 @@ accountsRouter.patch(
       sendValidationError(res, body.error.issues);
       return;
     }
-    const deps = resolveDeps();
-    if (!deps) {
-      sendAccountAdminUnavailable(res);
-      return;
-    }
+    const deps = defaultAccountsServiceDeps();
 
     if (body.data.displayName !== undefined) {
       const renamed = await updateEmployeeDisplayName(actorUserId, params.data.id, body.data.displayName, deps);
@@ -801,11 +723,7 @@ accountsRouter.post(
       sendValidationError(res, body.error.issues);
       return;
     }
-    const deps = resolveDeps();
-    if (!deps) {
-      sendAccountAdminUnavailable(res);
-      return;
-    }
+    const deps = defaultAccountsServiceDeps();
 
     const result = await changeEmployeeEmail(actorUserId, params.data.id, body.data, deps);
     if (result.outcome === 'conflict') {
@@ -848,11 +766,7 @@ async function changeEmployeeState(
     sendValidationError(res, params.error.issues);
     return;
   }
-  const deps = resolveDeps();
-  if (!deps) {
-    sendAccountAdminUnavailable(res);
-    return;
-  }
+  const deps = defaultAccountsServiceDeps();
   const result = await setEmployeeAccountState(actorUserId, params.data.id, nextState, deps);
   if (result.outcome !== 'ok') {
     sendLifecycleFailure(res, result);
@@ -879,30 +793,9 @@ accountsRouter.delete(
       sendValidationError(res, params.error.issues);
       return;
     }
-    const deps = resolveDeps();
-    if (!deps) {
-      sendAccountAdminUnavailable(res);
-      return;
-    }
+    const deps = defaultAccountsServiceDeps();
 
     const result = await deleteEmployeeAccount(actorUserId, params.data.id, deps);
-    if (result.outcome === 'failed' && result.reason === 'auth_delete_failed') {
-      // The account is already tombstoned and can reach nothing; only the
-      // Supabase identity remains, which an operator must remove.
-      console.error(
-        JSON.stringify({
-          event: 'employee_auth_identity_not_removed',
-          requestId: req.requestId,
-          userId: params.data.id,
-        }),
-      );
-      res.status(503).json({
-        error: 'deletion_incomplete',
-        reason: 'auth_delete_failed',
-        message: 'The account was disabled permanently but its login could not be removed. Retry.',
-      });
-      return;
-    }
     if (result.outcome !== 'ok') {
       sendLifecycleFailure(res, result);
       return;
@@ -1049,11 +942,7 @@ async function changeEmployeePermission(
     sendValidationError(res, body.error.issues);
     return;
   }
-  const deps = resolveDeps();
-  if (!deps) {
-    sendAccountAdminUnavailable(res);
-    return;
-  }
+  const deps = defaultAccountsServiceDeps();
   const result = await setUserCapabilityGrant(
     actorUserId,
     params.data.id,

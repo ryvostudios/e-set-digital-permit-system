@@ -1,10 +1,9 @@
 import type { PoolClient } from 'pg';
 import type { QueryFn } from '../../db/pool.js';
-import {
-  credentialResetTransactionTimeouts,
-  recordAccountAudit,
-  type AccountsServiceDeps,
-} from './service.js';
+import { hashPassword } from '../auth/passwords.js';
+import { revokeUserSessions } from '../auth/sessions.js';
+import { destroyUserLogin, isEmailTaken, setUserEmailAndPassword } from './credentials.js';
+import { recordAccountAudit, type AccountsServiceDeps } from './service.js';
 
 /**
  * Normal employee lifecycle: read, rename, transfer, email transition,
@@ -27,7 +26,8 @@ import {
  * terminal at the trigger level.
  *
  * No password, temporary password, email address, or token is ever
- * written to an application table, returned, or logged by this module.
+ * written to an application table (the login email lives only in
+ * `permit.users`), returned, or logged by this module.
  * `account_audit_events` has no free-text column at all (0017/0023), so
  * the administrative history records WHICH company or capability
  * changed - by foreign key - and never a value that could be a secret.
@@ -105,8 +105,8 @@ export interface EmployeeDetail {
  *
  * Deliberately exposes no credential internals: no credential version,
  * no reset-pending marker, no timestamps of credential changes, and no
- * email - the login address lives in Supabase Auth and is not this
- * application's to echo back. `mustChangePassword` is the single
+ * email - the login address is a credential (`permit.users`) and is not
+ * echoed back by the management API. `mustChangePassword` is the single
  * credential-adjacent boolean, exactly as `/auth/me` already exposes.
  *
  * Returns null for an unknown target AND for a privileged one, so the
@@ -546,9 +546,9 @@ export type AccountStateOutcome =
  *
  * Takes effect on the target's VERY NEXT request: `requireAuth` reads
  * `app_user_access.state` on every authenticated call and refuses
- * anything that is not ACTIVE, so an already-issued JWT stops working
- * the moment this commits. No Supabase logout is involved and
- * `auth.sessions` is never queried.
+ * anything that is not ACTIVE, so an existing session stops working the
+ * moment this commits - and disabling also revokes every session, so a
+ * later re-enable never revives one.
  *
  * NOTHING IS REMOVED. The assignment, the workforce profile, and every
  * individual permission survive untouched, which is exactly what makes
@@ -576,6 +576,11 @@ export async function setEmployeeAccountState(
       if (target.state === nextState) return { outcome: 'refused', reason: 'already_in_state' };
 
       await client.query('UPDATE app_user_access SET state = $2 WHERE user_id = $1', [targetUserId, nextState]);
+      // Disabling ends every session now (the per-request state check
+      // already refuses them). Re-enabling restores nothing by itself: the
+      // employee signs in afresh, and their authority is whatever the
+      // Team + Position and grant model says at that moment.
+      if (nextState === 'DISABLED') await revokeUserSessions(client.query.bind(client) as QueryFn, targetUserId);
       await recordAccountAudit(client.query.bind(client), {
         eventType: nextState === 'DISABLED' ? 'EMPLOYEE_DISABLED' : 'EMPLOYEE_REENABLED',
         actorUserId,
@@ -597,33 +602,16 @@ export type ChangeEmployeeEmailOutcome =
   | { outcome: 'not_found' }
   | { outcome: 'refused'; reason: 'target_is_privileged' | 'target_is_self' | 'account_deleted' }
   | { outcome: 'conflict'; reason: 'email_unavailable' }
-  | { outcome: 'failed'; reason: 'auth_update_failed' | 'state_update_failed' | 'credential_operation_superseded' };
+  | { outcome: 'failed'; reason: 'state_update_failed' };
 
 /**
  * Changes a normal employee's LOGIN EMAIL and issues a new temporary
- * password in one governed transition.
- *
- * ORDER AND FAILURE DESIGN - deliberately identical in shape to
- * `resetEmployeePassword`, because it has the same hazard: a short first
- * transaction locks the account, advances the credential generation and
- * commits `must_change_password = TRUE` BEFORE Supabase Auth is touched.
- * Existing JWTs therefore lose normal access even if every later step
- * fails, and the account can only be recovered by completing the
- * transition - never by continuing to use the old email.
- *
- * The second, version-checked transaction performs the external Auth
- * update while holding the row lock, so two concurrent transitions
- * cannot publish their credentials out of generation order, and a
- * self-service password change cannot interleave (it refuses while
- * `credential_reset_pending` is set). Transaction-local lock, statement
- * and idle guards bound the database resources exactly as the reset path
- * does.
- *
- * NOT ATOMIC ACROSS SYSTEMS, AND SAFE ANYWAY: if Auth fails after the
- * gate committed, the employee simply cannot sign in until a manager
- * retries - strictly less access, never more. Email and password move
- * together in a single Auth call, so there is no window in which the new
- * address is live with the old password.
+ * password in one governed transition - one transaction: the new email and
+ * the new credential replace the old ones TOGETHER (there is no moment
+ * where the new address works with the old password), the account is gated
+ * behind a forced password change, every existing session is revoked, and
+ * the change is audited. An address already used by another account is a
+ * conflict, never an adoption.
  *
  * The email address itself is never written to an application table -
  * `account_audit_events` has no column that could hold it - and the
@@ -636,90 +624,40 @@ export async function changeEmployeeEmail(
   deps: AccountsServiceDeps,
 ): Promise<ChangeEmployeeEmailOutcome> {
   if (actorUserId === targetUserId) return { outcome: 'refused', reason: 'target_is_self' };
-
-  let credentialVersion: string;
+  const passwordHash = await hashPassword(input.temporaryPassword);
   try {
-    const gated = await deps.withTransaction(async (client) => {
+    return await deps.withTransaction(async (client): Promise<ChangeEmployeeEmailOutcome> => {
+      const queryFn = client.query.bind(client) as QueryFn;
       const target = await loadManageableTarget(client, targetUserId);
       if (!target.ok) {
         return target.reason === 'not_found'
-          ? ({ outcome: 'not_found' } as const)
-          : ({ outcome: 'refused', reason: 'target_is_privileged' } as const);
+          ? { outcome: 'not_found' }
+          : { outcome: 'refused', reason: 'target_is_privileged' };
       }
-      if (target.state === 'DELETED') return { outcome: 'refused', reason: 'account_deleted' } as const;
+      if (target.state === 'DELETED') return { outcome: 'refused', reason: 'account_deleted' };
 
-      const marked = await client.query<{ credential_version: string }>(
+      await setUserEmailAndPassword(queryFn, targetUserId, input.newEmail, passwordHash);
+      await client.query(
         `UPDATE app_user_access
             SET must_change_password = TRUE,
-                credential_reset_pending = TRUE,
+                credential_reset_pending = FALSE,
                 credential_version = credential_version + 1,
                 credentials_changed_at = now()
-          WHERE user_id = $1
-          RETURNING credential_version::text AS credential_version`,
+          WHERE user_id = $1`,
         [targetUserId],
       );
-      if (marked.rows.length !== 1) throw new Error('account state row disappeared during email change');
-      return { outcome: 'gated', credentialVersion: marked.rows[0]!.credential_version } as const;
-    });
-    if (gated.outcome !== 'gated') return gated;
-    credentialVersion = gated.credentialVersion;
-  } catch {
-    return { outcome: 'failed', reason: 'state_update_failed' };
-  }
-
-  try {
-    return await deps.withTransaction(async (client): Promise<ChangeEmployeeEmailOutcome> => {
-      const timeouts = credentialResetTransactionTimeouts(deps.authAdminTimeoutMs);
-      await client.query(
-        `SELECT set_config('lock_timeout', $1, TRUE),
-                set_config('statement_timeout', $2, TRUE),
-                set_config('idle_in_transaction_session_timeout', $3, TRUE)`,
-        [
-          `${timeouts.lockTimeoutMs}ms`,
-          `${timeouts.statementTimeoutMs}ms`,
-          `${timeouts.idleInTransactionTimeoutMs}ms`,
-        ],
-      );
-      const current = await client.query<{ credential_version: string; credential_reset_pending: boolean }>(
-        `SELECT credential_version::text AS credential_version, credential_reset_pending
-           FROM app_user_access
-          WHERE user_id = $1
-          FOR UPDATE`,
-        [targetUserId],
-      );
-      const row = current.rows[0];
-      if (!row || row.credential_version !== credentialVersion || !row.credential_reset_pending) {
-        return { outcome: 'failed', reason: 'credential_operation_superseded' };
-      }
-
-      const updated = await deps.admin.setEmailAndPassword(
-        targetUserId,
-        input.newEmail,
-        input.temporaryPassword,
-      );
-      if (!updated.ok) {
-        return updated.reason === 'email_unavailable'
-          ? { outcome: 'conflict', reason: 'email_unavailable' }
-          : { outcome: 'failed', reason: 'auth_update_failed' };
-      }
-
-      await recordAccountAudit(client.query.bind(client), {
+      await revokeUserSessions(queryFn, targetUserId);
+      await recordAccountAudit(queryFn, {
         eventType: 'EMPLOYEE_EMAIL_CHANGED',
         actorUserId,
         targetUserId,
       });
-      const completed = await client.query(
-        `UPDATE app_user_access
-            SET credential_reset_pending = FALSE
-          WHERE user_id = $1 AND credential_version = $2
-          RETURNING user_id`,
-        [targetUserId, credentialVersion],
-      );
-      if (completed.rows.length !== 1) throw new Error('credential operation changed during email completion');
       return { outcome: 'ok' };
     });
-  } catch {
-    return { outcome: 'failed', reason: 'state_update_failed' };
+  } catch (err) {
+    return isEmailTaken(err)
+      ? { outcome: 'conflict', reason: 'email_unavailable' }
+      : { outcome: 'failed', reason: 'state_update_failed' };
   }
 }
 
@@ -731,35 +669,22 @@ export type DeleteEmployeeOutcome =
   | { outcome: 'ok' }
   | { outcome: 'not_found' }
   | { outcome: 'refused'; reason: 'target_is_privileged' | 'target_is_self' | 'already_deleted' }
-  | { outcome: 'failed'; reason: 'auth_delete_failed' | 'state_update_failed' };
+  | { outcome: 'failed'; reason: 'state_update_failed' };
 
 /**
  * CEO-only permanent deletion of a normal employee account.
  *
  * WHAT "PERMANENT" MEANS HERE. The login is destroyed and the local
  * account is tombstoned; the person's HISTORY is kept in full. Permits,
- * JSAs, signatures, issued snapshots, lifecycle events, the account
- * audit trail, and every assignment they ever held all reference
- * `auth.users` with ON DELETE RESTRICT, so cascading them away is not
- * merely undesirable, it is impossible - and the tombstone is what lets
- * those references stay valid.
+ * JSAs, signatures, issued snapshots, lifecycle events, the account audit
+ * trail, and every assignment they ever held reference `permit.users` with
+ * ON DELETE RESTRICT, so the identity row stays - with its email and
+ * credential erased, so nobody can sign in as it again and the address is
+ * free for a future account.
  *
- * ORDER AND FAILURE DESIGN. The local terminal state commits FIRST,
- * then the Supabase Auth identity is removed:
- *
- *   1. `state = 'DELETED'` commits. From this instant `requireAuth`
- *      refuses every request, so access has already ended even though
- *      the Auth identity still exists. Migration 0023's trigger makes
- *      the state terminal, so nothing can walk it back.
- *   2. Auth deletion follows. If it fails, the reachable state is an
- *      account that cannot reach a single endpoint but whose Supabase
- *      credential technically still exists - strictly LESS access than
- *      intended, never more - and the caller receives a distinct outcome
- *      so an operator can finish the removal.
- *
- * The reverse order would be the unsafe one: deleting the Auth identity
- * first and then failing to tombstone would leave an ACTIVE local
- * account whose audit trail never records the deletion.
+ * One transaction: `state = 'DELETED'` (terminal - migration 0023's
+ * trigger forbids walking it back), the login destroyed, every session
+ * revoked, the credential generation advanced, and the deletion audited.
  */
 export async function deleteEmployeeAccount(
   actorUserId: string,
@@ -769,17 +694,16 @@ export async function deleteEmployeeAccount(
   if (actorUserId === targetUserId) return { outcome: 'refused', reason: 'target_is_self' };
 
   try {
-    const tombstoned = await deps.withTransaction(async (client) => {
+    return await deps.withTransaction(async (client): Promise<DeleteEmployeeOutcome> => {
+      const queryFn = client.query.bind(client) as QueryFn;
       const target = await loadManageableTarget(client, targetUserId);
       if (!target.ok) {
         return target.reason === 'not_found'
-          ? ({ outcome: 'not_found' } as const)
-          : ({ outcome: 'refused', reason: 'target_is_privileged' } as const);
+          ? { outcome: 'not_found' }
+          : { outcome: 'refused', reason: 'target_is_privileged' };
       }
-      if (target.state === 'DELETED') return { outcome: 'refused', reason: 'already_deleted' } as const;
+      if (target.state === 'DELETED') return { outcome: 'refused', reason: 'already_deleted' };
 
-      // Advance the credential generation too: any in-flight credential
-      // operation for this account is invalidated by the same commit.
       await client.query(
         `UPDATE app_user_access
             SET state = 'DELETED',
@@ -788,19 +712,16 @@ export async function deleteEmployeeAccount(
           WHERE user_id = $1`,
         [targetUserId],
       );
-      await recordAccountAudit(client.query.bind(client), {
+      await destroyUserLogin(queryFn, targetUserId);
+      await revokeUserSessions(queryFn, targetUserId);
+      await recordAccountAudit(queryFn, {
         eventType: 'EMPLOYEE_ACCOUNT_DELETED',
         actorUserId,
         targetUserId,
       });
-      return { outcome: 'tombstoned' } as const;
+      return { outcome: 'ok' };
     });
-    if (tombstoned.outcome !== 'tombstoned') return tombstoned;
   } catch {
     return { outcome: 'failed', reason: 'state_update_failed' };
   }
-
-  const removed = await deps.admin.deleteUser(targetUserId);
-  if (!removed.ok) return { outcome: 'failed', reason: 'auth_delete_failed' };
-  return { outcome: 'ok' };
 }

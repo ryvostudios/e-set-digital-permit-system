@@ -1,5 +1,5 @@
 {
-  "baseline": "permit_0038_v1",
+  "baseline": "permit_0038_v2",
   "representsThrough": "0038_organization_deactivation_runtime_privilege.sql",
   "historicalMigrations": [
     {
@@ -156,8 +156,8 @@
     }
   ],
   "files": {
-    "0038_permit_schema.sql": "56f1be353476b3c88ed72e65469355527d53a97204331d07b666c2331f026b36",
-    "0038_permit_reference_data.sql": "85f37e5c0ba9454f7f40739b0b03403d3edab8dde3411ca6f60100f4e47e6181",
+    "0038_permit_schema.sql": "52f5bc681cc6decf607f84374d42d0f4b7df0fe516a84f79cd57f90d46f90e21",
+    "0038_permit_reference_data.sql": "ee90da0c52b05ce96d0c68c16537638f1b6b5b39978b9914487743f47a99c60a",
     "0038_permit_privileges.sql": "154b96f256c271b31081fd204cbaa7aa1ae0be60b2627564490ccc291aacfda3"
   }
 }

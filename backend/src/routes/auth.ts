@@ -1,11 +1,78 @@
 import { Router, type Request, type Response } from 'express';
+import { z } from 'zod';
 import { resolveUserCapabilities } from '../authz/capabilities.js';
 import { resolvePrivilegedAccess } from '../authz/privilegedAccess.js';
-import { query } from '../db/pool.js';
+import { query, toSafeDbErrorMessage, withTransaction } from '../db/pool.js';
 import { resolvePrivilegedDisplayName } from '../domain/accounts/privilegedIdentities.js';
+import { login } from '../domain/auth/login.js';
+import {
+  clearSessionCookie,
+  readSessionToken,
+  revokeSessionByToken,
+  setSessionCookie,
+} from '../domain/auth/sessions.js';
 import { requireAuthDuringPasswordChange } from '../middleware/auth.js';
+import { loginLimiter } from '../middleware/rateLimit.js';
 
 export const authRouter = Router();
+
+/**
+ * Sign-in body. The email is not format-validated here on purpose: any
+ * string that is not a known login simply fails like a wrong password,
+ * so the response never distinguishes "not an email" from "no account".
+ */
+const loginBodySchema = z
+  .object({
+    email: z.string().max(320),
+    password: z.string().min(1).max(1024),
+    remember: z.boolean().optional().default(false),
+  })
+  .strict();
+
+/**
+ * Permit-owned sign-in (domain/auth/login.ts). On success the only thing
+ * returned is the HttpOnly session cookie - no token, id or identity is
+ * in the body; the frontend asks `/auth/me` who it is, as before. Every
+ * credential failure is the same 401.
+ */
+authRouter.post('/auth/login', loginLimiter, async (req: Request, res: Response) => {
+  const body = loginBodySchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ error: 'invalid_request', message: 'Invalid request' });
+    return;
+  }
+  try {
+    const result = await login(body.data, { query, withTransaction });
+    if (result.outcome !== 'ok') {
+      res.status(401).json({ error: 'invalid_credentials', message: 'Email or password is incorrect.' });
+      return;
+    }
+    setSessionCookie(res, result.token, body.data.remember);
+    res.status(204).end();
+  } catch (err) {
+    console.error('Sign-in failed:', toSafeDbErrorMessage(err));
+    res.status(503).json({ error: 'sign_in_unavailable', message: 'Sign-in is unavailable right now. Please try again.' });
+  }
+});
+
+/**
+ * Ends THIS session: the server-side row is revoked (a copied cookie stops
+ * working immediately) and the browser cookie is cleared. Idempotent, and
+ * deliberately not behind `requireAuth`, so a disabled or already-expired
+ * session can still be cleaned up. Other devices are unaffected.
+ */
+authRouter.post('/auth/logout', async (req: Request, res: Response) => {
+  const token = readSessionToken(req);
+  try {
+    if (token) await revokeSessionByToken(query, token);
+  } catch (err) {
+    console.error('Sign-out revocation failed:', toSafeDbErrorMessage(err));
+    res.status(503).json({ error: 'sign_out_unavailable', message: 'Sign-out could not be completed. Please try again.' });
+    return;
+  }
+  clearSessionCookie(res);
+  res.status(204).end();
+});
 
 /**
  * The caller's own ORGANIZATIONAL identity - display name, authoritative

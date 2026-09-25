@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import type { PGlite } from '@electric-sql/pglite';
-import { historicalDatabase, installedDatabase } from '../test/permitSchemaFixtures.js';
+import { historicalDatabase, historicalMigrationsOnlyDir, installedDatabase } from '../test/permitSchemaFixtures.js';
 
 /**
  * THE `permit` BASELINE IS THE 0038 SCHEMA, MOVED - NOT A REWRITE.
@@ -12,6 +12,10 @@ import { historicalDatabase, installedDatabase } from '../test/permitSchemaFixtu
  * the baseline installs, after mapping schema `public` to `permit`. The
  * only differences allowed are the ones the shared-database architecture
  * requires, and each is listed explicitly below; anything else fails.
+ *
+ * One of them is structural: the 20 user foreign keys to Supabase's
+ * auth.users are deferred out of the baseline and re-created against
+ * permit.users by migration 0039 - proven at the end of this file.
  */
 
 type Snapshot = Record<string, unknown>;
@@ -130,15 +134,22 @@ async function referenceData(db: PGlite, schema: string): Promise<Record<string,
 
 let historical: PGlite;
 let baseline: PGlite;
+let migrated: PGlite;
+
+const isAuthUsersFk = (c: { definition: unknown }) => String(c.definition).includes('REFERENCES auth.users(id)');
 
 before(async () => {
   historical = await historicalDatabase();
-  baseline = await installedDatabase();
+  // The baseline alone (0001-0038 recorded, nothing after it).
+  baseline = await installedDatabase({ migrationsDir: await historicalMigrationsOnlyDir() });
+  // Baseline plus every later shared-database migration.
+  migrated = await installedDatabase();
 });
 
 after(async () => {
-  await historical.close();
-  await baseline.close();
+  await historical?.close();
+  await baseline?.close();
+  await migrated?.close();
 });
 
 test('every structural object of the replayed 0038 schema is present and identical in permit', async () => {
@@ -146,6 +157,11 @@ test('every structural object of the replayed 0038 schema is present and identic
   // The emulated Supabase helper is not a Permit object.
   source.functions = (source.functions as { proname: string }[]).filter((f) => f.proname !== 'rls_auto_enable');
   const target = await snapshot(baseline, 'permit');
+  // The deferred Supabase references - exactly 20 foreign keys, nothing else.
+  const deferred = (source.constraints as { definition: unknown; contype: string }[]).filter(isAuthUsersFk);
+  assert.equal(deferred.length, 20);
+  assert.ok(deferred.every((c) => (c as { contype: string }).contype === 'f'));
+  source.constraints = (source.constraints as { definition: unknown }[]).filter((c) => !isAuthUsersFk(c));
   for (const key of Object.keys(source)) {
     assert.deepEqual(target[key], source[key], `baseline differs from the 0038 replay in: ${key}`);
   }
@@ -205,4 +221,18 @@ test('nothing in the baseline references schema public', async () => {
   const outside = await baseline.query(`
     SELECT c.relname FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace`);
   assert.deepEqual(outside.rows, [], 'no Permit relation may land in public');
+});
+
+test('0039 re-creates every deferred user reference against permit.users, unchanged', async () => {
+  const source = await snapshot(historical, 'public');
+  const expected = (source.constraints as { relname: string; conname: string; definition: string }[])
+    .filter(isAuthUsersFk)
+    .map((c) => ({ ...c, definition: c.definition.replace('REFERENCES auth.users(id)', 'REFERENCES permit.users(id)') }));
+  const after0039 = await snapshot(migrated, 'permit');
+  const actual = (after0039.constraints as { relname: string; conname: string; definition: string }[])
+    .filter((c) => c.definition.includes('REFERENCES permit.users(id)') && c.relname !== 'user_sessions');
+  assert.deepEqual(actual, expected);
+  const stillAuth = await migrated.query(`SELECT conname FROM pg_constraint WHERE contype = 'f' AND confrelid::regclass::text = 'auth.users'`)
+    .catch(() => ({ rows: [] }));
+  assert.deepEqual(stillAuth.rows, [], 'no Permit foreign key references auth.users');
 });

@@ -33,7 +33,6 @@
 \getenv migrator_password PERMIT_MIGRATOR_PASSWORD
 \getenv runtime_password PERMIT_RUNTIME_PASSWORD
 \getenv privileged_password PERMIT_PRIVILEGED_PASSWORD
-\getenv transitional_auth_fk PERMIT_TRANSITIONAL_AUTH_FK
 \if :{?migrator_password}
 \else
   \warn 'ERROR: PERMIT_MIGRATOR_PASSWORD is required.'
@@ -128,19 +127,6 @@ SELECT pg_get_userbyid(nspowner) = 'permit_migrator' AS schema_owner_ok
   DO $abort$ BEGIN RAISE EXCEPTION 'schema permit has the wrong owner'; END $abort$;
 \endif
 REVOKE ALL ON SCHEMA permit FROM PUBLIC;
-
--- TRANSITIONAL (until Permit-owned authentication replaces Supabase Auth):
--- the 0038 baseline still declares user foreign keys to auth.users, which
--- needs REFERENCES on that table. Opt-in only; the auth-removal phase
--- deletes this block and the foreign keys.
-\if :{?transitional_auth_fk}
-  SELECT :'transitional_auth_fk' = 'yes' AS grant_auth_fk
-  \gset
-  \if :grant_auth_fk
-    GRANT USAGE ON SCHEMA auth TO permit_migrator;
-    GRANT REFERENCES (id) ON auth.users TO permit_migrator;
-  \endif
-\endif
 
 -- Final invariant check (same as the pre-check, after creation).
 SELECT NOT EXISTS (

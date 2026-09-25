@@ -80,12 +80,6 @@ const personName = (name: string | null): string => name ?? 'a removed account';
 
 export function AuditLogsPage() {
   const { capabilities } = useCurrentUser();
-  const [page, setPage] = useState(1);
-  const resource = useApiResource<AuditLogsResponse>(
-    (signal) => listAuditLogs({ page, pageSize: 25 }, signal),
-    [page],
-  );
-
   if (!capabilities.canViewAdministrativeAudit) {
     return (
       <>
@@ -96,6 +90,16 @@ export function AuditLogsPage() {
       </>
     );
   }
+
+  return <AuthorizedAuditLogs />;
+}
+
+function AuthorizedAuditLogs() {
+  const [page, setPage] = useState(1);
+  const resource = useApiResource<AuditLogsResponse>(
+    (signal) => listAuditLogs({ page, pageSize: 25 }, signal),
+    [page],
+  );
 
   const entries = resource.data?.items ?? [];
   const totalPages = resource.data?.totalPages ?? 0;

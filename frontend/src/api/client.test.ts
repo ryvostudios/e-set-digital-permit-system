@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { apiDownload, apiRequest, setAccessTokenProvider, setSessionEndedHandler } from './client';
+import { apiDownload, apiRequest, setSessionEndedHandler } from './client';
 
 /**
  * The single network boundary.
@@ -20,12 +20,11 @@ function jsonResponse(status: number, body: unknown, headers: Record<string, str
 }
 
 beforeEach(() => {
-  setAccessTokenProvider(async () => 'token-abc');
   setSessionEndedHandler(() => {});
 });
 
 describe('request construction', () => {
-  it('calls the versioned API prefix and attaches the current bearer token', async () => {
+  it('calls the versioned API prefix and includes browser cookie credentials', async () => {
     const fetchMock = vi.fn(async () => jsonResponse(200, { ok: true }));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -33,30 +32,11 @@ describe('request construction', () => {
 
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toContain('/api/v1/auth/me');
-    expect((init.headers as Record<string, string>).authorization).toBe('Bearer token-abc');
-  });
-
-  it('asks for the token on EVERY request rather than caching one', async () => {
-    let issued = 0;
-    setAccessTokenProvider(async () => {
-      issued += 1;
-      return `token-${issued}`;
-    });
-    const fetchMock = vi.fn(async () => jsonResponse(200, {}));
-    vi.stubGlobal('fetch', fetchMock);
-
-    await apiRequest('/auth/me');
-    await apiRequest('/auth/me');
-
-    const headers = fetchMock.mock.calls.map(
-      (call) => ((call as unknown as [string, RequestInit])[1].headers as Record<string, string>).authorization,
-    );
-    expect(headers).toEqual(['Bearer token-1', 'Bearer token-2']);
-    expect(issued).toBe(2);
+    expect(init.credentials).toBe('include');
+    expect((init.headers as Record<string,string>).authorization).toBeUndefined();
   });
 
   it('sends no authorization header when there is no session', async () => {
-    setAccessTokenProvider(async () => null);
     const fetchMock = vi.fn(async () => jsonResponse(200, {}));
     vi.stubGlobal('fetch', fetchMock);
 

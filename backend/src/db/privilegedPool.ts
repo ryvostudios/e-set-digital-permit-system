@@ -79,20 +79,25 @@ export type PrivilegedGrantResult = { ok: true } | { ok: false; reason: 'unavail
  * service be tested without a database while still making it impossible
  * for that service to issue any other privileged statement.
  */
+export type PrivilegedProvisionResult =
+  | { ok: true; userId: string }
+  | { ok: false; reason: 'unavailable' | 'refused' | 'email_unavailable' };
+
 export interface PrivilegedAccessAdmin {
-  recordSiteManagerGrant(actorUserId: string, targetUserId: string): Promise<PrivilegedGrantResult>;
-  recordSiteManagerRevoke(actorUserId: string, targetUserId: string): Promise<PrivilegedGrantResult>;
+  provisionSiteManager(sessionId: string, email: string, passwordHash: string, displayName: string): Promise<PrivilegedProvisionResult>;
+  recordSiteManagerGrant(sessionId: string, targetUserId: string): Promise<PrivilegedGrantResult>;
+  recordSiteManagerRevoke(sessionId: string, targetUserId: string): Promise<PrivilegedGrantResult>;
 }
 
 async function record(
-  actorUserId: string,
+  sessionId: string,
   targetUserId: string,
   action: 'GRANTED' | 'REVOKED',
 ): Promise<PrivilegedGrantResult> {
   const pool = getPrivilegedPool();
   if (!pool) return { ok: false, reason: 'unavailable' };
   try {
-    await pool.query(RECORD_GRANT_SQL, [actorUserId, targetUserId, action]);
+    await pool.query(RECORD_GRANT_SQL, [sessionId, targetUserId, action]);
     return { ok: true };
   } catch (err) {
     // The function raises a descriptive exception for every refusal it
@@ -108,8 +113,26 @@ async function record(
 export function createPrivilegedAccessAdmin(): PrivilegedAccessAdmin | null {
   if (!isPrivilegedChannelConfigured()) return null;
   return {
-    recordSiteManagerGrant: (actorUserId, targetUserId) => record(actorUserId, targetUserId, 'GRANTED'),
-    recordSiteManagerRevoke: (actorUserId, targetUserId) => record(actorUserId, targetUserId, 'REVOKED'),
+    provisionSiteManager: async (sessionId, email, passwordHash, displayName) => {
+      const pool = getPrivilegedPool();
+      if (!pool) return { ok: false, reason: 'unavailable' };
+      try {
+        const result = await pool.query<{ user_id: string }>(
+          'SELECT permit.provision_site_manager($1, $2, $3, $4) AS user_id',
+          [sessionId, email, passwordHash, displayName],
+        );
+        return { ok: true, userId: result.rows[0]!.user_id };
+      } catch (err) {
+        const failure = err as { code?: string; constraint?: string };
+        if (failure.code === '23505' && failure.constraint === 'users_email_key') {
+          return { ok: false, reason: 'email_unavailable' };
+        }
+        console.error('Privileged provisioning failed:', toSafeDbErrorMessage(err));
+        return { ok: false, reason: 'refused' };
+      }
+    },
+    recordSiteManagerGrant: (sessionId, targetUserId) => record(sessionId, targetUserId, 'GRANTED'),
+    recordSiteManagerRevoke: (sessionId, targetUserId) => record(sessionId, targetUserId, 'REVOKED'),
   };
 }
 

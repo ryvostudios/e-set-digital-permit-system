@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PoolClient } from 'pg';
 import type { QueryFn } from '../../db/pool.js';
-import type { AccountAdmin, AccountsServiceDeps } from './service.js';
+import type { AccountsServiceDeps } from './service.js';
 import {
   changeEmployeeEmail,
   deleteEmployeeAccount,
@@ -10,6 +10,7 @@ import {
   transferEmployee,
   updateEmployeeDisplayName,
 } from './employees.js';
+import { verifyPassword } from '../auth/passwords.js';
 import { setUserCapabilityGrant } from './userPermissions.js';
 
 const CEO = '30000000-0000-4000-8000-000000000001';
@@ -71,31 +72,27 @@ class FakeEmployeeDb {
     return events[events.length - 1]?.action === 'GRANTED';
   }
 
-  admin: AccountAdmin = {
-    createUser: async () => ({ ok: false, reason: 'failed' }),
-    setPassword: async () => ({ ok: true }),
-    setEmailAndPassword: async (userId, email, password) => {
-      this.authCalls.push(`setEmailAndPassword:${userId}`);
-      if (this.failAuthEmail) return { ok: false, reason: this.failAuthEmail };
-      if ([...this.authUsers.entries()].some(([id, u]) => id !== userId && u.email === email)) {
-        return { ok: false, reason: 'email_unavailable' };
-      }
-      this.authUsers.set(userId, { email, password });
-      return { ok: true };
-    },
-    deleteUser: async (userId) => {
-      this.authCalls.push(`deleteUser:${userId}`);
-      if (this.failAuthDelete) return { ok: false };
-      this.authUsers.delete(userId);
-      return { ok: true };
-    },
-  };
-
   query: QueryFn = (async (text: string, params: unknown[] = []) => {
     const sql = String(text).trim();
     this.statements.push({ sql, params });
     const id = String(params[0]);
 
+    if (sql.startsWith('UPDATE users SET email = $2')) {
+      this.authCalls.push(`setEmailAndPassword:${id}`);
+      if (this.failAuthEmail === 'failed') throw new Error('synthetic credential failure');
+      if (this.failAuthEmail === 'email_unavailable' || [...this.authUsers.entries()].some(([other,u])=> other !== id && u.email === params[1])) {
+        throw Object.assign(new Error('synthetic conflict'), {code:'23505',constraint:'users_email_key'});
+      }
+      this.authUsers.set(id,{email:String(params[1]),password:String(params[2])});
+      return {rows:[{id}]};
+    }
+    if (sql.startsWith('UPDATE users SET email = NULL')) {
+      if (this.failAuthDelete) throw new Error('synthetic credential failure');
+      this.authUsers.delete(id);
+      this.authCalls.push(`deleteUser:${id}`);
+      return {rows:[]};
+    }
+    if (sql.startsWith('UPDATE user_sessions')) return {rows:[]};
     if (sql.startsWith('SELECT state, credential_version::text')) {
       const row = this.access.get(id);
       return { rows: row ? [{
@@ -161,7 +158,7 @@ class FakeEmployeeDb {
       }
       if (sql.includes('credential_version = credential_version + 1')) {
         row.must_change_password = true;
-        row.credential_reset_pending = true;
+        row.credential_reset_pending = !sql.includes('credential_reset_pending = FALSE');
         row.credential_version += 1;
         return { rows: [{ credential_version: String(row.credential_version) }] };
       }
@@ -213,11 +210,13 @@ class FakeEmployeeDb {
   deps(): AccountsServiceDeps {
     return {
       query: this.query,
-      admin: this.admin,
-      authAdminTimeoutMs: 8_000,
       withTransaction: async <T>(fn: (client: PoolClient) => Promise<T>): Promise<T> => {
         if (this.failTransaction) throw new Error('database failure inside the transaction');
-        return fn({ query: this.query } as unknown as PoolClient);
+        const access = structuredClone(this.access);
+        const users = structuredClone(this.authUsers);
+        const audit = structuredClone(this.audit);
+        try { return await fn({ query: this.query } as unknown as PoolClient); }
+        catch (err) { this.access=access; this.authUsers=users; this.audit=audit; throw err; }
       },
     };
   }
@@ -415,7 +414,8 @@ test('an email change moves the login, forces a password change, and audits no a
       { newEmail: 'new@example.com', temporaryPassword: FAKE_TEMPORARY_PASSWORD }, db.deps()),
     { outcome: 'ok' },
   );
-  assert.deepEqual(db.authUsers.get(EMPLOYEE), { email: 'new@example.com', password: FAKE_TEMPORARY_PASSWORD });
+  assert.equal(db.authUsers.get(EMPLOYEE)?.email, 'new@example.com');
+  assert.equal((await verifyPassword({hash:db.authUsers.get(EMPLOYEE)!.password,scheme:'argon2id'},FAKE_TEMPORARY_PASSWORD)).ok,true);
   assert.equal(db.access.get(EMPLOYEE)?.must_change_password, true);
   assert.equal(db.access.get(EMPLOYEE)?.credential_reset_pending, false, 'the operation completed');
   assert.equal(db.audit.at(-1)?.event_type, 'EMPLOYEE_EMAIL_CHANGED');
@@ -423,20 +423,21 @@ test('an email change moves the login, forces a password change, and audits no a
   // Neither the address nor the password may appear anywhere in SQL.
   const serialized = JSON.stringify(db.statements);
   assert.ok(!serialized.includes(FAKE_TEMPORARY_PASSWORD));
-  assert.ok(!serialized.includes('new@example.com'));
+  assert.ok(!JSON.stringify(db.audit).includes('new@example.com'));
+  assert.ok(!JSON.stringify(db.audit).includes('argon2id'));
 });
 
-test('the forced gate commits BEFORE Auth is touched, so a failure withdraws access rather than granting it', async () => {
+test('a credential failure rolls the email change back without a partial gate', async () => {
   const db = new FakeEmployeeDb();
   seedEmployee(db);
   db.failAuthEmail = 'failed';
   assert.deepEqual(
     await changeEmployeeEmail(MANAGER, EMPLOYEE,
       { newEmail: 'new@example.com', temporaryPassword: FAKE_TEMPORARY_PASSWORD }, db.deps()),
-    { outcome: 'failed', reason: 'auth_update_failed' },
+    { outcome: 'failed', reason: 'state_update_failed' },
   );
-  assert.equal(db.access.get(EMPLOYEE)?.must_change_password, true, 'the gate stays closed');
-  assert.equal(db.access.get(EMPLOYEE)?.credential_reset_pending, true, 'a retry is explicitly required');
+  assert.equal(db.access.get(EMPLOYEE)?.must_change_password, false, 'the unchanged account remains usable');
+  assert.equal(db.access.get(EMPLOYEE)?.credential_reset_pending, false, 'no partial reset survives');
   assert.equal(db.authUsers.get(EMPLOYEE)?.email, 'ayesha@example.com', 'the login did not move');
   assert.equal(db.audit.length, 0);
 });
@@ -503,15 +504,14 @@ test('deletion tombstones locally FIRST, then removes the Auth login, and destro
   assert.ok(db.statements.some((s) => s.sql.includes("state = 'DELETED'")));
 });
 
-test('a failed Auth removal leaves an account that can reach nothing, and says so', async () => {
+test('failed credential destruction rolls account deletion back', async () => {
   const db = new FakeEmployeeDb();
   seedEmployee(db);
   db.failAuthDelete = true;
   assert.deepEqual(await deleteEmployeeAccount(CEO, EMPLOYEE, db.deps()),
-    { outcome: 'failed', reason: 'auth_delete_failed' });
-  // Strictly LESS access than intended, never more.
-  assert.equal(db.access.get(EMPLOYEE)?.state, 'DELETED');
-  assert.equal(db.audit.at(-1)?.event_type, 'EMPLOYEE_ACCOUNT_DELETED');
+    { outcome: 'failed', reason: 'state_update_failed' });
+  assert.equal(db.access.get(EMPLOYEE)?.state, 'ACTIVE');
+  assert.equal(db.audit.length,0);
 });
 
 test('a deleted account is terminal - re-enabling it is refused', async () => {

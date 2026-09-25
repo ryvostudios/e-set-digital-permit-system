@@ -8,11 +8,12 @@
  * `provisionedDatabase()` is a fresh database prepared the way
  * database/roles/provision-permit-roles.sql prepares the shared one:
  * the three Permit roles and an empty `permit` schema owned by
- * permit_migrator. `auth.users` is a TEST STUB for the transitional
- * Supabase Auth foreign keys only; it is not part of the target
- * architecture.
+ * permit_migrator. Nothing in the Supabase-managed auth schema is needed:
+ * user identities live in permit.users (migration 0039).
  */
-import { readFile, readdir } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
@@ -20,6 +21,26 @@ import { migratePermitSchema, type MigrationDb, type MigrationOptions } from '..
 
 export const MIGRATIONS_DIR = fileURLToPath(new URL('../../../database/migrations/', import.meta.url));
 export const BASELINE_DIR = fileURLToPath(new URL('../../../database/baseline/', import.meta.url));
+
+let historicalOnly: Promise<string> | undefined;
+
+/**
+ * A migrations directory holding only the standalone history, 0001-0038,
+ * so a fixture can stop at the baseline (before the shared-database
+ * migrations that follow it).
+ */
+export function historicalMigrationsOnlyDir(): Promise<string> {
+  historicalOnly ??= (async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'permit-0038-'));
+    for (const name of await readdir(MIGRATIONS_DIR)) {
+      if (/^\d{4}_.+\.sql$/.test(name) && Number(name.slice(0, 4)) <= 38) {
+        await cp(path.join(MIGRATIONS_DIR, name), path.join(dir, name));
+      }
+    }
+    return dir;
+  })();
+  return historicalOnly;
+}
 
 export function asMigrationDb(db: PGlite): MigrationDb {
   return {
@@ -54,8 +75,6 @@ export async function provisionedDatabase(): Promise<PGlite> {
     CREATE ROLE anon NOLOGIN;
     CREATE ROLE authenticated NOLOGIN;
     CREATE ROLE service_role NOLOGIN BYPASSRLS;
-    CREATE SCHEMA auth;
-    CREATE TABLE auth.users (id uuid PRIMARY KEY, email text);
 
     CREATE ROLE permit_migrator LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
     CREATE ROLE permit_runtime LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT;
@@ -65,8 +84,6 @@ export async function provisionedDatabase(): Promise<PGlite> {
     ALTER ROLE permit_privileged SET search_path = pg_catalog, permit, pg_temp;
     CREATE SCHEMA permit AUTHORIZATION permit_migrator;
     REVOKE ALL ON SCHEMA permit FROM PUBLIC;
-    GRANT USAGE ON SCHEMA auth TO permit_migrator;
-    GRANT REFERENCES (id) ON auth.users TO permit_migrator;
   `);
   return db;
 }

@@ -52,6 +52,9 @@ PGOPTIONS="-c role=postgres" "${PSQL[@]}" -d $DB -c "CREATE TABLE public.schema_
 
 count=0
 for file in "$MIGRATIONS"/[0-9][0-9][0-9][0-9]_*.sql; do
+  # The baseline represents the standalone history, 0001-0038. Later
+  # migrations are shared-database migrations applied by the runner.
+  [[ $((10#$(basename "$file" | cut -c1-4))) -le 38 ]] || continue
   PGOPTIONS="-c role=postgres" "${PSQL[@]}" -d $DB -1 -f "$file" >/dev/null 2>&1 \
     || { echo "Replay failed at $(basename "$file")" >&2; exit 1; }
   count=$((count + 1))
@@ -66,6 +69,27 @@ DROP FUNCTION public.rls_auto_enable();
 -- installation records its history in permit.schema_migrations (runner).
 DROP TABLE public.schema_migrations;
 ALTER SCHEMA public RENAME TO permit;
+-- The 20 user foreign keys to Supabase's auth.users are NOT part of the
+-- installed baseline: migration 0039 re-creates each one, with the same
+-- name, columns and ON DELETE action, against permit.users. Deferring them
+-- means a shared-database installation never needs any privilege on the
+-- Supabase-managed auth schema. backend/src/db/permitBaseline.test.ts
+-- proves exactly these 20 are the difference.
+DO $defer$
+DECLARE
+  fk record;
+  deferred int := 0;
+BEGIN
+  FOR fk IN SELECT conrelid::regclass AS tbl, conname FROM pg_constraint
+             WHERE contype = 'f' AND confrelid = 'auth.users'::regclass LOOP
+    EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', fk.tbl, fk.conname);
+    deferred := deferred + 1;
+  END LOOP;
+  IF deferred <> 20 THEN
+    RAISE EXCEPTION 'expected 20 auth.users foreign keys to defer, found %', deferred;
+  END IF;
+END
+$defer$;
 SQL
 "${PSQL[@]}" -d $DB -f "$TOOLS/rewrite-namespace.sql"
 

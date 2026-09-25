@@ -2871,14 +2871,6 @@ CREATE TRIGGER workforce_profiles_require_active_organization_trigger BEFORE INS
 
 
 --
--- Name: account_audit_events account_audit_events_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.account_audit_events
-    ADD CONSTRAINT account_audit_events_actor_user_id_fkey FOREIGN KEY (actor_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: account_audit_events account_audit_events_capability_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
@@ -2919,30 +2911,6 @@ ALTER TABLE ONLY permit.account_audit_events
 
 
 --
--- Name: account_audit_events account_audit_events_target_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.account_audit_events
-    ADD CONSTRAINT account_audit_events_target_user_id_fkey FOREIGN KEY (target_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
--- Name: app_user_access app_user_access_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.app_user_access
-    ADD CONSTRAINT app_user_access_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
--- Name: initial_ceo_bootstrap initial_ceo_bootstrap_auth_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.initial_ceo_bootstrap
-    ADD CONSTRAINT initial_ceo_bootstrap_auth_user_id_fkey FOREIGN KEY (auth_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: issued_document_snapshot_integrity issued_document_snapshot_integrity_snapshot_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
@@ -2967,14 +2935,6 @@ ALTER TABLE ONLY permit.issued_document_snapshots
 
 
 --
--- Name: jsas jsas_created_by_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.jsas
-    ADD CONSTRAINT jsas_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: notifications notifications_permit_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
@@ -2983,27 +2943,11 @@ ALTER TABLE ONLY permit.notifications
 
 
 --
--- Name: notifications notifications_recipient_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.notifications
-    ADD CONSTRAINT notifications_recipient_user_id_fkey FOREIGN KEY (recipient_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: notifications notifications_source_event_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
 ALTER TABLE ONLY permit.notifications
     ADD CONSTRAINT notifications_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES permit.permit_lifecycle_events(id) ON DELETE RESTRICT;
-
-
---
--- Name: organization_audit_events organization_audit_events_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.organization_audit_events
-    ADD CONSTRAINT organization_audit_events_actor_user_id_fkey FOREIGN KEY (actor_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
 
 
 --
@@ -3047,14 +2991,6 @@ ALTER TABLE ONLY permit.permit_document_jobs
 
 
 --
--- Name: permit_lifecycle_events permit_lifecycle_events_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.permit_lifecycle_events
-    ADD CONSTRAINT permit_lifecycle_events_actor_user_id_fkey FOREIGN KEY (actor_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: permit_lifecycle_events permit_lifecycle_events_permit_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
@@ -3079,14 +3015,6 @@ ALTER TABLE ONLY permit.permit_signatures
 
 
 --
--- Name: permit_signatures permit_signatures_signer_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.permit_signatures
-    ADD CONSTRAINT permit_signatures_signer_user_id_fkey FOREIGN KEY (signer_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: permit_signatures permit_signatures_source_event_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
@@ -3103,38 +3031,6 @@ ALTER TABLE ONLY permit.permits
 
 
 --
--- Name: permits permits_cancelled_by_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.permits
-    ADD CONSTRAINT permits_cancelled_by_fkey FOREIGN KEY (cancelled_by) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
--- Name: permits permits_closed_by_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.permits
-    ADD CONSTRAINT permits_closed_by_fkey FOREIGN KEY (closed_by) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
--- Name: permits permits_created_by_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.permits
-    ADD CONSTRAINT permits_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
--- Name: permits permits_held_by_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.permits
-    ADD CONSTRAINT permits_held_by_fkey FOREIGN KEY (held_by) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: permits permits_jsa_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
@@ -3148,30 +3044,6 @@ ALTER TABLE ONLY permit.permits
 
 ALTER TABLE ONLY permit.permits
     ADD CONSTRAINT permits_previous_permit_id_fkey FOREIGN KEY (previous_permit_id) REFERENCES permit.permits(id) ON DELETE RESTRICT;
-
-
---
--- Name: privileged_access_events privileged_access_events_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.privileged_access_events
-    ADD CONSTRAINT privileged_access_events_actor_user_id_fkey FOREIGN KEY (actor_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
--- Name: privileged_access_events privileged_access_events_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.privileged_access_events
-    ADD CONSTRAINT privileged_access_events_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
--- Name: privileged_identities privileged_identities_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.privileged_identities
-    ADD CONSTRAINT privileged_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
 
 
 --
@@ -3215,14 +3087,6 @@ ALTER TABLE ONLY permit.teams
 
 
 --
--- Name: user_capability_grants user_capability_grants_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.user_capability_grants
-    ADD CONSTRAINT user_capability_grants_actor_user_id_fkey FOREIGN KEY (actor_user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: user_capability_grants user_capability_grants_capability_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
@@ -3231,27 +3095,11 @@ ALTER TABLE ONLY permit.user_capability_grants
 
 
 --
--- Name: user_capability_grants user_capability_grants_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.user_capability_grants
-    ADD CONSTRAINT user_capability_grants_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
-
-
---
 -- Name: user_team_positions user_team_positions_team_position_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
 --
 
 ALTER TABLE ONLY permit.user_team_positions
     ADD CONSTRAINT user_team_positions_team_position_id_fkey FOREIGN KEY (team_position_id) REFERENCES permit.team_positions(id) ON DELETE RESTRICT;
-
-
---
--- Name: user_team_positions user_team_positions_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.user_team_positions
-    ADD CONSTRAINT user_team_positions_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
 
 
 --
@@ -3284,14 +3132,6 @@ ALTER TABLE ONLY permit.workforce_profiles
 
 ALTER TABLE ONLY permit.workforce_profiles
     ADD CONSTRAINT workforce_profiles_primary_assignment_held_by_user FOREIGN KEY (user_id, primary_team_position_id) REFERENCES permit.user_team_positions(user_id, team_position_id) ON UPDATE RESTRICT ON DELETE RESTRICT;
-
-
---
--- Name: workforce_profiles workforce_profiles_user_id_fkey; Type: FK CONSTRAINT; Schema: permit; Owner: -
---
-
-ALTER TABLE ONLY permit.workforce_profiles
-    ADD CONSTRAINT workforce_profiles_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE RESTRICT;
 
 
 --

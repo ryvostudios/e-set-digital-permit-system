@@ -10,20 +10,6 @@ import type { Page } from '@playwright/test';
  * with no meaning to any server.
  */
 
-const FAKE_ACCESS_TOKEN = 'e2e-not-a-real-token';
-
-/** A Supabase-shaped persisted session, enough for the app to consider itself signed in. */
-function fakeSupabaseSession(userId: string, email: string) {
-  return {
-    access_token: FAKE_ACCESS_TOKEN,
-    token_type: 'bearer',
-    expires_in: 3600,
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
-    refresh_token: 'e2e-not-a-real-refresh-token',
-    user: { id: userId, email, aud: 'authenticated', role: 'authenticated' },
-  };
-}
-
 export interface StubbedIdentity {
   userId: string;
   email: string;
@@ -60,31 +46,6 @@ export async function signInAs(
   identity: StubbedIdentity,
   routes: Record<string, unknown> = {},
 ): Promise<void> {
-  const supabaseUrl = 'https://test-project.supabase.co';
-
-  // Seed the persisted session BEFORE the app boots.
-  await page.addInitScript(
-    ([url, session]) => {
-      const ref = String(url).replace('https://', '').split('.')[0];
-      // The client installs a remember-aware storage adapter: without this
-      // flag it reads sessionStorage, so a localStorage-only seed would be
-      // silently ignored. Set both so either path finds the session.
-      window.localStorage.setItem('eset.auth.remember', '1');
-      window.localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(session));
-      window.sessionStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(session));
-    },
-    [supabaseUrl, fakeSupabaseSession(identity.userId, identity.email)] as const,
-  );
-
-  // Supabase token/user endpoints - answered locally, never called out.
-  await page.route('**/auth/v1/**', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ ...fakeSupabaseSession(identity.userId, identity.email) }),
-    });
-  });
-
   // The application API.
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url());
