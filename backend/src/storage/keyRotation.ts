@@ -14,7 +14,8 @@ import type { DropboxTokens } from './dropbox.js';
  */
 export interface KeyUsage {
   activeVersion: string;
-  envelopesByVersion: Record<string, number>;
+  /** [version, envelope count] sorted by version; a Map internally, so no label is special (A02). */
+  envelopesByVersion: [string, number][];
   /** Referenced by an envelope but not configured: those envelopes cannot be opened. */
   missingVersions: string[];
   /** Configured previous versions no live envelope references. */
@@ -28,21 +29,23 @@ export async function storageKeyUsage(queryFn: QueryFn, keyring: StorageKeyring)
     SELECT credentials AS envelope FROM permit.storage_connections WHERE credentials IS NOT NULL
     UNION ALL
     SELECT verifier_envelope FROM permit.storage_oauth_states WHERE expires_at > now()`);
-  const envelopesByVersion: Record<string, number> = {};
+  const counts = new Map<string, number>();
   for (const { envelope } of rows) {
+    // An unreadable or malformed label is still a reference to *something*
+    // unopenable: it is reported missing and blocks nothing from removal
+    // only because no configured version can equal it.
     const version = envelopeKeyVersion(envelope) ?? '(unreadable)';
-    envelopesByVersion[version] = (envelopesByVersion[version] ?? 0) + 1;
+    counts.set(version, (counts.get(version) ?? 0) + 1);
   }
-  const referenced = Object.keys(envelopesByVersion);
   return {
     activeVersion: keyring.active.version,
-    envelopesByVersion,
-    missingVersions: referenced.filter((version) => !keyring.keys.has(version)).sort(),
+    envelopesByVersion: [...counts].sort(([a], [b]) => a.localeCompare(b)),
+    missingVersions: [...counts.keys()].filter((version) => !keyring.keys.has(version)).sort(),
     removableVersions: [...keyring.keys.keys()]
-      .filter((version) => version !== keyring.active.version && !referenced.includes(version)).sort(),
-    pendingReencryption: referenced
-      .filter((version) => version !== keyring.active.version && keyring.keys.has(version))
-      .reduce((sum, version) => sum + (envelopesByVersion[version] ?? 0), 0),
+      .filter((version) => version !== keyring.active.version && !counts.has(version)).sort(),
+    pendingReencryption: [...counts]
+      .filter(([version]) => version !== keyring.active.version && keyring.keys.has(version))
+      .reduce((sum, [, count]) => sum + count, 0),
   };
 }
 

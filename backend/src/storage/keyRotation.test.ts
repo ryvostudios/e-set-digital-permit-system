@@ -108,3 +108,25 @@ test('a credential under a removed key is reported missing and fails closed; a c
   assert.equal(await resealConnection(q, racing, tokens, setup.key), false);
   assert.equal(envelopeKeyVersion((await row(racing.id)).credentials!), '1');
 });
+
+test('A02: accounting is label-safe; a referenced key is never removable, an unused one is', async () => {
+  const key = (version: string, encoded: string) => ({ active: { version, key: Buffer.from(encoded, 'base64') },
+    keys: new Map([[version, Buffer.from(encoded, 'base64')]]) }) as ReturnType<typeof storageKeyring>;
+  // Envelopes carrying labels no configuration can produce (corrupt or crafted data).
+  for (const label of ['__proto__', 'constructor', 'prototype']) await connection(key(label, PREVIOUS_KEY_V1));
+  const ring = storageKeyring('2', RETIRED_KEY_V0, `1:${PREVIOUS_KEY_V1},7:${randomBytes32()}`);
+  await connection(storageKeyring('1', PREVIOUS_KEY_V1));        // key 1 is still referenced
+  const usage = await storageKeyUsage(q, ring);
+  const counted = new Map(usage.envelopesByVersion);
+  for (const label of ['__proto__', 'constructor', 'prototype']) {
+    assert.equal(counted.get(label), 1, `${label} is counted`);
+    assert.ok(usage.missingVersions.includes(label), `${label} is reported unopenable`);
+  }
+  assert.ok(!usage.removableVersions.includes('1'), 'a referenced previous version is never removable');
+  assert.ok(usage.removableVersions.includes('7'), 'a truly unused previous version is removable');
+  assert.equal(JSON.stringify(usage).includes(PREVIOUS_KEY_V1), false);
+});
+
+function randomBytes32(): string {
+  return Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) % 256)).toString('base64');
+}

@@ -340,4 +340,8 @@ test('envSchema validates read-only previous storage keys for rotation without e
     assert.ok(!JSON.stringify(result.error).includes(previous) && !JSON.stringify(result.error).includes(active));
   }
   assert.equal(withKeys(`1:${previous}`, null).success, false, 'previous keys need an active key');
+  for (const version of ['__proto__', 'constructor', '', ' 2']) {
+    assert.equal(envSchema.safeParse(baseEnv({ PERMIT_STORAGE_MASTER_KEY: active, PERMIT_STORAGE_KEY_VERSION: version })).success,
+      false, `active key version ${JSON.stringify(version)} refused`);
+  }
 });

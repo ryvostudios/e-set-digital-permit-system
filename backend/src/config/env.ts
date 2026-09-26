@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { z } from 'zod';
 import { findInvalidTrustProxyTokens, parseTrustProxyCidrs } from './trustProxy.js';
-import { storageKeyring } from '../storage/crypto.js';
+import { isValidKeyVersion, storageKeyring } from '../storage/crypto.js';
 
 const ALLOWED_DATABASE_URL_SCHEMES = new Set(['postgres:', 'postgresql:']);
 
@@ -128,7 +128,7 @@ export const envSchema = z
     // variable carries a token or client secret. The old S3 settings above
     // remain read-only for historical objects until offline migration.
     PERMIT_STORAGE_MASTER_KEY: z.string().regex(/^[A-Za-z0-9+/]{43}=$/).optional(),
-    PERMIT_STORAGE_KEY_VERSION: z.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default('1'),
+    PERMIT_STORAGE_KEY_VERSION: z.string().refine(isValidKeyVersion, 'Invalid Permit storage key version').default('1'),
     // Read-only keys kept during a rotation: "version:base64key[,…]". New
     // envelopes always use the active key above (docs/STORAGE_AND_CMS.md §2).
     PERMIT_STORAGE_PREVIOUS_KEYS: z.string().optional(),

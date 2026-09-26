@@ -61,3 +61,17 @@ test('keyring configuration is validated without echoing key material', () => {
   }
   assert.deepEqual([...storageKeyring('3', active, ` 1:${other} , 2:${key64()} `).keys.keys()], ['3', '1', '2']);
 });
+
+test('A02: key-version labels are validated; prototype names and malformed labels are refused everywhere', async () => {
+  const { isValidKeyVersion } = await import('./crypto.js');
+  for (const valid of ['1', 'v2', '2026-09', 'A_b-3', 'a'.repeat(32)]) assert.equal(isValidKeyVersion(valid), true, valid);
+  for (const invalid of ['__proto__', 'constructor', 'prototype', 'Constructor', 'hasOwnProperty', '', ' ', ' 1', '1 ',
+    '_x', '-x', 'a'.repeat(33), 'a.b', 'a/b', '1\n']) {
+    assert.equal(isValidKeyVersion(invalid), false, JSON.stringify(invalid));
+    assert.throws(() => storageKeyring(invalid, key64()), /Invalid Permit storage encryption configuration/);
+    // Entries of the previous-keys list are trimmed (list formatting), so test the label as it will be read.
+    if (!isValidKeyVersion(invalid.trim())) {
+      assert.throws(() => storageKeyring('2', key64(), `${invalid}:${key64()}`), /Invalid Permit storage encryption configuration/);
+    }
+  }
+});

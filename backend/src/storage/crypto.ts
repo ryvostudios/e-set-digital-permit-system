@@ -2,8 +2,18 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 
 export interface StorageKey { version: string; key: Buffer }
 
+/**
+ * A key-version label: 1-32 of [A-Za-z0-9_-], starting with a letter or
+ * digit, and never an Object.prototype name. Labels are also used as keys
+ * when accounting envelopes (A02: "__proto__" once hid a referenced key).
+ */
+const RESERVED_KEY_VERSIONS = new Set(['constructor', 'prototype', 'hasownproperty', 'tostring', 'valueof']);
+export function isValidKeyVersion(version: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(version) && !RESERVED_KEY_VERSIONS.has(version.toLowerCase());
+}
+
 export function storageKey(version: string, encoded: string): StorageKey {
-  if (!/^[A-Za-z0-9_-]{1,32}$/.test(version) || !/^[A-Za-z0-9+/]{43}=$/.test(encoded)) {
+  if (!isValidKeyVersion(version) || !/^[A-Za-z0-9+/]{43}=$/.test(encoded)) {
     throw new Error('Invalid Permit storage encryption configuration');
   }
   const key = Buffer.from(encoded, 'base64');
