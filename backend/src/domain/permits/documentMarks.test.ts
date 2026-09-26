@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
 import { test } from 'node:test';
 import { makeV2PdfTestSnapshot } from './documentLayoutV2.test.js';
 import { buildIssuedDocumentPages, type DocumentPage } from './documentLayout.js';
@@ -322,12 +324,62 @@ const LEGACY_HASHES: Record<PermitType, string> = {
   CONFINED_SPACE_ENTRY: '1d174f4a9547a5fa9b73b3dbc471ec70753896a3eb679c053ecb9e078c9246f2',
 };
 
+/*
+  WHAT THE HISTORICAL BYTES DEPEND ON (A06, pre-production audit).
+
+  PDFKit deflates every stream with the zlib linked into Node. Official
+  nodejs.org builds bundle Chromium's zlib, and every one tested - 24.2.0,
+  24.18.1, 24.19.0 (arm64 and x64) and 26.10.0 - produces the literal hashes
+  above. A Node built against a system zlib (Homebrew's node links macOS
+  libz 1.2.12) compresses the same content into different bytes. So the
+  literal hashes stay the strict check for the supported runtime (official
+  Node 24, `.node-version`), and this zlib-independent digest - every stream
+  inflated, `/Length` and xref offsets normalized - pins the CONTENT on any
+  runtime, telling "the renderer moved" apart from "this Node deflates
+  differently". These digests were captured from renders whose bytes
+  equal LEGACY_HASHES, so they describe the historical documents.
+*/
+const LEGACY_CONTENT: Record<PermitType, string> = {
+  WTG_WORK: '354be77858932f4fb23a7795a123ee833b1c96d2773cf45f85d014bd0daedd9b',
+  COLD_WORK: 'fcb0e68cb0a18f3ed8e47bfd635788c945163fc652d0659e57c6ff2530afa90a',
+  HOT_WORK: 'a1a4d8c6f372393f721594495d4bfbb2be4e951365d0c73e7c351ae67f35baa4',
+  CONFINED_SPACE_ENTRY: '864209876f3623f684be7c2ceca95e915c13ae5e053fd282f1a3c9e394d56573',
+};
+
+function contentDigest(pdf: Buffer): string {
+  const hash = createHash('sha256');
+  const text = pdf.toString('latin1');
+  const streams = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let at = 0;
+  for (let m = streams.exec(text); m; m = streams.exec(text)) {
+    const head = text.slice(at, m.index);
+    hash.update(head.replace(/\/Length \d+/g, '/Length N'), 'latin1');
+    const body = Buffer.from(m[1]!, 'latin1');
+    hash.update(head.slice(-300).includes('/FlateDecode') ? inflateSync(body) : body);
+    at = m.index + m[0].length;
+  }
+  hash.update(text.slice(at).replace(/xref[\s\S]*?trailer/, 'xref trailer').replace(/startxref\s+\d+/, 'startxref N'), 'latin1');
+  return hash.digest('hex');
+}
+
+test('PDFKIT_V1 and PDFKIT_V2 still produce their historical content, on any zlib', async () => {
+  for (const type of TYPES) {
+    for (const version of ['PDFKIT_V1', 'PDFKIT_V2'] as const) {
+      const pdf = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), version);
+      assert.equal(contentDigest(pdf), LEGACY_CONTENT[type], `${type}: ${version} content moved`);
+    }
+  }
+});
+
 test('PDFKIT_V1 and PDFKIT_V2 still produce their historical bytes, mark or no mark', async () => {
   for (const type of TYPES) {
     const v1 = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V1');
     const v2 = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V2');
-    assert.equal(computeFileHash(v1), LEGACY_HASHES[type], `${type}: V1 bytes moved`);
-    assert.equal(computeFileHash(v2), LEGACY_HASHES[type], `${type}: V2 bytes moved`);
+    const runtime = contentDigest(v1) === LEGACY_CONTENT[type]
+      ? ` - the content is unchanged, but this Node (zlib ${process.versions.zlib}) deflates differently from the supported runtime; run the official Node 24 build (.node-version)`
+      : '';
+    assert.equal(computeFileHash(v1), LEGACY_HASHES[type], `${type}: V1 bytes moved${runtime}`);
+    assert.equal(computeFileHash(v2), LEGACY_HASHES[type], `${type}: V2 bytes moved${runtime}`);
     // And they are still a different document from V3, which is the only
     // renderer this change touched.
     const v3 = await generateIssuedPermitPdf(makeV2PdfTestSnapshot(type), 'PDFKIT_V3');

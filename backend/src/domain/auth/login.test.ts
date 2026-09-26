@@ -5,7 +5,7 @@ import bcrypt from 'bcryptjs';
 import { installedDatabase } from '../../test/permitSchemaFixtures.js';
 import { authDatabaseDeps } from '../../test/authDatabase.js';
 import { login } from './login.js';
-import { hashPassword, verifyPassword } from './passwords.js';
+import { hashPassword, isSupportedLegacyHash, verifyPassword } from './passwords.js';
 import { findActiveSession, revokeSessionByToken, tokenDigest, SESSION_TTL_MS, REMEMBERED_SESSION_TTL_MS } from './sessions.js';
 import { planLegacyUserImport, importLegacyUsers } from './legacyImport.js';
 let db:PGlite;
@@ -83,4 +83,39 @@ test('synthetic legacy import preserves UUIDs, normalizes email, reconciles coun
  assert.equal(planLegacyUserImport([{...source[0]!,encryptedPassword:null}]).ok,false);
  assert.equal(planLegacyUserImport([{...source[0]!,encryptedPassword:null}],{allowAccountsWithoutPassword:true}).ok,true);
  await db.exec('SET ROLE permit_runtime');
+});
+test('A05: legacy bcrypt hashes are accepted at cost 10 only, so no imported row can make sign-in expensive',async()=>{
+ assert.equal(isSupportedLegacyHash(legacy),true);
+ for(const cost of ['04','09','11','12','16']) assert.equal(isSupportedLegacyHash(`$2b$${cost}$`+legacy.slice(7)),false);
+ const plan=planLegacyUserImport([{id:'10000000-0000-4000-8000-000000000098',email:'cost@example.invalid',encryptedPassword:'$2b$12$'+legacy.slice(7),createdAt:'2020-01-01T00:00:00Z'}]);
+ assert.equal(plan.ok,false);
+});
+test('A05: every refusal costs the same - unknown, disabled, unsupported scheme, wrong Argon2id and wrong legacy password',async()=>{
+ const argon=await hashPassword(PASSWORD);
+ const cases:Record<string,unknown>={
+  unknown:undefined,
+  disabled:{id:ID,password_hash:argon,password_scheme:'argon2id',state:'DISABLED'},
+  unsupported:{id:ID,password_hash:'$md5$synthetic',password_scheme:'md5',state:'ACTIVE'},
+  argon2_wrong:{id:ID,password_hash:argon,password_scheme:'argon2id',state:'ACTIVE'},
+  legacy_wrong:{id:ID,password_hash:legacy,password_scheme:'bcrypt_legacy',state:'ACTIVE'},
+ };
+ const deps=(row:unknown)=>({query:async()=>({rows:row?[row]:[]}),withTransaction:async()=>{throw new Error('a refusal never opens a transaction');}}) as never;
+ const samples:Record<string,number[]>=Object.fromEntries(Object.keys(cases).map((k)=>[k,[]]));
+ await login({email:'warm@example.invalid',password:'FAKE-wrong',remember:false},deps(undefined));
+ // The WORK each refusal does, as this process's CPU time (Argon2's worker
+ // threads included), so the other test files running in parallel cannot
+ // skew it the way they skew wall time. Round-robin so drift lands on every
+ // case alike; medians discard outliers.
+ for(let round=0;round<7;round+=1){
+  for(const [name,row] of Object.entries(cases)){
+   const start=process.cpuUsage();
+   assert.deepEqual(await login({email:'user@example.invalid',password:'FAKE-wrong',remember:false},deps(row)),{outcome:'invalid_credentials'});
+   const used=process.cpuUsage(start);
+   samples[name]!.push((used.user+used.system)/1000);
+  }
+ }
+ const median=(xs:number[])=>[...xs].sort((a,b)=>a-b)[xs.length>>1]!;
+ const medians=Object.values(samples).map(median);
+ // Before A05 a wrong legacy password took ~2.3x the others; equal work keeps them within scheduling noise.
+ assert.ok(Math.max(...medians)/Math.min(...medians)<1.3,JSON.stringify(Object.fromEntries(Object.entries(samples).map(([k,v])=>[k,Math.round(median(v))]))));
 });

@@ -211,6 +211,23 @@ production-hardening batch:
   closest equivalent. The limiter store is in-memory/per-instance - see
   `DEPLOYMENT.md` for the documented horizontal-scaling constraint this
   implies; it is not silently presented as more scalable than it is.
+- **Sign-in timing (A05, pre-production audit)**: `POST /auth/login`
+  (behind `loginLimiter`) does the same work for every attempt - one
+  Argon2id verification and one bcrypt comparison at cost 10, each
+  against the account's own hash or a dummy of random bytes
+  (`domain/auth/passwords.ts`). An unknown email, a disabled account, an
+  unsupported scheme and a wrong Argon2id or legacy password are not
+  distinguishable by response time: measured medians before were ~39 ms
+  for the others against ~89 ms for a wrong legacy password; after, all
+  ~127-128 ms (spread under 1 ms). Legacy bcrypt is accepted at
+  Supabase's cost 10 only, so an imported row cannot make an attempt
+  expensive; any other cost is refused by the import plan before cutover.
+  Residual variance: scheduling and GC noise, and the email lookup
+  (one indexed query, same for every case); a CORRECT password costs
+  more (session insert, and for a legacy hash the Argon2id re-hash), which
+  reveals nothing to someone who does not already hold it.
+  `login.test.ts` holds the spread of per-attempt CPU work (round-robin
+  medians, ~240-243 ms each) under 1.3x.
 - **Request-size limits**: JSON bodies are capped (`app.ts`); an
   oversized or malformed body gets a sanitized 413/400, never a stack
   trace or a generic 500.

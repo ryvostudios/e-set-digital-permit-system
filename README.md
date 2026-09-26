@@ -92,7 +92,12 @@ guessed.
 
 - **Frontend:** React + Vite + TypeScript, built as a PWA
 - **Backend:** Node.js 24.x + Express + TypeScript, REST API (`engines` is
-  authoritative; CI/deployment must use the same major)
+  authoritative; CI/deployment must use the same major). Use an official
+  nodejs.org build (`.node-version`; `NODE_VERSION=24` on Render): issued
+  PDFs are content-addressed, and a Node linked against a system zlib (e.g.
+  Homebrew's) deflates the same content into different bytes, so its
+  renders do not match already-pinned document hashes
+  (`documentMarks.test.ts`, A06).
 - **Database:** PostgreSQL via Supabase infrastructure
 - **Routing:** React Router
 - **Validation:** Zod (backend; the backend is the authority on every

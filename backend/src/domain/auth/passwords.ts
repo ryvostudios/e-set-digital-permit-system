@@ -33,21 +33,42 @@ const ARGON2_OPTIONS = {
 /** Supabase Auth's bcrypt output: `$2a$`/`$2b$`/`$2y$`, two-digit cost, 53-character salt+digest. */
 const BCRYPT_FORMAT = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/;
 
+/**
+ * Supabase Auth hashes at bcrypt's default cost, 10. It is the only cost
+ * accepted: every sign-in spends exactly one bcrypt comparison at this cost
+ * (see verifyPassword), so a legacy account at any other cost would be
+ * distinguishable by timing, and a higher one would let a single imported
+ * row make each attempt expensive. An imported hash at another cost is
+ * refused by the import plan (`unsupported_hash`) before cutover.
+ */
+export const LEGACY_BCRYPT_COST = 10;
+
 export function isSupportedLegacyHash(hash: string): boolean {
-  return BCRYPT_FORMAT.test(hash) && Number(hash.slice(4, 6)) >= 4 && Number(hash.slice(4, 6)) <= 16;
+  return BCRYPT_FORMAT.test(hash) && Number(hash.slice(4, 6)) === LEGACY_BCRYPT_COST;
 }
 
 export async function hashPassword(password: string): Promise<string> {
   return argon2.hash(password, ARGON2_OPTIONS);
 }
 
-// A real Argon2id hash of random bytes nobody knows, computed once. Verifying
-// against it when there is no usable credential keeps a missing, disabled or
-// credential-less account indistinguishable by response time.
-let dummyHash: Promise<string> | undefined;
-async function spendEquivalentTime(password: string): Promise<void> {
-  dummyHash ??= hashPassword(randomBytes(32).toString('hex'));
-  await argon2.verify(await dummyHash, password).catch(() => false);
+/*
+  EQUAL COST (A05, pre-production audit). Every verification spends exactly
+  one Argon2id verification and one bcrypt comparison at
+  LEGACY_BCRYPT_COST - against the stored hash where the account has one of
+  that scheme, otherwise against a dummy hash of random bytes nobody knows.
+  An unknown email, a disabled account, an unsupported scheme, a wrong
+  Argon2id password and a wrong legacy password therefore do the same work;
+  what remains is scheduling noise (docs/SECURITY.md). No sleeps: padding
+  with real work stays equal on any hardware.
+*/
+let dummies: Promise<{ argon2: string; bcrypt: string }> | undefined;
+function dummyHashes() {
+  dummies ??= (async () => {
+    const secret = randomBytes(32).toString('hex');
+    const [argon2Hash, bcryptHash] = await Promise.all([hashPassword(secret), bcrypt.hash(secret, LEGACY_BCRYPT_COST)]);
+    return { argon2: argon2Hash, bcrypt: bcryptHash };
+  })();
+  return dummies;
 }
 
 export interface VerificationResult {
@@ -57,21 +78,14 @@ export interface VerificationResult {
 }
 
 export async function verifyPassword(stored: StoredCredential | null, password: string): Promise<VerificationResult> {
-  const fail = { ok: false, needsUpgrade: false };
-  if (!stored?.hash || !stored.scheme) {
-    await spendEquivalentTime(password);
-    return fail;
-  }
-  if (stored.scheme === 'argon2id' && stored.hash.startsWith('$argon2id$')) {
-    const ok = await argon2.verify(stored.hash, password).catch(() => false);
-    return { ok, needsUpgrade: false };
-  }
-  if (stored.scheme === 'bcrypt_legacy' && isSupportedLegacyHash(stored.hash)) {
-    if (Buffer.byteLength(password, 'utf8') > 72) { await spendEquivalentTime(password); return fail; }
-    const ok = await bcrypt.compare(password, stored.hash).catch(() => false);
-    return { ok, needsUpgrade: ok };
-  }
-  // Unknown scheme or malformed hash: fail closed, same cost as a miss.
-  await spendEquivalentTime(password);
-  return fail;
+  const dummy = await dummyHashes();
+  const argon2Hash = stored?.scheme === 'argon2id' && stored.hash?.startsWith('$argon2id$') ? stored.hash : null;
+  const legacyHash = stored?.scheme === 'bcrypt_legacy' && stored.hash && isSupportedLegacyHash(stored.hash)
+    && Buffer.byteLength(password, 'utf8') <= 72 ? stored.hash : null;
+  const argon2Ok = await argon2.verify(argon2Hash ?? dummy.argon2, password).catch(() => false);
+  const legacyOk = await bcrypt.compare(password, legacyHash ?? dummy.bcrypt).catch(() => false);
+  if (argon2Hash) return { ok: argon2Ok, needsUpgrade: false };
+  if (legacyHash) return { ok: legacyOk, needsUpgrade: legacyOk };
+  // No usable credential, unknown scheme or malformed hash: fail closed.
+  return { ok: false, needsUpgrade: false };
 }

@@ -66,7 +66,7 @@ function ok(result: { outcome: string }, step: string): void {
 async function authUsers(db: FixtureDb): Promise<void> {
   await db.exec(`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS encrypted_password varchar(255),
     ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now()`);
-  const hashes = [await bcrypt.hash(FAKE_PASSWORD, 10), (await bcrypt.hash(FAKE_PASSWORD, 4)).replace(/^\$2b\$/, '$2a$')];
+  const hashes = [await bcrypt.hash(FAKE_PASSWORD, 10), (await bcrypt.hash(FAKE_PASSWORD, 10)).replace(/^\$2b\$/, '$2a$')];
   let i = 0;
   for (const person of Object.values(PEOPLE)) {
     await db.query(`INSERT INTO auth.users (id, email, encrypted_password, created_at)
