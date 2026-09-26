@@ -150,10 +150,64 @@ A retried or ambiguous upload therefore reuses the same path on the same
 connection and cannot orphan a file. Every read is checked against the
 registry's size and SHA-256 before a byte is used.
 
-**Disconnect protection:** a connection cannot be disconnected while it is
-the active one or while any registry row references it. The refusal is
-audited (`DISCONNECT_REFUSED`). A connection's dependent-file count is
-shown in the CMS.
+**Disconnect protection:**
+- A connection cannot be disconnected while it is the active one, or while
+  a `pending` or `ready` registry row references it. The refusal is audited
+  (`DISCONNECT_REFUSED`).
+- `cleanup_pending` rows (verified to have no remote object and no
+  reference, §6) do not count.
+- A connection's dependent-file count is shown in the CMS.
+
+### Connection lifecycle and concurrency (A01 remediation)
+
+States: `connected`, `error` (the last health check failed), `disconnecting`
+and `disconnected`. Every transition is a compare-and-swap on `revision` and
+`status`, committed in its own short transaction. Remote I/O never runs
+inside a transaction.
+
+**Health check**
+- It records `connected`/`error` only if the connection still has the
+  revision and a live status (`connected`/`error`) it started from.
+- A check overtaken by any lifecycle change is refused and writes nothing.
+  It never selects, revives or touches credentials.
+
+**Disconnect**
+1. **Claim.** Lock the selection and the connection, match the caller's
+   revision, refuse if selected or referenced, then set `disconnecting`
+   with a new revision. From here, no activation, selection, upload
+   reservation, health result or token refresh can use the connection.
+2. **Revoke** the token at Dropbox, with no lock held. A 401 means the
+   token is already unusable and counts as revoked.
+3. **Finalize.** The claimed revision and `disconnecting` must still hold,
+   the dependencies are re-checked, and only then are the credentials
+   cleared and the connection marked `disconnected`.
+
+**Recovery**
+- A `disconnecting` connection is never usable and keeps its credentials
+  until finalization.
+- `last_error_code` (shown in the CMS storage status) says why it stopped:
+  - `revoke_unconfirmed`: the revocation failed or its response was lost;
+  - `finalize_pending`: revoked, but the local finalization did not commit
+    or found a dependency, so it failed closed.
+- In both cases the CEO retries the disconnect, which re-claims under the
+  current revision; a token already revoked answers 401 and is accepted.
+  Alternatively the CEO reconnects the same account, which stores new
+  credentials under a new revision and cancels the disconnect. A stale
+  disconnect or health result can then no longer apply.
+
+**Enforced by the database**
+Migration 0043 enforces these rules in PostgreSQL, so they hold for every
+backend process:
+- A connection leaves `disconnecting`/`disconnected` only through a
+  revision-bumping reconnect.
+- Credentials are frozen while `disconnecting`.
+- It can start disconnecting, and have its credentials cleared, only when
+  unselected and unreferenced.
+- A registry reservation or selection is accepted only for a `connected`
+  connection with credentials, read `FOR SHARE`, which conflicts with the
+  disconnect claim's lock.
+
+The interleavings are tested in `backend/src/storage/lifecycle.test.ts`.
 
 ## 4. Issued documents and `storage.buckets`
 
@@ -317,6 +371,8 @@ reinstalled.
 | Bytes altered remotely | Integrity mismatch; never served, never rendered |
 | Logo unreadable at render time | Job attempt fails before pinning; retried with back-off |
 | Connection has files | Disconnect refused and audited |
+| Disconnect interrupted (revoke unknown, or finalization failed) | Connection stays `disconnecting` with credentials and `last_error_code`; never usable; retry the disconnect or reconnect |
+| Health check overtaken by a lifecycle change | Refused (409); nothing written |
 
 ## 10. Open items
 

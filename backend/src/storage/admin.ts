@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { query, withTransaction } from '../db/pool.js';
+import { query, withTransaction, type QueryFn } from '../db/pool.js';
 import { sealStorageSecret, sha256Bytes, unsealStorageSecret } from './crypto.js';
-import { dropboxAuthorizationUrl, dropboxExchangeTokens, DropboxProvider, type DropboxTokens } from './dropbox.js';
+import { dropboxAuthorizationUrl, DropboxError, dropboxExchangeTokens, DropboxProvider, type DropboxTokens } from './dropbox.js';
 import { connectionClient, dropboxSetup, storageAudit, type StorageConnectionRow } from './connections.js';
 import { storageKeyUsage } from './keyRotation.js';
 import { stripControlCharacters } from './text.js';
@@ -23,7 +23,7 @@ export async function storageStatus() {
     query<StorageConnectionRow>("SELECT * FROM permit.storage_connections WHERE provider='dropbox' ORDER BY created_at DESC"),
   ]);
   const counts=await query<{connection_id:string;count:string}>(
-    'SELECT connection_id,count(*)::text AS count FROM permit.file_registry WHERE connection_id IS NOT NULL GROUP BY connection_id');
+    "SELECT connection_id,count(*)::text AS count FROM permit.file_registry WHERE connection_id IS NOT NULL AND state IN ('pending','ready') GROUP BY connection_id");
   const countById=new Map(counts.rows.map(row=>[row.connection_id,Number(row.count)]));
   const usage=keys ? await storageKeyUsage(query,keys) : null;
   return {setupComplete:setup,selectionRevision:selection.rows[0]?.revision ?? 0,
@@ -33,6 +33,8 @@ export async function storageStatus() {
       missingVersions:usage.missingVersions},
     connections:connections.rows.map(row=>({id:row.id,status:row.status,accountLabel:row.account_label,
       revision:row.revision,dependentFiles:countById.get(row.id) ?? 0,
+      // Lifecycle recovery code only (e.g. 'revoke_unconfirmed', 'finalize_pending'); never provider detail.
+      lastErrorCode:row.last_error_code,
       healthVerified:Boolean(row.last_health_at && !row.last_error_code)}))};
 }
 
@@ -100,25 +102,35 @@ export async function completeDropboxConnect(actorId:string,sessionId:string,sta
   }
 }
 
+/**
+ * Health check, STALE-SAFE (A01). The result is written only if the
+ * connection still has the revision and a live status ('connected' or
+ * 'error') that the check started from: a check overtaken by a disconnect,
+ * a reconnect or any other lifecycle transition changes nothing and is
+ * refused. It never selects, never touches credentials, never revives.
+ */
 export async function testDropboxConnection(actorId:string,connectionId:string) {
   const row=(await query<StorageConnectionRow>("SELECT * FROM permit.storage_connections WHERE id=$1 AND provider='dropbox'",[connectionId])).rows[0];
-  if (!row?.credentials) throw new StorageConflict('Dropbox is not connected');
+  if (!row?.credentials || !['connected','error'].includes(row.status)) throw new StorageConflict('Dropbox is not connected');
+  let healthy=false;
   try {
     const client=await connectionClient(row,query,true);
-    if ((await client.account()).id!==row.account_id) throw new Error('Account mismatch');
-    await client.ensureRoot();
-    await withTransaction(async db=>{
-      await db.query("UPDATE permit.storage_connections SET status='connected',last_health_at=now(),last_error_code=NULL WHERE id=$1",[row.id]);
-      await storageAudit(db.query.bind(db),actorId,'CONNECTION_TESTED',row.id);
-    });
-    return {ok:true};
-  } catch {
-    await withTransaction(async db=>{
-      await db.query("UPDATE permit.storage_connections SET status='error',last_error_code='provider_unavailable' WHERE id=$1",[row.id]);
-      await storageAudit(db.query.bind(db),actorId,'CONNECTION_TEST_FAILED',row.id);
-    });
-    throw new StorageUnavailable('Dropbox connection test failed');
-  }
+    healthy=(await client.account()).id===row.account_id;
+    if (healthy) await client.ensureRoot();
+  } catch { healthy=false; }
+  const recorded=await withTransaction(async db=>{
+    const updated=healthy
+      ? await db.query(`UPDATE permit.storage_connections SET status='connected',last_health_at=now(),last_error_code=NULL
+          WHERE id=$1 AND revision=$2 AND status IN ('connected','error') RETURNING id`,[row.id,row.revision])
+      : await db.query(`UPDATE permit.storage_connections SET status='error',last_error_code='provider_unavailable'
+          WHERE id=$1 AND revision=$2 AND status IN ('connected','error') RETURNING id`,[row.id,row.revision]);
+    if (!updated.rows.length) return false;
+    await storageAudit(db.query.bind(db),actorId,healthy?'CONNECTION_TESTED':'CONNECTION_TEST_FAILED',row.id);
+    return true;
+  });
+  if (!recorded) throw new StorageConflict('Dropbox connection changed');
+  if (!healthy) throw new StorageUnavailable('Dropbox connection test failed');
+  return {ok:true};
 }
 
 export async function selectDropbox(actorId:string,revision:number,active:boolean,connectionId?:string) {
@@ -141,43 +153,111 @@ export async function selectDropbox(actorId:string,revision:number,active:boolea
   });
 }
 
+/**
+ * Disconnect, a multi-stage state machine (A01). No remote I/O happens
+ * inside a transaction, and every stage is a compare-and-swap on the
+ * revision the previous stage committed; the database triggers of migration
+ * 0043 enforce the same invariants for every process.
+ *
+ *   1. CLAIM (one transaction): lock the selection and the connection; the
+ *      caller's revision must match; refuse while the connection is selected
+ *      or any pending/ready file references it; set 'disconnecting' and a
+ *      new revision. From here no health check, token refresh, activation,
+ *      selection or upload reservation can use the connection.
+ *   2. REVOKE the token at Dropbox (no lock held). A 401 means the token is
+ *      already unusable (e.g. a previous attempt whose response was lost).
+ *   3. FINALIZE (one transaction): the claimed revision and 'disconnecting'
+ *      must still hold, dependencies are re-checked, and only then are the
+ *      credentials cleared and the connection marked 'disconnected'.
+ *
+ * Recovery. A connection that is 'disconnecting' is never usable and keeps
+ * its credentials until finalization. last_error_code records why it
+ * stopped: 'revoke_unconfirmed' (the revocation failed or its result is
+ * unknown) or 'finalize_pending' (revoked, but the local finalization did
+ * not commit, or found a dependency). Either way the CEO simply retries the
+ * disconnect (it re-claims with the current revision; an already revoked
+ * token is recognised), or reconnects the account, which replaces the
+ * credentials under a new revision and cancels the disconnect.
+ */
 export async function disconnectDropbox(actorId:string,connectionId:string,revision:number) {
-  let row:StorageConnectionRow;
-  try { row=await withTransaction(async db=>{
+  let claimed:StorageConnectionRow;
+  try { claimed=await withTransaction(async db=>{
     const selection=await db.query<{connection_id:string|null}>('SELECT connection_id FROM permit.storage_selection WHERE singleton=true FOR UPDATE');
     const current=await db.query<StorageConnectionRow>("SELECT * FROM permit.storage_connections WHERE id=$1 AND provider='dropbox' FOR UPDATE",[connectionId]);
     const connection=current.rows[0];
-    if (!connection || connection.revision!==revision || !connection.credentials) throw new StorageConflict('Dropbox connection changed');
-    const refs=await db.query('SELECT id FROM permit.file_registry WHERE connection_id=$1 LIMIT 1',[connection.id]);
-    if (selection.rows[0]?.connection_id===connection.id || refs.rows.length) {
+    if (!connection || connection.revision!==revision || !connection.credentials ||
+        !['connected','error','disconnecting'].includes(connection.status)) throw new StorageConflict('Dropbox connection changed');
+    if (selection.rows[0]?.connection_id===connection.id || await hasDependentFiles(db.query.bind(db),connection.id)) {
       throw new StorageConflict('Dropbox has active or referenced files');
     }
-    await db.query("UPDATE permit.storage_connections SET status='disconnecting',revision=revision+1 WHERE id=$1",[connection.id]);
-    return {...connection,revision:connection.revision+1};
+    const next=await db.query<StorageConnectionRow>(`UPDATE permit.storage_connections
+      SET status='disconnecting',revision=revision+1,last_error_code=NULL,updated_at=now(),updated_by=$2
+      WHERE id=$1 RETURNING *`,[connection.id,actorId]);
+    return next.rows[0]!;
   }); } catch (error) {
     if (error instanceof StorageConflict && error.message==='Dropbox has active or referenced files') {
       await storageAudit(query,actorId,'DISCONNECT_REFUSED',connectionId);
     }
     throw error;
   }
+
+  const stop=async(code:'revoke_unconfirmed'|'finalize_pending')=>{
+    await withTransaction(async db=>{
+      const updated=await db.query(`UPDATE permit.storage_connections SET last_error_code=$3,updated_at=now()
+        WHERE id=$1 AND revision=$2 AND status='disconnecting' RETURNING id`,[claimed.id,claimed.revision,code]);
+      if (updated.rows.length) await storageAudit(db.query.bind(db),actorId,'DISCONNECT_FAILED',claimed.id);
+    }).catch(()=>undefined);
+  };
+
   try {
-    const setup=setupRequired();
-    let tokens=unsealStorageSecret<DropboxTokens>(row.credentials!,`connection:${row.id}`,setup.key);
+    await revokeCredentials(claimed);
+  } catch {
+    await stop('revoke_unconfirmed');
+    throw new StorageUnavailable('Dropbox revocation could not be confirmed');
+  }
+
+  let finalized:'done'|'changed'|'dependent';
+  try {
+    finalized=await withTransaction(async db=>{
+      const selection=await db.query<{connection_id:string|null}>('SELECT connection_id FROM permit.storage_selection WHERE singleton=true FOR UPDATE');
+      const current=(await db.query<StorageConnectionRow>('SELECT * FROM permit.storage_connections WHERE id=$1 FOR UPDATE',[claimed.id])).rows[0];
+      if (!current || current.revision!==claimed.revision || current.status!=='disconnecting') return 'changed';
+      if (selection.rows[0]?.connection_id===claimed.id || await hasDependentFiles(db.query.bind(db),claimed.id)) return 'dependent';
+      await db.query(`UPDATE permit.storage_connections SET credentials=NULL,account_id=NULL,account_label=NULL,
+        status='disconnected',revision=revision+1,token_revision=token_revision+1,updated_at=now(),updated_by=$3,
+        last_health_at=NULL,last_error_code=NULL WHERE id=$1 AND revision=$2 AND status='disconnecting'`,[claimed.id,claimed.revision,actorId]);
+      await storageAudit(db.query.bind(db),actorId,'DISCONNECTED',claimed.id);
+      return 'done';
+    });
+  } catch {
+    await stop('finalize_pending');
+    throw new StorageUnavailable('Dropbox disconnect could not be finalized');
+  }
+  if (finalized==='changed') throw new StorageConflict('Dropbox connection changed');
+  if (finalized==='dependent') {
+    // Fail closed: keep the (already revoked) credentials and the connection; nothing is orphaned.
+    await stop('finalize_pending');
+    throw new StorageConflict('Dropbox has active or referenced files');
+  }
+  return {disconnected:true};
+}
+
+/** Registry rows that still hold, or may hold, a remote object ('cleanup_pending' is verified absent). */
+async function hasDependentFiles(queryFn:QueryFn,connectionId:string):Promise<boolean> {
+  const refs=await queryFn(`SELECT 1 FROM permit.file_registry WHERE connection_id=$1 AND state IN ('pending','ready') LIMIT 1`,[connectionId]);
+  return refs.rows.length>0;
+}
+
+/** Revokes the stored token at Dropbox. A 401 means it is already unusable: that is the goal, so it counts. */
+async function revokeCredentials(connection:StorageConnectionRow):Promise<void> {
+  const setup=setupRequired();
+  let tokens=unsealStorageSecret<DropboxTokens>(connection.credentials!,`connection:${connection.id}`,setup.key);
+  try {
     if (tokens.expiresAt<Date.now()+60_000) tokens=await dropboxExchangeTokens({clientId:setup.clientId,
       clientSecret:setup.clientSecret,redirectUri:setup.redirectUri,refreshToken:tokens.refreshToken});
     await new DropboxProvider(tokens.accessToken).revoke();
-    await withTransaction(async db=>{
-      await db.query(`UPDATE permit.storage_connections SET credentials=NULL,account_id=NULL,account_label=NULL,
-        status='disconnected',revision=revision+1,token_revision=token_revision+1,updated_at=now(),updated_by=$3,
-        last_health_at=NULL,last_error_code=NULL WHERE id=$1 AND revision=$2`,[row.id,row.revision,actorId]);
-      await storageAudit(db.query.bind(db),actorId,'DISCONNECTED',row.id);
-    });
-    return {disconnected:true};
-  } catch {
-    await withTransaction(async db=>{
-      await db.query("UPDATE permit.storage_connections SET status='error',last_error_code='revoke_unconfirmed' WHERE id=$1",[row.id]);
-      await storageAudit(db.query.bind(db),actorId,'DISCONNECT_FAILED',row.id);
-    });
-    throw new StorageUnavailable('Dropbox revocation could not be confirmed');
+  } catch (error) {
+    if (error instanceof DropboxError && error.status===401) return;
+    throw error;
   }
 }
