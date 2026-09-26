@@ -231,14 +231,18 @@ export const envSchema = z
     // damage, and their legitimate human use is a handful of calls per
     // window, not dozens.
     RATE_LIMIT_ACCOUNT_MAX: z.coerce.number().int().min(1).max(200).default(10),
-    // Sign-in attempts per client IP per window. Every attempt pays one
-    // password KDF, so this also bounds CPU spent on guessing.
+    // Sign-in BURST control per client address (middleware/rateLimit.ts
+    // `loginLimiter`): at most RATE_LIMIT_LOGIN_MAX UNSUCCESSFUL sign-ins
+    // per RATE_LIMIT_LOGIN_WINDOW_MS; successful sign-ins are not counted,
+    // so an office behind one NAT is not limited by its own logins. 10 per
+    // 60 s is about the admission capacity (1 running + 8 queued) in one
+    // burst, and a sustained 1 attempt per 6 s - a small fraction of even
+    // a 1 vCPU instance's KDF throughput - so no single source can keep
+    // the queue full, and nobody waits more than a minute. There is
+    // deliberately NO per-email/per-account limit: a failure counter keyed
+    // by an email lets anyone who knows the address lock its owner out.
     RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().min(1).max(200).default(10),
-    // Sign-in attempts per normalized email per window, from any number of
-    // IPs (distributed guessing against one account). Counts only failed
-    // attempts, and a window ends 15 minutes after the attack stops: no
-    // persistent lockout.
-    RATE_LIMIT_LOGIN_ACCOUNT_MAX: z.coerce.number().int().min(1).max(500).default(20),
+    RATE_LIMIT_LOGIN_WINDOW_MS: z.coerce.number().int().min(1_000).max(900_000).default(60_000),
     // Process-wide admission for password KDF work (A05-P1; see
     // domain/auth/authWork.ts). One Argon2id operation already fans out to
     // ~4 threads (p=4), so on a 0.5-1 vCPU instance a second concurrent KDF

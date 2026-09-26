@@ -218,13 +218,40 @@ production-hardening batch:
   comparison as one ~90 ms chunk on the main event loop, and every attempt
   paid for it, so 10 client IPs within their limits stalled every endpoint
   for ~11 s. Current design (`domain/auth/`):
-  - **Layered limits before any password work**: per client IP
-    (`RATE_LIMIT_LOGIN_MAX`, 10/window; `req.ip` honours
-    `TRUST_PROXY_CIDRS`, so spoofed `X-Forwarded-For` prefixes cannot mint
-    new buckets), then per normalized email (`RATE_LIMIT_LOGIN_ACCOUNT_MAX`,
-    20 failed sign-ins/window from any number of IPs; a digest is the key,
-    busy refusals do not count, and it lapses 15 minutes after an attack
-    stops - no persistent lockout).
+  - **No account lockout (A05 lockout fix)**: nothing keyed by an email
+    or account can refuse a sign-in before password verification. The
+    earlier per-email failure limit (20/15 min) let anyone who knew an
+    address - the CEO's included - keep its owner out indefinitely from
+    2-3 IPs, and aborted requests counted too. It is removed, not
+    replaced: there is no lockout, back-off, disable, forced reset or
+    CAPTCHA tied to an account, because every such state is something an
+    unauthenticated attacker can trigger against the real user. A correct
+    password always competes for a password-work slot; the only refusal it
+    can get is the transient, generic `429 sign_in_busy` when the process
+    is genuinely saturated. Guessing is bounded by the source controls
+    below, the edge limit, and the KDF cost; failed sign-ins are still
+    logged (`auth_failure`), without the email.
+  - **Short per-source burst limit** (`loginLimiter`): at most
+    `RATE_LIMIT_LOGIN_MAX` (10) unsuccessful sign-ins per client address
+    per `RATE_LIMIT_LOGIN_WINDOW_MS` (60 s). Successful sign-ins do not
+    count, so an office behind one NAT is not limited by its own logins;
+    a source over the limit waits at most the window (Retry-After <= 60 s),
+    never 15 minutes. 10 per minute is about the admission capacity
+    (1 running + 8 queued) in one burst and a sustained 1 attempt per 6 s,
+    so one source cannot keep the queue full. It is secondary: CPU safety
+    comes from admission control, not from this limit.
+  - **Client address** (`clientAddressKey`): `req.ip` honours
+    `TRUST_PROXY_CIDRS`, so forged leftmost `X-Forwarded-For` entries and
+    untrusted peers cannot choose the key. Only a value that parses as an
+    IP address is used; a non-IP forwarded value falls back to the
+    connecting peer's address, so malformed headers all share one bucket
+    instead of minting new ones. IPv6 keys are folded to the /56.
+  - **Edge limit and topology (required in production)**: an edge/WAF
+    rate limit on `/api/v1/auth/login` is the outer layer against
+    distributed floods, which no single process can absorb (the app's
+    guarantee is that such a flood costs sign-in a transient busy 429 and
+    nothing else). All of the above is per process: run ONE Permit API
+    instance (DEPLOYMENT.md).
   - **Admission control** (`authWork.ts`): every KDF in the process -
     sign-in, password change, resets, provisioning - takes a slot:
     `AUTH_KDF_CONCURRENCY` (default 1) running, `AUTH_KDF_QUEUE_MAX` (8)
@@ -255,12 +282,24 @@ production-hardening batch:
   unsupported-hash, wrong-Argon2id and wrong-bcrypt are all ~116 ms
   (p10-p90 ~115-155 ms); the best single-threshold classifier between
   any two states scores 55-59% on 60 samples each (the same noise band as
-  before), which with the per-IP and per-account limits is not a
+  before), which with the per-source limit and admission control is not a
   practical enumeration signal. It is not constant time: residual
   variance is scheduling and floor recalibration. Trade-off: during a
   distributed flood a legitimate sign-in may get the busy 429 (5 of 14
   succeeded in the 40/s test) and succeeds on retry; the rest of the API
   is unaffected. Legacy bcrypt is accepted at Supabase's cost 10 only.
+  Measured after the lockout fix (real app, real PostgreSQL, synthetic
+  accounts): 200 wrong passwords from 20 IPs, then the correct password
+  from a clean IP - 204 for an employee and for the CEO (before: 429 with
+  Retry-After ~900 s after only 20). A continuous attack of ~1,000
+  failures against the CEO over eight windows left the CEO signing in on
+  the first try 75/75; under a saturating 128/s flood aimed at the CEO,
+  24/33 first tries succeeded and every attempt succeeded within 4 tries
+  (the rest transient `sign_in_busy`). 40 users behind one NAT signing in
+  over two minutes, 1 in 5 with a typo first: 40/40, none rate limited.
+  Refusal medians across the six failure states stayed within ~124-139 ms
+  (best classifier vs unknown <= 62%, the same band as two states with
+  identical code paths).
 - **Request-size limits**: JSON bodies are capped (`app.ts`); an
   oversized or malformed body gets a sanitized 413/400, never a stack
   trace or a generic 500.

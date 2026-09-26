@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { test } from 'node:test';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
-import { buildRateLimiter } from './rateLimit.js';
+import { buildRateLimiter, clientAddressKey } from './rateLimit.js';
 import { requestId, requestLog } from './requestLog.js';
 
 /**
@@ -171,6 +171,28 @@ test('buildRateLimiter (keyed: true) falls back to IP-keying for a request with 
   try {
     assert.equal((await fetch(url)).status, 200);
     assert.equal((await fetch(url)).status, 429);
+  } finally {
+    await close();
+  }
+});
+
+test('clientAddressKey keys only on a real IP address: malformed or missing values fall back to the connecting peer', () => {
+  const key = (ip: string | undefined, peer: string | undefined = '192.0.2.1') => clientAddressKey({ ip, socket: { remoteAddress: peer } } as unknown as Request);
+  assert.equal(key('203.0.113.7'), '203.0.113.7');
+  assert.equal(key('2001:db8:0:1::1'), key('2001:db8:0:ff::2'), 'one IPv6 /56 is one key');
+  assert.notEqual(key('2001:db8:0:100::1'), key('2001:db8:0:1::1'));
+  for (const junk of ['not-an-ip', 'garbage-1', '', '1.2.3.4.5', '999.1.1.1', '<script>']) assert.equal(key(junk), '192.0.2.1', `"${junk}" falls back to the peer`);
+  assert.equal(key(undefined), '192.0.2.1');
+  assert.equal(key('junk', 'also-junk'), 'unknown');
+});
+
+test('without a trusted proxy, X-Forwarded-For cannot change the limiter identity', async () => {
+  const limiter = buildRateLimiter({ windowMs: 60_000, limit: 1 });
+  const { url, close } = await startServer(appWithLimiter(limiter));
+  try {
+    assert.equal((await fetch(url, { headers: { 'x-forwarded-for': '198.51.100.1' } })).status, 200);
+    assert.equal((await fetch(url, { headers: { 'x-forwarded-for': '198.51.100.2' } })).status, 429);
+    assert.equal((await fetch(url, { headers: { 'x-forwarded-for': 'garbage' } })).status, 429);
   } finally {
     await close();
   }

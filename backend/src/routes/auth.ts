@@ -13,7 +13,7 @@ import {
   setSessionCookie,
 } from '../domain/auth/sessions.js';
 import { requireAuthDuringPasswordChange } from '../middleware/auth.js';
-import { loginAccountLimiter, loginLimiter } from '../middleware/rateLimit.js';
+import { loginLimiter } from '../middleware/rateLimit.js';
 
 export const authRouter = Router();
 
@@ -36,12 +36,14 @@ const loginBodySchema = z
  * in the body; the frontend asks `/auth/me` who it is, as before. Every
  * credential failure is the same 401.
  *
- * Before any password work: the per-IP limit, then the per-account limit.
+ * Before any password work: only the short per-client-address burst
+ * limit. Nothing keyed by the email can refuse an attempt, so failures
+ * sent by someone else never stop a correct password from being verified.
  * When this process's password-work capacity is full (A05-P1), the attempt
  * is refused at once with a generic 429 - the same whatever the email - and
  * a client that disconnects while queued leaves the queue.
  */
-authRouter.post('/auth/login', loginLimiter, loginAccountLimiter, async (req: Request, res: Response) => {
+authRouter.post('/auth/login', loginLimiter, async (req: Request, res: Response) => {
   const body = loginBodySchema.safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: 'invalid_request', message: 'Invalid request' });

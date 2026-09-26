@@ -1,8 +1,7 @@
-import { createHash } from 'node:crypto';
+import { isIP } from 'node:net';
 import rateLimit, { ipKeyGenerator, type RateLimitRequestHandler } from 'express-rate-limit';
 import type { Request, Response } from 'express';
 import { env } from '../config/env.js';
-import { normalizeEmail } from '../domain/accounts/credentials.js';
 import { logEvent } from './requestLog.js';
 
 /**
@@ -39,26 +38,35 @@ function sendRateLimited(req: Request, res: Response): void {
 }
 
 /**
+ * The client address a limiter keys on. `req.ip` reflects
+ * `TRUST_PROXY_CIDRS` (Express's `trust proxy`, set in `app.ts`): behind a
+ * trusted proxy it is the forwarded entry the proxy appended, otherwise
+ * the socket peer. proxy-addr returns that forwarded entry verbatim, so a
+ * value that is not an IP address (`X-Forwarded-For: anything`) would
+ * otherwise become a fresh bucket per request. Only a real IP is used;
+ * anything else falls back to the connecting peer, so malformed values
+ * all share the peer's one bucket and never mint new identities.
+ *
+ * `ipKeyGenerator` (express-rate-limit's own helper) folds an IPv6
+ * address to its /56 subnet, so one client cannot obtain unlimited keys
+ * by varying the low bits of its own IPv6 address.
+ */
+export function clientAddressKey(req: Request): string {
+  const candidate = req.ip && isIP(req.ip) ? req.ip : req.socket?.remoteAddress;
+  return ipKeyGenerator(candidate && isIP(candidate) ? candidate : 'unknown');
+}
+
+/**
  * Keys by the authenticated actor's id when available (i.e. once
  * `requireAuth` has already run earlier in the chain), falling back to
- * the client IP otherwise. Using the authenticated identity - not just
- * IP - for anything mounted after `requireAuth` means a signed-in caller
- * can't reset their own budget by switching network/IP, and unrelated
- * users behind one shared IP (e.g. office NAT) don't share one bucket.
- * `req.ip` itself already reflects `TRUST_PROXY_CIDRS` (Express's `trust
- * proxy` setting, configured in `app.ts` from `config/trustProxy.ts`),
- * so this is safe behind a correctly configured reverse proxy and safe
- * (falls back to the direct socket address) when there is none.
+ * the client address otherwise. Using the authenticated identity - not
+ * just IP - for anything mounted after `requireAuth` means a signed-in
+ * caller can't reset their own budget by switching network/IP, and
+ * unrelated users behind one shared IP (e.g. office NAT) don't share one
+ * bucket.
  */
 function keyByAuthOrIp(req: Request): string {
-  // `ipKeyGenerator` (express-rate-limit's own helper) normalizes an
-  // IPv6 address to a fixed-size subnet before it's used as a key -
-  // required here because this is a custom keyGenerator; express-rate-limit
-  // validates at request time that a raw, unnormalized IPv6 address is
-  // never used directly as a key (a single client can otherwise obtain
-  // effectively unlimited distinct keys by varying the low bits of its
-  // own IPv6 address) and throws if it is.
-  return req.auth?.id ?? ipKeyGenerator(req.ip ?? 'unknown');
+  return req.auth?.id ?? clientAddressKey(req);
 }
 
 export interface RateLimiterOptions {
@@ -83,7 +91,7 @@ export function buildRateLimiter(options: RateLimiterOptions): RateLimitRequestH
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     handler: sendRateLimited,
-    ...(options.keyed ? { keyGenerator: keyByAuthOrIp } : {}),
+    keyGenerator: options.keyed ? keyByAuthOrIp : clientAddressKey,
   });
 }
 
@@ -114,6 +122,33 @@ export const mutationLimiter = buildRateLimiter({
 });
 
 /**
+ * Sign-in BURST control per client address (A05 lockout fix). Short-lived
+ * and secondary: the process-wide KDF admission controller
+ * (domain/auth/authWork.ts) is the resource boundary, and an edge/WAF
+ * limit on /auth/login is the outer layer against distributed floods.
+ *
+ * - Keyed ONLY by client address. There is deliberately no per-email or
+ *   per-account limiter: any failure counter keyed by an email lets
+ *   anyone who knows the address keep its owner from signing in. A
+ *   correct password must always be able to reach verification.
+ * - Counts only unsuccessful attempts (any non-2xx, and requests that
+ *   never finish). A successful sign-in costs nothing, so an office
+ *   behind one NAT is not limited by its own logins.
+ * - A short window (RATE_LIMIT_LOGIN_WINDOW_MS, default 60 s): a source
+ *   that exceeds it waits at most that long, never a 15-minute lockout.
+ */
+export const loginLimiter = rateLimit({
+  windowMs: env.RATE_LIMIT_LOGIN_WINDOW_MS,
+  limit: env.RATE_LIMIT_LOGIN_MAX,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: (_req: Request, res: Response) => res.statusCode < 400,
+  handler: sendRateLimited,
+  keyGenerator: clientAddressKey,
+});
+
+/**
  * Applied to every account-management endpoint (employee provisioning,
  * Site Manager password reset, self-service password change), in
  * addition to `globalApiLimiter`, after `requireAuth`/
@@ -127,43 +162,6 @@ export const mutationLimiter = buildRateLimiter({
  * exactly what password-reset abuse and scripted account creation look
  * like. Legitimate use is a few calls per window.
  */
-/**
- * Sign-in attempts, keyed by client IP (there is no authenticated actor
- * yet). Every attempt pays an Argon2id verification whether or not the
- * email exists, so this bounds both password guessing and the CPU an
- * anonymous client can spend.
- */
-export const loginLimiter = buildRateLimiter({
-  windowMs: env.RATE_LIMIT_WINDOW_MS,
-  limit: env.RATE_LIMIT_LOGIN_MAX,
-});
-
-/**
- * Sign-in attempts per ACCOUNT (A05-P1): keyed by a digest of the
- * normalized email, so guessing against one address from many IPs is
- * bounded too, and the email itself is never held as a key. Mounted before
- * any password work, and only failed sign-ins (401) count. It answers identically
- * whether or not the address exists. An attacker can make one address wait
- * for the rest of a window while the attack lasts, never beyond it.
- */
-export const loginAccountLimiter = rateLimit({
-  windowMs: env.RATE_LIMIT_WINDOW_MS,
-  limit: env.RATE_LIMIT_LOGIN_ACCOUNT_MAX,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  // Only a credential failure (401) counts: a busy/overload refusal or a
-  // malformed request says nothing about guessing against this account.
-  skipSuccessfulRequests: true,
-  requestWasSuccessful: (_req: Request, res: Response) => res.statusCode !== 401,
-  handler: sendRateLimited,
-  keyGenerator: (req: Request) => {
-    const email: unknown = (req.body as { email?: unknown } | undefined)?.email;
-    return typeof email === 'string' && email.length <= 320
-      ? `account:${createHash('sha256').update(normalizeEmail(email)).digest('hex')}`
-      : `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`;
-  },
-});
-
 export const accountLimiter = buildRateLimiter({
   windowMs: env.RATE_LIMIT_WINDOW_MS,
   limit: env.RATE_LIMIT_ACCOUNT_MAX,

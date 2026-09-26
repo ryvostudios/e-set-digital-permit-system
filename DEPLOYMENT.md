@@ -588,12 +588,44 @@ they depend on the actual deployment topology:
   origins: no path, query, fragment, or userinfo.
 - **Sign-in capacity** (`AUTH_KDF_CONCURRENCY`, default **1**). Password
   work is admitted per process (SECURITY.md, "Sign-in workload and
-  timing"). Keep 1 on a 0.5-1 vCPU instance; 2 only with at least 2 vCPU.
-  Do not raise `UV_THREADPOOL_SIZE` instead: it adds contention, not
-  capacity. Under a distributed sign-in flood, excess attempts get a
-  generic `429 sign_in_busy` (Retry-After 2) while every other endpoint
-  stays responsive; an edge rate limit (CDN/WAF) in front of
-  `/api/v1/auth/login` is the complementary control.
+  timing"); this admission control is the application's resource
+  boundary. Keep 1 on a 0.5-1 vCPU instance; 2 only with at least 2 vCPU
+  and a measured check that API p99 stays acceptable under a login flood
+  (Argon2id already uses ~4 threads per verification). Do not raise
+  `UV_THREADPOOL_SIZE` instead: it adds contention, not capacity. Under a
+  distributed sign-in flood, excess attempts get a generic
+  `429 sign_in_busy` (Retry-After 2) while every other endpoint stays
+  responsive.
+- **Sign-in source limit** (`RATE_LIMIT_LOGIN_MAX` 10,
+  `RATE_LIMIT_LOGIN_WINDOW_MS` 60000): a short per-client-address burst
+  limit on UNSUCCESSFUL sign-ins only. There is deliberately **no
+  per-account or per-email sign-in limit and no account lockout** - any
+  such state lets an attacker who knows an email lock its owner out. Do
+  not add one back. A `RATE_LIMIT_LOGIN_ACCOUNT_MAX` left in an old
+  environment is ignored.
+- **REQUIRED production preflight for sign-in** (do not go live without):
+  1. **Edge/WAF rate limit on `POST /api/v1/auth/login`** (CDN/WAF or
+     platform rule). The application guarantees that a distributed flood
+     costs sign-in only transient busy 429s and leaves the rest of the API
+     responsive; it cannot absorb an internet-scale flood by itself.
+  2. **Exactly ONE Permit API instance.** Sign-in admission and every
+     rate limit are process-local (see "Rate limiting - production
+     scaling constraint" below). Stay single-instance until a shared
+     limiter/admission layer exists or multi-instance authentication has
+     been separately reviewed.
+  3. **Trusted proxy verified on the real deployment**: confirm Render's
+     proxy hop count and that it appends the real client address as the
+     rightmost `X-Forwarded-For` entry; identify the actual peer
+     CIDR(s) the backend sees and set `TRUST_PROXY_CIDRS` to exactly
+     those (never guessed, never a wildcard); confirm the origin is not
+     reachable around the proxy ("Network topology requirement" below);
+     then verify through the deployed service that two different client
+     networks get different sign-in limiter identities and that a forged
+     `X-Forwarded-For` prefix does not change it.
+  4. **Measure on the real instance size**: Argon2id verification p95,
+     sign-in throughput at saturation, and `/health`/`/ready` p99 during a
+     login flood; set `AUTH_KDF_QUEUE_MAX` so that queue x p95 stays
+     within `AUTH_KDF_QUEUE_TIMEOUT_MS`.
 - **Rate limit tuning** (`RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_GLOBAL_MAX`,
   `RATE_LIMIT_MUTATION_MAX`, `RATE_LIMIT_MANAGER_ACCOUNT_MAX`,
   `RATE_LIMIT_MANAGER_READ_MAX`) - the shipped defaults are reasonable
@@ -816,7 +848,11 @@ as more than one instance behind a load balancer:
 
 This is safe and correct for the project's current actual scale (one
 deployable backend application - `ARCHITECTURE.md`'s "modular
-monolith"). It is explicitly **not** horizontally-scalable rate
+monolith"). The same holds for sign-in password-work admission
+(`domain/auth/authWork.ts`): N instances admit N times the KDF work and
+each sees only its share of a client's attempts. **The initial Permit
+production deployment is therefore ONE API instance** - a requirement,
+not a default. It is explicitly **not** horizontally-scalable rate
 limiting, and must not be presented or relied on as such. If/when this
 backend is horizontally scaled, replace the store with a shared one
 (e.g. a Redis-backed `express-rate-limit` store) before doing so -
