@@ -4,6 +4,7 @@ import { closePool, getPool, toSafeDbErrorMessage } from './db/pool.js';
 import { logEvent } from './middleware/requestLog.js';
 import { ACTIVE_FORM_GENERATION } from './domain/permits/formGeneration.js';
 import { startDocumentJobWorker, type DocumentJobWorker } from './workers/documentJobWorker.js';
+import { closePasswordWork, preparePasswordWork } from './domain/auth/passwords.js';
 
 // A safety net, not the primary shutdown mechanism: `server.close()`
 // normally completes as soon as in-flight requests finish and idle
@@ -50,6 +51,12 @@ async function main(): Promise<void> {
     Turn it off only where a separate worker service runs
     `npm run documents:process` instead.
   */
+  // Password-work warm-up (A05-P1): the dummy hash and one measurement of
+  // each verifier, so the failed-sign-in floor is calibrated before the
+  // first real attempt. Runs through the admission limiter; never blocks
+  // the port, and a failure only leaves calibration to real traffic.
+  preparePasswordWork().catch((err: unknown) => logEvent('password_work_prepare_failed', { detail: toSafeDbErrorMessage(err) }));
+
   let documentWorker: DocumentJobWorker | null = null;
   if (env.DOCUMENT_WORKER_ENABLED) {
     try {
@@ -76,6 +83,8 @@ async function main(): Promise<void> {
       genuinely stuck pass cannot hold a deploy open.
     */
     const workerStopped = documentWorker?.stop() ?? Promise.resolve();
+    // Queued sign-ins are refused now; running password work finishes.
+    void closePasswordWork();
 
     const forceExitTimer = setTimeout(() => {
       logEvent('shutdown_forced', { reason: 'timeout' });

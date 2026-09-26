@@ -4,6 +4,7 @@ import { resolveUserCapabilities } from '../authz/capabilities.js';
 import { resolvePrivilegedAccess } from '../authz/privilegedAccess.js';
 import { query, toSafeDbErrorMessage, withTransaction } from '../db/pool.js';
 import { resolvePrivilegedDisplayName } from '../domain/accounts/privilegedIdentities.js';
+import { AuthWorkBusy } from '../domain/auth/authWork.js';
 import { login } from '../domain/auth/login.js';
 import {
   clearSessionCookie,
@@ -12,7 +13,7 @@ import {
   setSessionCookie,
 } from '../domain/auth/sessions.js';
 import { requireAuthDuringPasswordChange } from '../middleware/auth.js';
-import { loginLimiter } from '../middleware/rateLimit.js';
+import { loginAccountLimiter, loginLimiter } from '../middleware/rateLimit.js';
 
 export const authRouter = Router();
 
@@ -34,15 +35,22 @@ const loginBodySchema = z
  * returned is the HttpOnly session cookie - no token, id or identity is
  * in the body; the frontend asks `/auth/me` who it is, as before. Every
  * credential failure is the same 401.
+ *
+ * Before any password work: the per-IP limit, then the per-account limit.
+ * When this process's password-work capacity is full (A05-P1), the attempt
+ * is refused at once with a generic 429 - the same whatever the email - and
+ * a client that disconnects while queued leaves the queue.
  */
-authRouter.post('/auth/login', loginLimiter, async (req: Request, res: Response) => {
+authRouter.post('/auth/login', loginLimiter, loginAccountLimiter, async (req: Request, res: Response) => {
   const body = loginBodySchema.safeParse(req.body);
   if (!body.success) {
     res.status(400).json({ error: 'invalid_request', message: 'Invalid request' });
     return;
   }
+  const abandoned = new AbortController();
+  res.on('close', () => { if (!res.writableFinished) abandoned.abort(); });
   try {
-    const result = await login(body.data, { query, withTransaction });
+    const result = await login(body.data, { query, withTransaction }, { signal: abandoned.signal });
     if (result.outcome !== 'ok') {
       res.status(401).json({ error: 'invalid_credentials', message: 'Email or password is incorrect.' });
       return;
@@ -50,6 +58,12 @@ authRouter.post('/auth/login', loginLimiter, async (req: Request, res: Response)
     setSessionCookie(res, result.token, body.data.remember);
     res.status(204).end();
   } catch (err) {
+    if (err instanceof AuthWorkBusy) {
+      if (abandoned.signal.aborted) return;
+      res.set('Retry-After', '2');
+      res.status(429).json({ error: 'sign_in_busy', message: 'Too many sign-in attempts right now. Please try again in a moment.' });
+      return;
+    }
     console.error('Sign-in failed:', toSafeDbErrorMessage(err));
     res.status(503).json({ error: 'sign_in_unavailable', message: 'Sign-in is unavailable right now. Please try again.' });
   }

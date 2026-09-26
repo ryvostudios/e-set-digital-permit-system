@@ -211,23 +211,56 @@ production-hardening batch:
   closest equivalent. The limiter store is in-memory/per-instance - see
   `DEPLOYMENT.md` for the documented horizontal-scaling constraint this
   implies; it is not silently presented as more scalable than it is.
-- **Sign-in timing (A05, pre-production audit)**: `POST /auth/login`
-  (behind `loginLimiter`) does the same work for every attempt - one
-  Argon2id verification and one bcrypt comparison at cost 10, each
-  against the account's own hash or a dummy of random bytes
-  (`domain/auth/passwords.ts`). An unknown email, a disabled account, an
-  unsupported scheme and a wrong Argon2id or legacy password are not
-  distinguishable by response time: measured medians before were ~39 ms
-  for the others against ~89 ms for a wrong legacy password; after, all
-  ~127-128 ms (spread under 1 ms). Legacy bcrypt is accepted at
-  Supabase's cost 10 only, so an imported row cannot make an attempt
-  expensive; any other cost is refused by the import plan before cutover.
-  Residual variance: scheduling and GC noise, and the email lookup
-  (one indexed query, same for every case); a CORRECT password costs
-  more (session insert, and for a legacy hash the Argon2id re-hash), which
-  reveals nothing to someone who does not already hold it.
-  `login.test.ts` holds the spread of per-attempt CPU work (round-robin
-  medians, ~240-243 ms each) under 1.3x.
+- **Sign-in workload and timing (A05 / A05-P1)**: `POST /auth/login`
+  must neither leak which accounts exist nor let anonymous traffic starve
+  the API. The first A05 fix (one Argon2id AND one bcrypt per attempt)
+  closed the timing oracle but was itself a DoS: bcryptjs runs each cost-10
+  comparison as one ~90 ms chunk on the main event loop, and every attempt
+  paid for it, so 10 client IPs within their limits stalled every endpoint
+  for ~11 s. Current design (`domain/auth/`):
+  - **Layered limits before any password work**: per client IP
+    (`RATE_LIMIT_LOGIN_MAX`, 10/window; `req.ip` honours
+    `TRUST_PROXY_CIDRS`, so spoofed `X-Forwarded-For` prefixes cannot mint
+    new buckets), then per normalized email (`RATE_LIMIT_LOGIN_ACCOUNT_MAX`,
+    20 failed sign-ins/window from any number of IPs; a digest is the key,
+    busy refusals do not count, and it lapses 15 minutes after an attack
+    stops - no persistent lockout).
+  - **Admission control** (`authWork.ts`): every KDF in the process -
+    sign-in, password change, resets, provisioning - takes a slot:
+    `AUTH_KDF_CONCURRENCY` (default 1) running, `AUTH_KDF_QUEUE_MAX` (8)
+    waiting at most `AUTH_KDF_QUEUE_TIMEOUT_MS` (2 s); beyond that an
+    immediate generic `429 sign_in_busy` with `Retry-After: 2`, identical
+    for every email. A client that disconnects leaves the queue; shutdown
+    refuses queued work.
+  - **Nothing on the event loop**: Argon2id runs on libuv's threadpool,
+    legacy bcrypt in a dedicated worker thread (`bcryptWorker.ts`).
+  - **One KDF per attempt**: the account's own verifier (also for a
+    disabled account, which still never gets a session), or one dummy
+    Argon2id verification when nothing is verifiable (unknown email, no
+    credential, unsupported/malformed hash). Only a CORRECT legacy password
+    adds the one-time Argon2id re-hash, in the same slot.
+  - **Timer floor instead of extra work**: a refusal returns no earlier
+    than 1.25 x the slower verifier's recent p95 on this machine (calibrated
+    at startup and from live traffic, capped by `AUTH_FAILURE_FLOOR_MAX_MS`);
+    the wait is an asynchronous timer holding no CPU, slot, connection or
+    transaction.
+
+  Measured on real PostgreSQL through the real app (A05-P1 remediation):
+  10 IPs x 10 invalid sign-ins took `/health` from 10.8 s to 25 ms max and
+  the event loop from 7.4 s to 12 ms max lag; a sustained 40/s flood from
+  rotating IPs kept `/health`, `/ready` and `/auth/me` under 10 ms p99
+  (before: 562-819 ms p99). CPU
+  per refused attempt fell from ~238 to ~150 ms (dummy Argon2id) or ~89 ms
+  (bcrypt). Refusal medians for unknown, disabled, no-credential,
+  unsupported-hash, wrong-Argon2id and wrong-bcrypt are all ~116 ms
+  (p10-p90 ~115-155 ms); the best single-threshold classifier between
+  any two states scores 55-59% on 60 samples each (the same noise band as
+  before), which with the per-IP and per-account limits is not a
+  practical enumeration signal. It is not constant time: residual
+  variance is scheduling and floor recalibration. Trade-off: during a
+  distributed flood a legitimate sign-in may get the busy 429 (5 of 14
+  succeeded in the 40/s test) and succeeds on retry; the rest of the API
+  is unaffected. Legacy bcrypt is accepted at Supabase's cost 10 only.
 - **Request-size limits**: JSON bodies are capped (`app.ts`); an
   oversized or malformed body gets a sanitized 413/400, never a stack
   trace or a generic 500.

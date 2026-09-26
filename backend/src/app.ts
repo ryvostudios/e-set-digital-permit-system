@@ -14,6 +14,7 @@ import { healthRouter } from './routes/health.js';
 import { notificationsRouter } from './routes/notifications.js';
 import { permitsRouter } from './routes/permits.js';
 import { brandingRouter, cmsRouter } from './routes/cms.js';
+import { AuthWorkBusy } from './domain/auth/authWork.js';
 
 // Request bodies here are small, structured JSON (permit/JSA form
 // fields) - there is no file upload or bulk-import endpoint in this
@@ -99,6 +100,13 @@ export function createApp(): Express {
     }
     if (res.headersSent) {
       next(err);
+      return;
+    }
+    // Password-work capacity exhausted (domain/auth/authWork.ts): any route
+    // that hashes or verifies a password answers a generic, retryable 429.
+    if (err instanceof AuthWorkBusy) {
+      res.set('Retry-After', '2');
+      res.status(429).json({ error: 'rate_limited', message: 'Too many requests. Please try again in a moment.' });
       return;
     }
     console.error(

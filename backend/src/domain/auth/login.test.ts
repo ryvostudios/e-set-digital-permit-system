@@ -5,7 +5,7 @@ import bcrypt from 'bcryptjs';
 import { installedDatabase } from '../../test/permitSchemaFixtures.js';
 import { authDatabaseDeps } from '../../test/authDatabase.js';
 import { login } from './login.js';
-import { hashPassword, isSupportedLegacyHash, verifyPassword } from './passwords.js';
+import { failureFloorMs, hashPassword, isSupportedLegacyHash, kdfCounters, preparePasswordWork, verifyPassword } from './passwords.js';
 import { findActiveSession, revokeSessionByToken, tokenDigest, SESSION_TTL_MS, REMEMBERED_SESSION_TTL_MS } from './sessions.js';
 import { planLegacyUserImport, importLegacyUsers } from './legacyImport.js';
 let db:PGlite;
@@ -90,32 +90,55 @@ test('A05: legacy bcrypt hashes are accepted at cost 10 only, so no imported row
  const plan=planLegacyUserImport([{id:'10000000-0000-4000-8000-000000000098',email:'cost@example.invalid',encryptedPassword:'$2b$12$'+legacy.slice(7),createdAt:'2020-01-01T00:00:00Z'}]);
  assert.equal(plan.ok,false);
 });
-test('A05: every refusal costs the same - unknown, disabled, unsupported scheme, wrong Argon2id and wrong legacy password',async()=>{
+const refusalCases=async()=>{
  const argon=await hashPassword(PASSWORD);
- const cases:Record<string,unknown>={
+ const bc12='$2b$12$'+legacy.slice(7);
+ return {
   unknown:undefined,
-  disabled:{id:ID,password_hash:argon,password_scheme:'argon2id',state:'DISABLED'},
-  unsupported:{id:ID,password_hash:'$md5$synthetic',password_scheme:'md5',state:'ACTIVE'},
+  disabled_argon2:{id:ID,password_hash:argon,password_scheme:'argon2id',state:'DISABLED'},
+  disabled_legacy:{id:ID,password_hash:legacy,password_scheme:'bcrypt_legacy',state:'DISABLED'},
+  no_credential:{id:ID,password_hash:null,password_scheme:null,state:'ACTIVE'},
+  unsupported_bcrypt_cost:{id:ID,password_hash:bc12,password_scheme:'bcrypt_legacy',state:'ACTIVE'},
   argon2_wrong:{id:ID,password_hash:argon,password_scheme:'argon2id',state:'ACTIVE'},
   legacy_wrong:{id:ID,password_hash:legacy,password_scheme:'bcrypt_legacy',state:'ACTIVE'},
+ } as Record<string,unknown>;
+};
+const stub=(row:unknown)=>({query:async()=>({rows:row?[row]:[]}),withTransaction:async()=>{throw new Error('a refusal never opens a transaction');}}) as never;
+test('A05-P1: every refusal performs exactly ONE password KDF, of the kind its account state calls for',async()=>{
+ await preparePasswordWork();
+ const expected:Record<string,Partial<typeof kdfCounters>>={
+  unknown:{argon2Verify:1}, disabled_argon2:{argon2Verify:1}, disabled_legacy:{bcryptCompare:1}, no_credential:{argon2Verify:1},
+  unsupported_bcrypt_cost:{argon2Verify:1}, argon2_wrong:{argon2Verify:1}, legacy_wrong:{bcryptCompare:1},
  };
- const deps=(row:unknown)=>({query:async()=>({rows:row?[row]:[]}),withTransaction:async()=>{throw new Error('a refusal never opens a transaction');}}) as never;
+ for(const [name,row] of Object.entries(await refusalCases())){
+  const before={...kdfCounters};
+  assert.deepEqual(await login({email:'user@example.invalid',password:name==='disabled_legacy'?PASSWORD:'FAKE-wrong',remember:false},stub(row)),{outcome:'invalid_credentials'});
+  const spent={argon2Verify:kdfCounters.argon2Verify-before.argon2Verify,argon2Hash:kdfCounters.argon2Hash-before.argon2Hash,bcryptCompare:kdfCounters.bcryptCompare-before.bcryptCompare};
+  assert.deepEqual(spent,{argon2Verify:0,argon2Hash:0,bcryptCompare:0,...expected[name]},name);
+ }
+ // A correct legacy password: its bcrypt check plus the one-time Argon2id re-hash, in one slot.
+ const before={...kdfCounters};
+ const verified=await verifyPassword({hash:legacy,scheme:'bcrypt_legacy'},PASSWORD,{rehashLegacy:true});
+ assert.equal(verified.ok,true); assert.match(verified.upgradedHash!,/^\$argon2id\$/);
+ assert.deepEqual([kdfCounters.bcryptCompare-before.bcryptCompare,kdfCounters.argon2Hash-before.argon2Hash,kdfCounters.argon2Verify-before.argon2Verify],[1,1,0]);
+});
+test('A05-P1: refusal timing - one verifier plus a measured timer floor; distributions overlap across account states',async()=>{
+ await preparePasswordWork();
+ const cases=await refusalCases();
  const samples:Record<string,number[]>=Object.fromEntries(Object.keys(cases).map((k)=>[k,[]]));
- await login({email:'warm@example.invalid',password:'FAKE-wrong',remember:false},deps(undefined));
- // The WORK each refusal does, as this process's CPU time (Argon2's worker
- // threads included), so the other test files running in parallel cannot
- // skew it the way they skew wall time. Round-robin so drift lands on every
- // case alike; medians discard outliers.
- for(let round=0;round<7;round+=1){
-  for(const [name,row] of Object.entries(cases)){
-   const start=process.cpuUsage();
-   assert.deepEqual(await login({email:'user@example.invalid',password:'FAKE-wrong',remember:false},deps(row)),{outcome:'invalid_credentials'});
-   const used=process.cpuUsage(start);
-   samples[name]!.push((used.user+used.system)/1000);
+ for(let round=0;round<9;round+=1){
+  for(const [name,row] of Object.entries(cases).sort(()=>Math.random()-0.5)){
+   const start=performance.now();
+   await login({email:'user@example.invalid',password:'FAKE-wrong',remember:false},stub(row));
+   samples[name]!.push(performance.now()-start);
   }
  }
- const median=(xs:number[])=>[...xs].sort((a,b)=>a-b)[xs.length>>1]!;
- const medians=Object.values(samples).map(median);
- // Before A05 a wrong legacy password took ~2.3x the others; equal work keeps them within scheduling noise.
- assert.ok(Math.max(...medians)/Math.min(...medians)<1.3,JSON.stringify(Object.fromEntries(Object.entries(samples).map(([k,v])=>[k,Math.round(median(v))]))));
+ const q=(xs:number[],p:number)=>[...xs].sort((a,b)=>a-b)[Math.min(xs.length-1,Math.floor(p*xs.length))]!;
+ const summary=Object.fromEntries(Object.entries(samples).map(([k,v])=>[k,[q(v,.1),q(v,.5),q(v,.9)].map(Math.round)]));
+ const floor=failureFloorMs();
+ assert.ok(floor>0,'the floor is calibrated from measured verifier times');
+ const medians=Object.values(samples).map((v)=>q(v,.5));
+ // Timer-based, so not identical: the claim is overlap, not equality -
+ // every state's median within 1.35x of every other's.
+ assert.ok(Math.max(...medians)/Math.min(...medians)<1.35,JSON.stringify({floor,summary}));
 });

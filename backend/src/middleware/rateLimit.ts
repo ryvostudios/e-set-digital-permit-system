@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import rateLimit, { ipKeyGenerator, type RateLimitRequestHandler } from 'express-rate-limit';
 import type { Request, Response } from 'express';
 import { env } from '../config/env.js';
+import { normalizeEmail } from '../domain/accounts/credentials.js';
 import { logEvent } from './requestLog.js';
 
 /**
@@ -134,6 +136,32 @@ export const mutationLimiter = buildRateLimiter({
 export const loginLimiter = buildRateLimiter({
   windowMs: env.RATE_LIMIT_WINDOW_MS,
   limit: env.RATE_LIMIT_LOGIN_MAX,
+});
+
+/**
+ * Sign-in attempts per ACCOUNT (A05-P1): keyed by a digest of the
+ * normalized email, so guessing against one address from many IPs is
+ * bounded too, and the email itself is never held as a key. Mounted before
+ * any password work, and only failed sign-ins (401) count. It answers identically
+ * whether or not the address exists. An attacker can make one address wait
+ * for the rest of a window while the attack lasts, never beyond it.
+ */
+export const loginAccountLimiter = rateLimit({
+  windowMs: env.RATE_LIMIT_WINDOW_MS,
+  limit: env.RATE_LIMIT_LOGIN_ACCOUNT_MAX,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  // Only a credential failure (401) counts: a busy/overload refusal or a
+  // malformed request says nothing about guessing against this account.
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: (_req: Request, res: Response) => res.statusCode !== 401,
+  handler: sendRateLimited,
+  keyGenerator: (req: Request) => {
+    const email: unknown = (req.body as { email?: unknown } | undefined)?.email;
+    return typeof email === 'string' && email.length <= 320
+      ? `account:${createHash('sha256').update(normalizeEmail(email)).digest('hex')}`
+      : `ip:${ipKeyGenerator(req.ip ?? 'unknown')}`;
+  },
 });
 
 export const accountLimiter = buildRateLimiter({

@@ -586,6 +586,14 @@ they depend on the actual deployment topology:
 - **`CORS_ALLOWED_ORIGINS`.** The real, exact frontend origin(s) - no
   wildcard. Production accepts only canonical credential-free HTTPS root
   origins: no path, query, fragment, or userinfo.
+- **Sign-in capacity** (`AUTH_KDF_CONCURRENCY`, default **1**). Password
+  work is admitted per process (SECURITY.md, "Sign-in workload and
+  timing"). Keep 1 on a 0.5-1 vCPU instance; 2 only with at least 2 vCPU.
+  Do not raise `UV_THREADPOOL_SIZE` instead: it adds contention, not
+  capacity. Under a distributed sign-in flood, excess attempts get a
+  generic `429 sign_in_busy` (Retry-After 2) while every other endpoint
+  stays responsive; an edge rate limit (CDN/WAF) in front of
+  `/api/v1/auth/login` is the complementary control.
 - **Rate limit tuning** (`RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_GLOBAL_MAX`,
   `RATE_LIMIT_MUTATION_MAX`, `RATE_LIMIT_MANAGER_ACCOUNT_MAX`,
   `RATE_LIMIT_MANAGER_READ_MAX`) - the shipped defaults are reasonable

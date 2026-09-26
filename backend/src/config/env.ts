@@ -231,9 +231,25 @@ export const envSchema = z
     // damage, and their legitimate human use is a handful of calls per
     // window, not dozens.
     RATE_LIMIT_ACCOUNT_MAX: z.coerce.number().int().min(1).max(200).default(10),
-    // Sign-in attempts per client IP per window. Every attempt pays an
-    // Argon2id verification, so this also bounds CPU spent on guessing.
+    // Sign-in attempts per client IP per window. Every attempt pays one
+    // password KDF, so this also bounds CPU spent on guessing.
     RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().min(1).max(200).default(10),
+    // Sign-in attempts per normalized email per window, from any number of
+    // IPs (distributed guessing against one account). Counts only failed
+    // attempts, and a window ends 15 minutes after the attack stops: no
+    // persistent lockout.
+    RATE_LIMIT_LOGIN_ACCOUNT_MAX: z.coerce.number().int().min(1).max(500).default(20),
+    // Process-wide admission for password KDF work (A05-P1; see
+    // domain/auth/authWork.ts). One Argon2id operation already fans out to
+    // ~4 threads (p=4), so on a 0.5-1 vCPU instance a second concurrent KDF
+    // adds contention, not throughput: 1 is the default; raise to 2 only on
+    // an instance with at least 2 vCPU. Bursts beyond it queue briefly, and
+    // anything beyond the queue is refused with 429.
+    AUTH_KDF_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(1),
+    AUTH_KDF_QUEUE_MAX: z.coerce.number().int().min(0).max(256).default(8),
+    AUTH_KDF_QUEUE_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(2_000),
+    // Upper bound on the failed-sign-in response floor (timer only, no CPU).
+    AUTH_FAILURE_FLOOR_MAX_MS: z.coerce.number().int().min(0).max(5_000).default(1_000),
     // Manager WRITES (employee provisioning, password reset, permission
     // and lifecycle changes). There is no business quota on employee
     // creation, so this has to clear a realistic onboarding batch with
