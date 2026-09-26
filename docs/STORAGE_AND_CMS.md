@@ -146,7 +146,11 @@ Once a row is `ready`, its identity can never change (enforced by a
 trigger).
 
 **Write order:** the registry row is reserved **before** any network call.
-A retried or ambiguous upload therefore reuses the same path on the same
+A retry reuses that row only when it carries the same identity:
+- **Issued PDFs:** the identity is the document job.
+- **CMS uploads:** the identity is the managed upload request (§6).
+
+Such a retry, or an ambiguous upload, then reuses the same path on the same
 connection and cannot orphan a file. Every read is checked against the
 registry's size and SHA-256 before a byte is used.
 
@@ -304,6 +308,44 @@ Sections:
 
 Every write is revision-checked (a stale editor gets a 409) and audited.
 
+### Upload retries (A03 remediation)
+
+**Request identity**
+- Each CMS image upload carries a `requestId` (a UUID) that the browser
+  generates for one logical upload.
+- The browser repeats it on every retry of that upload, replaces it when
+  the file or label changes, and drops it after success.
+- The server records it in `permit.managed_upload_requests` (migration
+  0044), scoped to the signed-in user and bound to a fingerprint of
+  purpose, label and the SHA-256 of the submitted bytes.
+
+**Retry behaviour**
+- **Same request:** it resumes its own registry reservation. The
+  reservation's identity is the request (`cms/<request row id>.png`), so it
+  keeps the same connection and remote path. An upload whose response was
+  lost is recognised by Dropbox's content hash, never re-created. A request
+  whose asset already exists returns that asset.
+- **Concurrent duplicates:** they serialize on the request row. There is
+  one reservation, one remote file and one asset.
+- **Same request id, different fingerprint:** refused with 409
+  (`upload_conflict`).
+- **Another user's identical request id:** a separate request. It can
+  neither see nor complete the first.
+- **Bound:** at most 10 unfinished requests per user within 24 hours;
+  beyond that, 409 until they are retried or settled.
+
+**Abandoned reservations**
+Run `npm run storage:reconcile-uploads [-- --execute]`: a dry run by
+default, operator-run or scheduled. For CMS reservations `pending` for more
+than an hour it checks the pinned path at Dropbox:
+- **The verified bytes are there:** marked `ready` (a later retry finishes
+  the asset).
+- **Nothing is there:** marked `cleanup_pending`. The reservation is
+  released (it no longer blocks a disconnect) and the request has expired.
+- **Anything else:** left `pending` and listed.
+
+Nothing remote is deleted.
+
 **Authorization:**
 - Allowed: the **CEO**, or a person the CEO explicitly granted
   `permit.cms.manage` (an individual grant, recorded in
@@ -367,7 +409,7 @@ reinstalled.
 | Situation | Behaviour |
 | --- | --- |
 | Dropbox not connected | CMS uploads return 503; public branding falls back; new PDF jobs stay pending and retry |
-| Upload interrupted | Registry reservation stays `pending` on a pinned path; the retry completes it |
+| Upload interrupted | Registry reservation stays `pending` on a pinned path; the same request (issued PDF job, or CMS `requestId`) completes it; an abandoned CMS reservation is settled by `storage:reconcile-uploads` |
 | Bytes altered remotely | Integrity mismatch; never served, never rendered |
 | Logo unreadable at render time | Job attempt fails before pinning; retried with back-off |
 | Connection has files | Disconnect refused and audited |

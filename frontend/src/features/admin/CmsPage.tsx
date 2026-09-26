@@ -59,6 +59,9 @@ function UploadForm({ purpose, onUploaded, hint }: { purpose: CmsAssetPurpose; o
   const [label, setLabel] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // One id per logical upload: kept across retries of the same file and
+  // label, replaced when either changes, cleared once the upload succeeds.
+  const [requestId, setRequestId] = useState<string | null>(null);
   const id = `cms-upload-${purpose.toLowerCase()}`;
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -66,8 +69,11 @@ function UploadForm({ purpose, onUploaded, hint }: { purpose: CmsAssetPurpose; o
     if (!file || !label.trim()) return;
     setBusy(true);
     setError(null);
+    const attempt = requestId ?? crypto.randomUUID();
+    setRequestId(attempt);
     try {
-      await uploadCmsAsset(file, purpose, label.trim());
+      await uploadCmsAsset(file, purpose, label.trim(), attempt);
+      setRequestId(null);
       setFile(null);
       setLabel('');
       onUploaded();
@@ -80,7 +86,7 @@ function UploadForm({ purpose, onUploaded, hint }: { purpose: CmsAssetPurpose; o
 
   return (
     <form onSubmit={submit} className="stack" aria-label={`Upload ${purpose}`}>
-      <Input label="Label" name={`${id}-label`} value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} />
+      <Input label="Label" name={`${id}-label`} value={label} maxLength={80} onChange={(event) => { setLabel(event.target.value); setRequestId(null); }} />
       <label className="field__label" htmlFor={id}>Image (PNG or JPEG, up to 2 MB)</label>
       <input
         id={id}
@@ -89,6 +95,7 @@ function UploadForm({ purpose, onUploaded, hint }: { purpose: CmsAssetPurpose; o
         onChange={(event) => {
           const selected = event.target.files?.[0] ?? null;
           setError(null);
+          setRequestId(null);
           if (selected && (!['image/png', 'image/jpeg'].includes(selected.type) || selected.size > MAX_UPLOAD_BYTES)) {
             setError('Choose a PNG or JPEG image of at most 2 MB.');
             setFile(null);

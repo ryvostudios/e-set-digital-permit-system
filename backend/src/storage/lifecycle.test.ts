@@ -1,5 +1,6 @@
 import '../test/syntheticDropboxEnv.js';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { after, before, test } from 'node:test';
 import { CEO, LifecycleWorld, tinyPng } from '../test/storageLifecycleHarness.js';
 import {
@@ -21,7 +22,7 @@ before(() => world.start());
 after(() => world.stop());
 
 const upload = (seed: string) => storeManagedFile({
-  category: 'BRANDING', bytes: tinyPng(seed), mimeType: 'image/png', originalFilename: `${seed}.png`, createdBy: CEO,
+  identity: randomUUID(), category: 'BRANDING', bytes: tinyPng(seed), mimeType: 'image/png', originalFilename: `${seed}.png`, createdBy: CEO,
 });
 
 test('A01 audit reproduction: a stale health success during disconnect must not revive, select or orphan', async () => {

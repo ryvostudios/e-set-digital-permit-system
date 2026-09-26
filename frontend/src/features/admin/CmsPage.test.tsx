@@ -110,3 +110,53 @@ describe('Dropbox integration (CEO)', () => {
     expect(assign).not.toHaveBeenCalled();
   });
 });
+
+describe('CMS uploads (A03 retry identity)', () => {
+  it('a retry of the same file and label reuses its request id; a changed label starts a new request', async () => {
+    const requestIds: string[] = [];
+    stubFetch({
+      'GET /api/v1/cms/state': { body: state() },
+      'POST /api/v1/cms/assets': (url) => {
+        requestIds.push(url.searchParams.get('requestId') ?? '');
+        return requestIds.length === 1
+          ? { status: 503, body: { error: 'storage_unavailable', message: 'Permit storage is not available.' } }
+          : { body: { id: '50000009-0000-4000-8000-000000000001' } };
+      },
+    });
+    const user = userEvent.setup();
+    renderAs(<CmsPage />, ceo());
+    await user.click(await screen.findByRole('tab', { name: 'PDF branding' }));
+    const form = screen.getByRole('form', { name: 'Upload PDF_LOGO' });
+    await user.type(within(form).getByLabelText('Label'), 'Logo');
+    await user.upload(within(form).getByLabelText(/Image \(PNG or JPEG/), new File(['png'], 'logo.png', { type: 'image/png' }));
+    await user.click(within(form).getByRole('button', { name: 'Upload' }));
+    await waitFor(() => expect(requestIds).toHaveLength(1));
+    await user.click(within(form).getByRole('button', { name: 'Upload' }));   // retry after the failure
+    await waitFor(() => expect(requestIds).toHaveLength(2));
+    expect(requestIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requestIds[1]).toBe(requestIds[0]);
+  });
+
+  it('changing the label makes it a new upload with a new request id', async () => {
+    const requestIds: string[] = [];
+    stubFetch({
+      'GET /api/v1/cms/state': { body: state() },
+      'POST /api/v1/cms/assets': (url) => {
+        requestIds.push(url.searchParams.get('requestId') ?? '');
+        return { status: 503, body: { error: 'storage_unavailable', message: 'Permit storage is not available.' } };
+      },
+    });
+    const user = userEvent.setup();
+    renderAs(<CmsPage />, ceo());
+    await user.click(await screen.findByRole('tab', { name: 'PDF branding' }));
+    const form = screen.getByRole('form', { name: 'Upload PDF_LOGO' });
+    await user.type(within(form).getByLabelText('Label'), 'Logo');
+    await user.upload(within(form).getByLabelText(/Image \(PNG or JPEG/), new File(['png'], 'logo.png', { type: 'image/png' }));
+    await user.click(within(form).getByRole('button', { name: 'Upload' }));
+    await waitFor(() => expect(requestIds).toHaveLength(1));
+    await user.type(within(form).getByLabelText('Label'), ' 2');
+    await user.click(within(form).getByRole('button', { name: 'Upload' }));
+    await waitFor(() => expect(requestIds).toHaveLength(2));
+    expect(requestIds[1]).not.toBe(requestIds[0]);
+  });
+});

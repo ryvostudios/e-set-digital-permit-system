@@ -6,7 +6,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireCmsManage } from '../middleware/requireCmsManage.js';
 import { requirePrivilegedAccess } from '../middleware/requirePrivilegedAccess.js';
 import {
-  CmsConflict, CmsInvalid, getCmsState, listCmsAudit, MAX_PDF_LOGOS, readAssetBytes, setPdfLogos, setWebArtwork,
+  CmsConflict, CmsInvalid, CmsUploadConflict, getCmsState, listCmsAudit, MAX_PDF_LOGOS, readAssetBytes, setPdfLogos, setWebArtwork,
   updateIdentity, uploadAsset,
 } from '../domain/cms/cms.js';
 import { ICON_SIZES, publicBranding, publicIcon, publicManifest, publicWebLogo, type IconSize } from '../domain/cms/publicBranding.js';
@@ -89,6 +89,7 @@ async function cmsRespond(res: Response, action: () => Promise<unknown>): Promis
     res.status(200).json(await action());
   } catch (error) {
     if (error instanceof CmsConflict) res.status(409).json({ error: 'conflict', message: 'The CMS changed. Reload and try again.' });
+    else if (error instanceof CmsUploadConflict) res.status(409).json({ error: 'upload_conflict', message: error.message });
     else if (error instanceof CmsInvalid) res.status(400).json({ error: 'invalid_request', message: error.message });
     else if (error instanceof ManagedStorageUnavailable) {
       res.status(503).json({ error: 'storage_unavailable', message: 'Permit storage is not available. Connect Dropbox first.' });
@@ -105,6 +106,8 @@ const identitySchema = z.object({
 const uploadQuery = z.object({
   purpose: z.enum(['PDF_LOGO', 'WEB_LOGO', 'PWA_ICON']),
   label: z.string().trim().min(1).max(80).refine((value) => !hasControlCharacters(value) && !/[<>]/.test(value)),
+  // One logical upload, repeated on every retry of it (A03); scoped to the signed-in user.
+  requestId: z.string().uuid(),
 }).strict();
 const pdfLogosSchema = z.object({
   revision,
@@ -134,6 +137,7 @@ cmsRouter.post('/cms/assets', requireAuth, cms,
     }
     await cmsRespond(res, () => uploadAsset(auth(req).id, {
       purpose: params.data.purpose, label: params.data.label, declaredMime, bytes: req.body as Buffer,
+      requestId: params.data.requestId,
     }));
   });
 

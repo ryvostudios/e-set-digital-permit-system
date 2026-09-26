@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 import type { PGlite } from '@electric-sql/pglite';
 import type { PoolClient } from 'pg';
@@ -98,14 +98,14 @@ test('uploads are decoded and re-encoded: spoofed, oversized, SVG and non-square
     [Buffer.alloc(3 * 1024 * 1024, 1), 'image/png', 'PDF_LOGO'],
   ];
   for (const [bytes, declaredMime, purpose] of bad) {
-    await assert.rejects(uploadAsset(ACTOR, { purpose, label: 'Bad', declaredMime, bytes }, pgDeps()), CmsInvalid);
+    await assert.rejects(uploadAsset(ACTOR, { requestId: randomUUID(), purpose, label: 'Bad', declaredMime, bytes }, pgDeps()), CmsInvalid);
   }
   const before = (await db.query<{ n: number }>('SELECT count(*)::int AS n FROM permit.file_registry')).rows[0]!.n;
   assert.equal(before, 0, 'a refused upload stores nothing');
 });
 
 test('a valid logo is stored in Permit Dropbox, registered, inactive, and audited without paths', async () => {
-  const { id } = await uploadAsset(ACTOR, { purpose: 'PDF_LOGO', label: 'E-SET', declaredMime: 'image/jpeg', bytes: await jpeg(800, 200) }, pgDeps());
+  const { id } = await uploadAsset(ACTOR, { requestId: randomUUID(), purpose: 'PDF_LOGO', label: 'E-SET', declaredMime: 'image/jpeg', bytes: await jpeg(800, 200) }, pgDeps());
   const asset = (await getCmsState(pgDeps())).assets.find((row) => row.id === id)!;
   assert.equal(asset.active, false);
   const file = (await db.query<{ category: string; state: string; mime_type: string; remote_path: string }>(
@@ -122,12 +122,12 @@ test('PDF logos: an ordered set of at most four, each a PDF logo, captured for i
   const ids: string[] = [];
   for (const [index, colour] of ['#111111', '#222222', '#333333', '#444444', '#555555'].entries()) {
     ids.push((await uploadAsset(ACTOR, {
-      purpose: 'PDF_LOGO', label: `Company ${index}`, declaredMime: 'image/png', bytes: await png(300 + index, 100, colour),
+      requestId: randomUUID(), purpose: 'PDF_LOGO', label: `Company ${index}`, declaredMime: 'image/png', bytes: await png(300 + index, 100, colour),
     }, pgDeps())).id);
   }
   const all = ids.map((assetId) => ({ assetId, documentTypes: ['ISSUED_PERMIT' as const] }));
   await assert.rejects(setPdfLogos(ACTOR, { revision: await revision(), logos: all }, pgDeps()), CmsInvalid);
-  const web = (await uploadAsset(ACTOR, { purpose: 'WEB_LOGO', label: 'Header', declaredMime: 'image/png', bytes: await png(400, 120) }, pgDeps())).id;
+  const web = (await uploadAsset(ACTOR, { requestId: randomUUID(), purpose: 'WEB_LOGO', label: 'Header', declaredMime: 'image/png', bytes: await png(400, 120) }, pgDeps())).id;
   await assert.rejects(setPdfLogos(ACTOR, { revision: await revision(), logos: [{ assetId: web, documentTypes: ['ISSUED_PERMIT'] }] }, pgDeps()), CmsInvalid);
 
   const chosen = [ids[3]!, ids[0]!, ids[2]!];
@@ -150,7 +150,7 @@ test('HISTORICAL BRANDING IS IMMUTABLE: a later CMS change never alters an issue
 
   // Tomorrow: new name, every logo withdrawn, a different one chosen.
   await updateIdentity(ACTOR, { revision: await revision(), organizationName: 'A Different Name', signInNotice: '' }, deps);
-  const replacement = (await uploadAsset(ACTOR, { purpose: 'PDF_LOGO', label: 'New', declaredMime: 'image/png', bytes: await png(500, 500, '#00ff00') }, deps)).id;
+  const replacement = (await uploadAsset(ACTOR, { requestId: randomUUID(), purpose: 'PDF_LOGO', label: 'New', declaredMime: 'image/png', bytes: await png(500, 500, '#00ff00') }, deps)).id;
   await setPdfLogos(ACTOR, { revision: await revision(), logos: [{ assetId: replacement, documentTypes: ['ISSUED_PERMIT'] }] }, deps);
 
   const afterChange = await generateIssuedPermitPdf(snapshot, 'PDFKIT_V4', await loadLogos());
@@ -165,8 +165,8 @@ test('website logo and PWA icon: purpose-checked selection, public versions, der
   assert.equal(await publicIcon(192, publicDeps), null, 'no selection: the bundled icon stays');
   assert.match(await publicManifest(publicDeps), /\/branding\/icon-192\.png/);
 
-  const icon = (await uploadAsset(ACTOR, { purpose: 'PWA_ICON', label: 'App icon', declaredMime: 'image/png', bytes: await png(1024, 1024) }, deps)).id;
-  const logo = (await uploadAsset(ACTOR, { purpose: 'WEB_LOGO', label: 'Header', declaredMime: 'image/png', bytes: await png(600, 160) }, deps)).id;
+  const icon = (await uploadAsset(ACTOR, { requestId: randomUUID(), purpose: 'PWA_ICON', label: 'App icon', declaredMime: 'image/png', bytes: await png(1024, 1024) }, deps)).id;
+  const logo = (await uploadAsset(ACTOR, { requestId: randomUUID(), purpose: 'WEB_LOGO', label: 'Header', declaredMime: 'image/png', bytes: await png(600, 160) }, deps)).id;
   await assert.rejects(setWebArtwork(ACTOR, { revision: await revision(), kind: 'WEB_LOGO', assetId: icon }, deps), CmsInvalid);
   await setWebArtwork(ACTOR, { revision: await revision(), kind: 'PWA_ICON', assetId: icon }, deps);
   await setWebArtwork(ACTOR, { revision: await revision(), kind: 'WEB_LOGO', assetId: logo }, deps);

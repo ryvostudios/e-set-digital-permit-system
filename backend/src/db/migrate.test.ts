@@ -41,10 +41,10 @@ async function refusal(work: Promise<unknown>): Promise<string> {
 test('first run installs the baseline, records 0001-0038 with their hashes, then applies 0039+; re-runs are no-ops', async () => {
   const db = await provisionedDatabase();
   try {
-    assert.equal(await runAsMigrator(db), 43);
+    assert.equal(await runAsMigrator(db), 44);
     const ledger = await db.query<{ name: string; applied_via: string; content_sha256: string }>(
       'SELECT name, applied_via, content_sha256 FROM permit.schema_migrations ORDER BY name');
-    assert.equal(ledger.rows.length, 43);
+    assert.equal(ledger.rows.length, 44);
     assert.equal(ledger.rows[0]!.name, '0001_revoke_execute_rls_auto_enable.sql');
     assert.equal(ledger.rows[37]!.name, '0038_organization_deactivation_runtime_privilege.sql');
     assert.equal(ledger.rows[38]!.name, '0039_permit_owned_authentication.sql');
@@ -52,6 +52,7 @@ test('first run installs the baseline, records 0001-0038 with their hashes, then
     assert.equal(ledger.rows[40]!.name, '0041_permit_cms.sql');
     assert.equal(ledger.rows[41]!.name, '0042_permit_renderer_v4.sql');
     assert.equal(ledger.rows[42]!.name, '0043_storage_connection_lifecycle_guards.sql');
+    assert.equal(ledger.rows[43]!.name, '0044_managed_upload_requests.sql');
     for (const [index, row] of ledger.rows.entries()) {
       assert.equal(row.applied_via, index < 38 ? 'baseline:permit_0038_v2' : 'migration');
       assert.equal(row.content_sha256, contentSha256(await readFile(path.join(MIGRATIONS_DIR, row.name), 'utf8')));

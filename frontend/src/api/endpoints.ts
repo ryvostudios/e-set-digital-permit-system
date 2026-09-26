@@ -575,8 +575,12 @@ export function updateCmsIdentity(body: { revision: number; organizationName: st
   return apiRequest('/cms/identity', { method: 'PATCH', body });
 }
 
-export function uploadCmsAsset(file: File, purpose: CmsAssetPurpose, label: string): Promise<{ id: string }> {
-  return apiUpload('/cms/assets', file, { purpose, label });
+/**
+ * `requestId` identifies ONE logical upload: send the same value when retrying
+ * it, a new one for a new upload (the server resumes, never duplicates).
+ */
+export function uploadCmsAsset(file: File, purpose: CmsAssetPurpose, label: string, requestId: string): Promise<{ id: string }> {
+  return apiUpload('/cms/assets', file, { purpose, label, requestId });
 }
 
 export function downloadCmsAsset(id: string): Promise<{ blob: Blob; fileName: string | null }> {

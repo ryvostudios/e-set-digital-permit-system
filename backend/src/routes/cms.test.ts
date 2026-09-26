@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { after, before, beforeEach, test } from 'node:test';
@@ -153,9 +154,13 @@ test('uploads accept only PNG/JPEG bodies within 2 MB, with a validated purpose 
     assert.equal((await post('purpose=PDF_LOGO&label=Logo', 'image/svg+xml', Buffer.from('<svg/>'))).status, 400);
     assert.equal((await post('purpose=SCRIPT&label=Logo', 'image/png', Buffer.from('x'))).status, 400);
     assert.equal((await post('purpose=PDF_LOGO&label=%3Cscript%3E', 'image/png', Buffer.from('x'))).status, 400);
-    assert.equal((await post('purpose=PDF_LOGO&label=Logo', 'image/png', Buffer.alloc(2 * 1024 * 1024 + 10))).status, 413);
+    const request = `requestId=${randomUUID()}`;
+    assert.equal((await post(`purpose=PDF_LOGO&label=Logo&${request}`, 'image/png', Buffer.alloc(2 * 1024 * 1024 + 10))).status, 413);
+    // The retry identity (A03) is required and must be a UUID.
+    assert.equal((await post('purpose=PDF_LOGO&label=Logo', 'image/png', Buffer.from('x'))).status, 400);
+    assert.equal((await post('purpose=PDF_LOGO&label=Logo&requestId=not-a-uuid', 'image/png', Buffer.from('x'))).status, 400);
     // A well-formed request whose bytes are not an image is refused by decoding.
-    assert.equal((await post('purpose=PDF_LOGO&label=Logo', 'image/png', Buffer.from('not really a png'))).status, 400);
+    assert.equal((await post(`purpose=PDF_LOGO&label=Logo&${request}`, 'image/png', Buffer.from('not really a png'))).status, 400);
   });
 });
 

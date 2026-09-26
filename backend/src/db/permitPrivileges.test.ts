@@ -43,6 +43,8 @@ const RUNTIME_TABLES: Record<string, string[]> = {
   issued_document_snapshot_integrity: ['INSERT', 'SELECT'],
   issued_document_snapshots: ['INSERT', 'SELECT'],
   jsas: ['INSERT', 'SELECT'],
+  // 0044 (A03): the upload request ledger; UPDATE is column-level (asset_id) below.
+  managed_upload_requests: ['INSERT', 'SELECT'],
   notifications: ['INSERT', 'SELECT'],
   organization_audit_events: ['INSERT'],
   permit_document_jobs: ['INSERT', 'SELECT'],
@@ -72,6 +74,7 @@ const RUNTIME_COLUMN_UPDATES: Record<string, string[]> = {
   cms_settings: ['organization_name', 'pwa_icon_asset_id', 'revision', 'sign_in_notice', 'updated_at', 'updated_by', 'web_logo_asset_id'],
   file_registry: ['remote_id', 'state'],
   jsas: ['form_payload', 'form_version', 'job_description', 'site_or_wtg'],
+  managed_upload_requests: ['asset_id'],
   notifications: ['read_at'],
   permit_document_jobs: ['attempt_count', 'claim_token', 'claimed_at', 'expected_file_hash', 'file_hash',
     'generated_at', 'last_error', 'next_attempt_at', 'renderer_version', 'status', 'storage_path', 'updated_at'],
